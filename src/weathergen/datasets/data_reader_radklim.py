@@ -1,201 +1,296 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
 import json
-import os
 from pathlib import Path
-from typing import Union, override
+from typing import Any, Union, override
 
+import fsspec
 import numpy as np
-import pandas as pd
 import xarray as xr
-from icechunk import local_filesystem_storage, Repository
+import zarr
+from numpy.typing import NDArray
 
-# Import the base classes from your new architecture
 from weathergen.datasets.data_reader_base import (
+    DType,
     DataReaderTimestep,
     ReaderData,
-    TimeWindowHandler,
     TIndex,
-    DType,
+    TimeWindowHandler,
     check_reader_data,
 )
 
+class RadklimKerchunkReader(DataReaderTimestep):
+    '''
+    Construct data reader for RADKLIM radar-rain product
 
-class RadklimDataReader(DataReaderTimestep):
-    """
-    RADKLIM data reader adapted to the new base class architecture.
-    Lazily loads Radklim data via an Icechunk repository.
-    """
+    The class implements a time-window-based `get` API for training and evaluation.
+
+    Notes
+    -----
+    * Assumes regular hourly time steps. Irregularities will raise a `ValueError`.
+    * Only the 'reflectivity rain-rate' (RR) channel is available.
+    * Geo-information fields are not provided and are returned as empty arrays.
+    '''
+    # abstract‑interface metadata ------------------------------------------------
+    source_channels: list[str] = ["RR"]
+    target_channels: list[str] = ["RR"]
+    geoinfo_channels: list[str] = []
+
+    source_idx: list[int] = [0]
+    target_idx: list[int] = [0]
+    geoinfo_idx: list[int] = []
+
+    # ---------------------------------------------------------------------
+    # constructor ----------------------------------------------------------
+    # ---------------------------------------------------------------------
 
     def __init__(
         self,
         tw_handler: TimeWindowHandler,
-        icechunk_repo_path: Union[str, Path],
-        normalization_path: Union[str, Path],
-        branch_name: str = 'main',
-    ):
-        """
-        Parameters
-        ----------
-        tw_handler : TimeWindowHandler
-            Time window handler from the base architecture
-        icechunk_repo_path : Union[str, Path]
-            Path to the Icechunk repository
-        normalization_path : Union[str, Path]
-            Path to normalization statistics JSON file
-        branch_name : str
-            Branch name in the Icechunk repository
-        """
-        
-        # Open dataset to check compatibility with requested parameters
-        self.ds = self._open_icechunk_dataset(icechunk_repo_path, branch_name)
-        
-        # Get dataset timing information
-        times_all = self.ds["time"].values
-        data_start_time = times_all[0].astype('datetime64[ns]')
-        data_end_time = times_all[-1].astype('datetime64[ns]')
-        
-        # Determine period from time differences
-        dt_arr = np.unique(np.diff(times_all.astype("datetime64[s]")))
-        if dt_arr.size != 1:
-            raise ValueError("Inconsistent time steps in the dataset.")
-        dt_seconds = int(dt_arr[0].item().total_seconds())
-        period = np.timedelta64(dt_seconds, 's')
-        
-        # Check if there's overlap with the time window
-        if tw_handler.t_start >= data_end_time or tw_handler.t_end <= data_start_time:
-            super().__init__(tw_handler)
+        reference_json: Union[str, Path],
+        normalization_json: Union[str, Path],
+        *,
+        chunks: dict[str, Any] | None = None,
+    ) -> None:
+        # flag must be defined *before* any early‑exit so that it always exists
+        self._empty: bool = False
+
+        # ---------------------------------------------------------------
+        # 1. load normalisation statistics -----------------------------
+        # ---------------------------------------------------------------
+        norm_path = Path(normalization_json)
+        if not norm_path.exists():
+            raise FileNotFoundError(f"normalisation JSON not found: {norm_path}")
+
+        stats = json.loads(norm_path.read_text())
+        self.mean = np.asarray(stats.get("mean", []), dtype=np.float32)
+        self.stdev = np.asarray(stats.get("std", []), dtype=np.float32)
+        self.mean_geoinfo = np.asarray(stats.get("mean_geoinfo", []), dtype=np.float32)
+        self.stdev_geoinfo = np.asarray(
+            stats.get("std_geoinfo", []), dtype=np.float32
+        )
+
+        if len(self.mean) != len(self.source_channels):
+            raise ValueError(
+                "normalisation stats length does not match number of variables"
+            )
+
+        # ---------------------------------------------------------------
+        # 2. open the Kerchunk reference & inspect global time axis -----
+        # ---------------------------------------------------------------
+        ref_path = Path(reference_json)
+        if not ref_path.exists():
+            raise FileNotFoundError(f"Kerchunk reference JSON not found: {ref_path}")
+
+        kerchunk_ref = json.loads(ref_path.read_text())
+        fs = fsspec.filesystem("reference", fo=kerchunk_ref)
+        mapper = fs.get_mapper("")
+        # consolidate metadata – if the reference already has a .zmetadata this
+        # is a no‑op; otherwise it creates an in‑memory view.
+        try:
+            zarr.consolidate_metadata(mapper)  
+        except Exception: 
+            pass
+
+        ds_full = xr.open_dataset(mapper, engine="zarr", consolidated=True)
+
+        # pull out *numpy* datetime64 array for speed
+        times_full: NDArray[np.datetime64] = ds_full["time"].values
+        if times_full.size == 0:
+            # initialise as empty and bail out early
+            super().__init__(tw_handler, None, None, None)
             self.init_empty()
             return
-            
-        # Call parent constructor with dataset timing info
-        super().__init__(
-            tw_handler=tw_handler,
-            data_start_time=data_start_time,
-            data_end_time=data_end_time,
-            period=period,
-        )
-        
-        # Subset dataset to the time window of interest
-        self._subset_dataset_to_timewindow(tw_handler)
-        
-        # Load normalization stats
-        self._load_normalization_stats(normalization_path)
-        
-        # Set up channel configuration (single RR channel)
-        self._setup_channels()
-        
-        # Compute and cache spatial coordinates
-        self._compute_spatial_coords()
+
+        # verify regular sampling ------------------------------------------------
+        # Using seconds ensures a uniform unit that fits into int64. Converting to
+        # seconds before diff avoids the ns→s cast overflow when the dataset spans
+        # centuries.
+        deltas_sec = np.diff(times_full.astype("datetime64[s]"))
+        unique_deltas = np.unique(deltas_sec)
+        if unique_deltas.size != 1:
+            raise ValueError("RADKLIM Kerchunk reference has irregular time steps")
+        period = unique_deltas[0]
+
+        data_start = times_full[0]
+        data_end = times_full[-1]
+
+        # -------------------------------
+        # 3. call parent initialiser ----
+        # -------------------------------
+        super().__init__(tw_handler, data_start, data_end, period)
+
+        # early‑exit if the requested window sits outside the dataset -------------
+        if tw_handler.t_start >= data_end or tw_handler.t_end <= data_start:
+            self.init_empty()
+            return
+
+        # --------------------------------------------------------------------------------
+        # 4. keep only the time slice that overlaps with the training time span ---------
+        # --------------------------------------------------------------------------------
+        self.start_idx = int(np.searchsorted(times_full, tw_handler.t_start, side="left"))
+        self.end_idx = int(np.searchsorted(times_full, tw_handler.t_end, side="right"))
+
+        subset = ds_full[self.source_channels].isel(time=slice(self.start_idx, self.end_idx))
+        if chunks is not None:
+            subset = subset.chunk(chunks)
+        self.ds = subset
+
+        # --------------------------------------------------------------------------------
+        # 5. geometry – prepare once, reuse often ---------------------------------------
+        # --------------------------------------------------------------------------------
+        y1d = self.ds["y"].values.astype(np.float32)
+        x1d = self.ds["x"].values.astype(np.float32)
+        self.ny: int = len(y1d)
+        self.nx: int = len(x1d)
+        self.points_per_slice: int = self.ny * self.nx
+
+        lat_var = self.ds["lat"]
+        lon_var = self.ds["lon"]
+        # Some RADKLIM flavours have *time* in the lat/lon variables, some don't.
+        raw_lat = lat_var.isel(time=0).values if "time" in lat_var.dims else lat_var.values
+        raw_lon = lon_var.isel(time=0).values if "time" in lon_var.dims else lon_var.values
+
+        self.latitudes = _clip_lat(raw_lat)
+        self.longitudes = _clip_lon(raw_lon)
+
+        # flattened coordinate array (ny*nx, 2) – reused for every window ----------
+        self._base_coords = np.column_stack(
+            (self.latitudes.reshape(-1), self.longitudes.reshape(-1))
+        ).astype(DType)
+
+        # number of dataset timesteps per logical *weathergen* window --------------
+        self.num_steps_per_window = int(tw_handler.t_window_len / period)
+
+    # ------------------------------------------------------------------
+    # public API --------------------------------------------------------
+    # ------------------------------------------------------------------
 
     @override
-    def init_empty(self) -> None:
-        """Initialize empty dataset."""
+    def init_empty(self) -> None: 
+        """Transform this reader into an *always‑empty* stub."""
+        self._empty = True
         super().init_empty()
-        self.len = 0
 
-    def _open_icechunk_dataset(self, icechunk_repo_path: Union[str, Path], branch_name: str) -> xr.Dataset:
-        """Open dataset from Icechunk repository."""
-        repo_path = Path(icechunk_repo_path)
-        if not repo_path.exists():
-            raise FileNotFoundError(f"Icechunk repository not found: {repo_path}")
-        
-        abs_repo_path = os.path.abspath(repo_path)
-        storage_config = local_filesystem_storage(abs_repo_path)
-        self.repo = Repository.open(storage_config)
-        
-        self.session = self.repo.writable_session(branch_name)
-        zarr_store = self.session.store
-        
-        ds = xr.open_zarr(
-            zarr_store, 
-            consolidated=False,
-            chunks={"time": "auto", "y": -1, "x": -1}
-        )
-        return ds
-
-    def _subset_dataset_to_timewindow(self, tw_handler: TimeWindowHandler):
-        """Subset dataset to the time window of interest."""
-        times_all = self.ds["time"].values
-        start_time_np = np.datetime64(tw_handler.t_start)
-        end_time_np = np.datetime64(tw_handler.t_end)
-        
-        start_idx = int(np.searchsorted(times_all, start_time_np, side="left"))
-        end_idx = int(np.searchsorted(times_all, end_time_np, side="right"))
-        
-        if start_idx >= end_idx:
-            self.len = 0
-            return
-            
-        # Subset the dataset to our time range and only keep RR variable
-        self.ds = self.ds[["RR"]].isel(time=slice(start_idx, end_idx))
-        self.len = len(self.ds["time"])
-
-    def _load_normalization_stats(self, normalization_path: Union[str, Path]) -> None:
-        """Load normalization statistics from JSON file."""
-        path = Path(normalization_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Normalization JSON not found: {path}")
-        
-        with open(path, "r") as f:
-            stats = json.load(f)
-        
-        # Set up normalization arrays - single channel (RR)
-        self.mean = np.array(stats.get("mean", [0.0]), dtype=DType)
-        self.stdev = np.array(stats.get("std", [1.0]), dtype=DType)
-        
-        # No geoinfo normalization needed for RADKLIM
-        self.mean_geoinfo = np.zeros(0, dtype=DType)
-        self.stdev_geoinfo = np.ones(0, dtype=DType)
-        
-        if len(self.mean) != 1 or len(self.stdev) != 1:
-            raise ValueError("RADKLIM should have exactly one channel (RR) for normalization")
-
-    def _setup_channels(self) -> None:
-        """Set up channel configuration required by base class."""
-        # Single RR channel for both source and target
-        self.source_channels = ["RR"]
-        self.target_channels = ["RR"]
-        self.geoinfo_channels = []
-        
-        # Channel indices - single channel at index 0
-        self.source_idx = [0]
-        self.target_idx = [0]
-        self.geoinfo_idx = []
-
-    def _compute_spatial_coords(self) -> None:
-        """Compute and cache spatial coordinates."""
-        # Get spatial dimensions
-        y1d = self.ds["y"].values.astype(DType)
-        x1d = self.ds["x"].values.astype(DType)
-        self.ny, self.nx = len(y1d), len(x1d)
-        
-        # Load lat/lon arrays (handle time-varying coordinates if present)
-        lat_var = self.ds["lat"]
-        if "time" in lat_var.dims:
-            lat2d = lat_var.isel(time=0).values.astype(DType)
-        else:
-            lat2d = lat_var.values.astype(DType)
-            
-        lon_var = self.ds["lon"]
-        if "time" in lon_var.dims:
-            lon2d = lon_var.isel(time=0).values.astype(DType)
-        else:
-            lon2d = lon_var.values.astype(DType)
-        
-        # Apply coordinate transformations (same as Anemoi example)
-        self.latitudes = self._clip_lat(lat2d.flatten())
-        self.longitudes = self._clip_lon(lon2d.flatten())
-
-    def _clip_lat(self, lats: np.ndarray) -> np.ndarray:
-        """Clip latitudes to the range [-90, 90] and ensure periodicity."""
-        return (2 * np.clip(lats, -90.0, 90.0) - lats).astype(DType)
-
-    def _clip_lon(self, lons: np.ndarray) -> np.ndarray:
-        """Clip longitudes to the range [-180, 180] and ensure periodicity."""
-        return ((lons + 180.0) % 360.0 - 180.0).astype(DType)
+    # ------------------------------------------------------------------
 
     @override
     def length(self) -> int:
-        """Return the length of the dataset."""
-        return getattr(self, 'len', 0)
+        """Number of *weathergen* windows this reader can deliver."""
+        if self._empty:
+            return 0
+        nt: int = int(self.ds.sizes["time"])
+        return max(0, nt - self.num_steps_per_window + 1)
 
-    
+    # ------------------------------------------------------------------
+
+    @override
+    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData: 
+        """
+        Get data for window (for either source or target, through public interface)
+
+        Parameters
+        ----------
+        idx : int
+            Index of temporal window
+        channels_idx : np.array
+            Selection of channels
+
+        Returns
+        -------
+        ReaderData providing coords, geoinfos, data, datetimes
+        """
+        
+        # 1. translate window index → absolute dataset indices --------------
+        t_idxs_abs, dtr = self._get_dataset_idxs(idx)
+
+        if self._empty or t_idxs_abs.size == 0:
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx),
+                num_geo_fields=len(self.geoinfo_idx),
+            )
+
+        # shift from *absolute* to *subset‑relative* indices ----------------
+        t_idxs_rel = t_idxs_abs - self.start_idx
+        if np.any(t_idxs_rel < 0) or np.any(t_idxs_rel >= self.ds.sizes["time"]):
+            # This can pop up if the parent index calc spilled across the subset
+            # boundaries due to rounding errors. Safer to bail out as empty.
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx),
+                num_geo_fields=len(self.geoinfo_idx),
+            )
+
+        # 2. slice dataset --------------------------------------------------
+        start, stop = int(t_idxs_rel[0]), int(t_idxs_rel[-1]) + 1
+        ds_win = self.ds.isel(time=slice(start, stop))
+
+        # 3. bring to ndarray shape (t, y, x, var) --------------------------
+        arr4 = (
+            ds_win.to_array(dim="var") 
+            .transpose("time", "y", "x", "var")
+            .values
+            .astype(np.float32, copy=False)
+        )
+        nt, ny, nx, nvars = arr4.shape
+
+        # sanity for channel indices ---------------------------------------
+        if not channels_idx:
+            raise ValueError("channels_idx cannot be empty")
+        if min(channels_idx) < 0 or max(channels_idx) >= nvars:
+            raise IndexError("channels_idx out of bounds for this dataset slice")
+        if len(set(channels_idx)) != len(channels_idx):
+            raise ValueError("channels_idx must be unique")
+
+        flat_vars = arr4.reshape(-1, nvars)
+
+        # 4. coordinates & timestamps --------------------------------------
+        coords = np.tile(self._base_coords, (nt, 1))  # shape: (nt*ny*nx, 2)
+
+        time_vals = ds_win["time"].values.astype("datetime64[ns]")  # per timestep
+        times = np.repeat(time_vals, self.points_per_slice)
+
+        # 5. NaN mask -------------------------------------------------------
+        valid = ~np.any(np.isnan(flat_vars[:, channels_idx]), axis=1)
+        if not np.any(valid):
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx),
+                num_geo_fields=len(self.geoinfo_idx),
+            )
+
+        coords_sel = coords[valid]
+        data_sel = flat_vars[valid][:, channels_idx].astype(DType, copy=False)
+        times_sel = times[valid]
+
+        rdata = ReaderData(
+            coords=coords_sel,
+            geoinfos=np.zeros((coords_sel.shape[0], 0), dtype=DType),  # none for RADKLIM
+            data=data_sel,
+            datetimes=times_sel,
+        )
+        check_reader_data(rdata, dtr)
+        return rdata
+
+# -----------------------------------------------------------------------------
+# helper functions -------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def _clip_lat(lats: NDArray[np.floating]) -> NDArray[np.float32]:
+    """Mirror latitudes into the range ``[-90, 90]`` so that out‑of‑bounds values
+    wrap around the poles (periodicity). Returned array is *copied* and cast to
+    ``float32``.
+    """
+    return (2 * np.clip(lats, -90.0, 90.0) - lats).astype(np.float32)
+
+
+def _clip_lon(lons: NDArray[np.floating]) -> NDArray[np.float32]:
+    """Wrap longitudes to the range ``[-180, 180]``. Returned array is *copied*
+    and cast to ``float32``.
+    """
+    return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
