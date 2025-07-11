@@ -14,6 +14,7 @@ import torch
 
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi_logtrans import DataReaderAnemoiLogTrans
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     ReaderData,
@@ -101,6 +102,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         # kwargs["end"] = end_date_padded # TODO: implement the padding
                     case "anemoi":
                         dataset = DataReaderAnemoi
+                        datapath = cf.data_path_anemoi
+                    case "anemoi_logtrans":
+                        dataset = DataReaderAnemoiLogTrans
                         datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
