@@ -76,10 +76,13 @@ def train_continue() -> None:
 
     if args.finetune_forecast:
         finetune_overwrite = dict(
+            step_hrs=6,
+            len_hrs=6,              # reset window size to 6h
+            forecast_offset=1,
             training_mode="forecast",
             forecast_delta_hrs=0,  # 12
-            forecast_steps=1,  # [j for j in range(1,9) for i in range(4)]
-            forecast_policy="fixed",  # 'sequential_random' # 'fixed' #'sequential' #_random'
+            forecast_steps=1, 
+            forecast_policy="fixed", 
             forecast_freeze_model=True,
             forecast_att_dense_rate=1.0,  # 0.25
             fe_num_blocks=8,
@@ -95,8 +98,8 @@ def train_continue() -> None:
             lr_policy_warmup="cosine",
             lr_policy_decay="linear",
             lr_policy_cooldown="linear",
-            num_epochs=12,  # len(cf.forecast_steps) + 4
-            istep=0,
+            num_epochs=36,  # len(cf.forecast_steps) + 4
+            istep=0,    
         )
     else:
         finetune_overwrite = dict()
