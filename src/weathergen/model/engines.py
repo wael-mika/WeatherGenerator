@@ -364,8 +364,6 @@ class EnsPredictionHead(torch.nn.Module):
         # norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
         enl = ens_num_layers
 
-        final_activation = get_activation(last_activation)
-
         self.pred_heads = torch.nn.ModuleList()
         for i in range(ens_size):
             self.pred_heads.append(torch.nn.ModuleList())
