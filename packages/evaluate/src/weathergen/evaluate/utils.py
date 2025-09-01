@@ -728,6 +728,7 @@ def scalar_coord_to_dim(da: xr.DataArray, name: str, axis: int = -1) -> xr.DataA
 =======
 from typing import Any
 
+
 def to_list(obj: Any) -> list:
     """
     Convert given object to list if obj is not already a list. Sets are also transformed to a list.
@@ -746,4 +747,7 @@ def to_list(obj: Any) -> list:
     elif not isinstance(obj, list):
         obj = [obj]
     return obj
+<<<<<<< HEAD
 >>>>>>> f3e7884 (Add utils for evaluate.)
+=======
+>>>>>>> 8f31cc3 (Ruffed code.)
