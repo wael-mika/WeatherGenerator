@@ -16,6 +16,7 @@ from weathergen.common.io import IOReaderData
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_anemoi_logtrans import DataReaderAnemoiLogTrans
 from weathergen.datasets.data_reader_anemoi_logtrans_eps import DataReaderAnemoiLogTransEPS
+from weathergen.datasets.data_reader_anemoi_logsinh import DataReaderAnemoiLogSinh
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     ReaderData,
@@ -109,6 +110,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         datapath = cf.data_path_anemoi
                     case "anemoi_logtrans_eps":
                         dataset = DataReaderAnemoiLogTransEPS
+                        datapath = cf.data_path_anemoi
+                    case "anemoi_arcsinh":
+                        dataset = DataReaderAnemoiLogTrans  # TODO: implement
                         datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
