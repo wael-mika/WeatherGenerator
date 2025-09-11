@@ -769,6 +769,7 @@ def scalar_coord_to_dim(da: xr.DataArray, name: str, axis: int = -1) -> xr.DataA
         da = da.drop_vars(name)
         da = da.expand_dims({name: [val]}, axis=axis)
     return da
+<<<<<<< HEAD
 
 
 def check_availability(
