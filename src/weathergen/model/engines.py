@@ -24,8 +24,13 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+<<<<<<< HEAD
 from weathergen.model.utils import ActivationFactory
+=======
+from weathergen.model.utils import get_activation
+>>>>>>> 7fe8a8a (Add option to control stream-specific non-linear output layer.)
 from weathergen.utils.config import Config, get_dtype
+
 
 
 class EmbeddingEngine:
@@ -362,6 +367,8 @@ class EnsPredictionHead(torch.nn.Module):
         dim_internal = dim_embed * hidden_factor
         # norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
         enl = ens_num_layers
+
+        final_activation = get_activation(last_activation)
 
         self.pred_heads = torch.nn.ModuleList()
         for i in range(ens_size):
