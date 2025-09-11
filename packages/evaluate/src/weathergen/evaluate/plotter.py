@@ -680,4 +680,8 @@ class LinePlots:
         parts = ["compare", tag]
         name = "_".join(filter(None, parts))
         plt.savefig(f"{self.out_plot_dir.joinpath(name)}.{self.image_format}")
+<<<<<<< HEAD
         plt.close()
+=======
+        plt.close()
+>>>>>>> a3160ee (updating evaluate dir manually as git is not getting it)

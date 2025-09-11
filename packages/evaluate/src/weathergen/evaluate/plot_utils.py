@@ -160,4 +160,8 @@ class DefaultMarkerSize:
         list[str]
             List of stream names.
         """
+<<<<<<< HEAD
         return list(cls._marker_size_stream.keys())
+=======
+        return list(cls._marker_size_stream.keys())
+>>>>>>> a3160ee (updating evaluate dir manually as git is not getting it)

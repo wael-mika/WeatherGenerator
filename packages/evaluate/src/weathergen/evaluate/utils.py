@@ -770,9 +770,14 @@ def scalar_coord_to_dim(da: xr.DataArray, name: str, axis: int = -1) -> xr.DataA
         da = da.expand_dims({name: [val]}, axis=axis)
     return da
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 
 <<<<<<< HEAD
+=======
+
+
+>>>>>>> a3160ee (updating evaluate dir manually as git is not getting it)
 def check_availability(
     cfg: dict,
     stream: str,
@@ -780,9 +785,12 @@ def check_availability(
     available_data: dict = None,
     mode: str = "",
 ):
+<<<<<<< HEAD
 =======
 def to_list(obj: Any) -> list:
 >>>>>>> 4c9c28c (rebase)
+=======
+>>>>>>> a3160ee (updating evaluate dir manually as git is not getting it)
     """
     Check if requested channels, forecast steps and samples are
     i) available in the previously saved json if metric data is specified (return False otherwise)
@@ -813,6 +821,9 @@ def to_list(obj: Any) -> list:
         samples
     """
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> a3160ee (updating evaluate dir manually as git is not getting it)
     run_id = results_dir.name
 
     # fill info for requested channels, fsteps, samples
