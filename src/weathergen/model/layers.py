@@ -95,11 +95,11 @@ class _DenseBlock(nn.Module):
 
 class MoEMLP(nn.Module):
     """
-    Drop-in MoE MLP:
+    Drop-in MoE MLP (memory-friendly):
     - Same call pattern as your MLP: forward(*args) where args=(x, ...) and optional aux at the end
     - Supports residual add exactly like MLP
     - Optional AdaLayerNorm when dim_aux is provided
-    - Simple top-k router; computes all experts and mixes with gated weights (small-E friendly)
+    - Simple top-k router; mixes experts with streaming accumulation (no big [E, ..., D] stack)
     """
     def __init__(
         self,
@@ -119,6 +119,8 @@ class MoEMLP(nn.Module):
         num_experts: int = 8,
         top_k: int = 4,
         router_noisy_std: float = 0.0,  # set >0 to add noise to router logits
+        # Memory bits
+        use_checkpoint: bool = False,    # checkpoint expert forward to save memory
     ):
         super().__init__()
         if name is not None:
@@ -132,6 +134,7 @@ class MoEMLP(nn.Module):
         self.pre_layer_norm = pre_layer_norm
         self.top_k = top_k
         self.num_experts = num_experts
+        self.use_checkpoint = use_checkpoint
 
         dim_hidden = int(dim_in * hidden_factor)
 
@@ -176,7 +179,7 @@ class MoEMLP(nn.Module):
 
         if self.top_k == self.num_experts:
             # softmax over all experts
-            weights = torch.softmax(logits, dim=-1)
+            weights = torch.softmax(logits, dim=-1)  # [..., E]
             top_idx = None  # not needed
         else:
             # top-k softmax
@@ -191,12 +194,9 @@ class MoEMLP(nn.Module):
         Encourage uniform expert probability and uniform usage.
         Works with both full-softmax (top_idx None) and top-k.
         """
-        # weights: [B..., K] or [B..., E], top_idx: [B..., K] or None
-        # Collapse batch/time dims:
         if top_idx is None:
             # weights over E
             probs = weights.mean(dim=tuple(range(weights.dim() - 1)))  # [E]
-            usage = probs  # identical here
         else:
             # Build usage over experts from top-k selection
             *prefix, K = weights.shape
@@ -204,14 +204,12 @@ class MoEMLP(nn.Module):
             flat_i = top_idx.reshape(-1, K)         # [N, K]
             E = num_experts
             usage = torch.zeros(E, device=weights.device, dtype=weights.dtype)
-            # Sum weights per expert
             usage.scatter_add_(0, flat_i.reshape(-1), flat_w.reshape(-1))
             usage = usage / usage.sum().clamp_min(1e-6)  # normalize
             probs = usage  # proxy
         # Target is uniform 1/E
         E = num_experts
         target = torch.full_like(probs, 1.0 / E)
-        # KL-like penalty (symmetric-ish, simple)
         aux = (probs * (probs.add(1e-6).log() - target.add(1e-6).log())).sum()
         return aux
 
@@ -229,39 +227,38 @@ class MoEMLP(nn.Module):
                 x = self.norm(x)
 
         # Router
-        weights, top_idx = self._gate(x)
+        weights, top_idx = self._gate(x)  # weights: [..., E] or [..., K]
 
-        # Compute all experts once (simple and fine for small E)
-        expert_outs = [exp(x) for exp in self.experts]  # each [*, D_out]
-        # Stack to [E, *, D_out] then combine
-        y_stack = torch.stack(expert_outs, dim=0)  # [E, ..., D_out]
-
+        # Build a full weight tensor [..., E] if we are in top-k mode,
+        # so we can stream over experts without stacking their outputs.
         if top_idx is None:
-            # Full-softmax combine
-            # weights: [..., E] -> reshape to [1, ..., E, 1] to broadcast
-            combine_w = weights.unsqueeze(0).transpose(0, -1).transpose(0, -1)  # legacy-safe
-            # Simpler: align dims
-            # Want [E, ..., 1]
-            combine_w = weights.transpose(-1, -2) if weights.dim() == 2 else weights
-            # robust way:
-            combine_w = weights.unsqueeze(0)              # [1, ..., E]
-            combine_w = combine_w.movedim(-1, 0)          # [E, ...]
-            combine_w = combine_w.unsqueeze(-1)           # [E, ..., 1]
-            y = (y_stack * combine_w).sum(dim=0)          # [..., D_out]
+            w_full = weights  # [..., E]
         else:
-            # Top-k combine: build gated sum via gather
-            # y_stack: [E, ..., D_out] -> expand gather index to expert dim
-            # Create zeros output and add selected experts weighted
-            y = torch.zeros_like(y_stack[0])
-            # Flatten prefix for simple loop (top_k usually tiny)
-            for k in range(self.top_k):
-                idx_k = top_idx[..., k]                   # [...]
-                w_k = weights[..., k]                     # [...]
-                # Gather expert outputs: for each position pick expert idx_k
-                # Convert [E, ..., D] -> [..., D] by indexing expert dim
-                sel = y_stack.index_select(0, idx_k.reshape(-1)).reshape(*idx_k.shape, *y_stack.shape[2:])
-                # Weight and accumulate
-                y = y + sel * w_k.unsqueeze(-1)
+            # scatter top-k weights into a zero tensor of size E
+            E = self.num_experts
+            w_full = torch.zeros(*weights.shape[:-1], E, device=weights.device, dtype=weights.dtype)  # [..., E]
+            w_full.scatter_(-1, top_idx, weights)
+
+        # Output accumulator (no expert stacking)
+        out_dim = self.experts[0].net[-1].out_features  # last Linear of _DenseBlock
+        y = x.new_zeros(*x.shape[:-1], out_dim)
+
+        # Optional gradient checkpoint
+        if self.use_checkpoint:
+            from torch.utils.checkpoint import checkpoint
+
+        # Stream over experts: y += expert(x) * w_full[..., e]
+        for e, expert in enumerate(self.experts):
+            # skip compute if weight mass is (nearly) zero for this expert
+            w_e = w_full[..., e]  # [...]
+            if torch.allclose(w_e, torch.zeros((), device=w_e.device, dtype=w_e.dtype)):
+                continue
+
+            if self.use_checkpoint and self.training:
+                y_e = checkpoint(expert, x)
+            else:
+                y_e = expert(x)
+            y = y + y_e * w_e.unsqueeze(-1)
 
         # Residual (same logic as your MLP)
         if self.with_residual:
@@ -273,6 +270,11 @@ class MoEMLP(nn.Module):
 
         # Optional: update aux loss (not returned; read if you want)
         with torch.no_grad():
-            self.last_aux_loss = self._compute_load_balance_aux(weights, top_idx, self.num_experts)
+            self.last_aux_loss = self._compute_load_balance_aux(
+                w_full if top_idx is not None else weights,  # use full probs if we built them
+                None if top_idx is None else top_idx,
+                self.num_experts,
+            )
 
         return y
+
