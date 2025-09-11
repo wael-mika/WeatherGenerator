@@ -47,7 +47,7 @@ forecast_steps: 1
 forecast_policy: "fixed"
 forecast_freeze_model: False
 forecast_att_dense_rate: 0.25
-fe_num_blocks: 1
+fe_num_blocks: 2
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -134,7 +134,7 @@ train_log:
   log_interval: 20
 
 # Forecast MLP type: "dense" (default) or "moe"
-fe_mlp_type: "moe"    # set to "moe" to enable MoE
+fe_mlp_type: "dense"    # set to "moe" to enable MoE
 
 # MoE-only params (ignored when fe_mlp_type != "moe")
 fe_moe_num_experts: 4
