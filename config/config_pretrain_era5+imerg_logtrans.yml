@@ -1,5 +1,5 @@
 
-streams_directory: "./config/streams/streams_anemoi"
+streams_directory: "./config/streams/era5_1deg"
 
 embed_orientation: "channels"
 embed_local_coords: True
@@ -10,7 +10,7 @@ embed_droput_rate: 0.1
 
 target_cell_local_prediction: True
 
-ae_local_dim_embed: 2048
+ae_local_dim_embed: 1024
 ae_local_num_blocks: 2
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
@@ -24,15 +24,16 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
-ae_global_num_blocks: 10
-ae_global_num_heads: 32
+ae_global_dim_embed: 512
+ae_global_num_blocks: 8
+ae_global_num_heads: 16
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
 ae_global_att_dense_rate: 0.2
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 
+decoder_type: PerceiverIOCoordConditioning # CrossAttentionAdaNormConditioning
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
@@ -40,13 +41,13 @@ pred_mlp_adaln: True
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-forecast_offset : 0
+forecast_offset : 1
 forecast_delta_hrs: 0
-forecast_steps: 0
-forecast_policy: null
+forecast_steps: 1
+forecast_policy: "fixed"
 forecast_freeze_model: False
 forecast_att_dense_rate: 0.25
-fe_num_blocks: 0
+fe_num_blocks: 1
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -75,7 +76,7 @@ batch_size_validation: 1
 
 # training mode: "forecast" or "masking" (masked token modeling)
 # for "masking" to train with auto-encoder mode, forecast_offset should be 0
-training_mode: "masking"
+training_mode: "forecast"
 # masking rate when training mode is "masking"; ignored in foreacast mode
 masking_rate: 0.6
 # sample the masking rate (with normal distribution centered at masking_rate)
@@ -85,18 +86,18 @@ sampling_rate_target: 1.0
 # include a masking strategy here, currently only supporting "random" and "block"
 masking_strategy: "random"
 
-num_epochs: 96
-samples_per_epoch: 2048
+num_epochs: 32
+samples_per_epoch: 2096
 samples_per_validation: 512
 shuffle: True
 
 lr_scaling_policy: "sqrt"
-lr_start: 0.000001
-lr_max: 0.00003
-lr_final_decay: 0.000001
+lr_start: 1e-6
+lr_max: 5e-5
+lr_final_decay: 1e-6
 lr_final: 0.0
-lr_steps_warmup: 256
-lr_steps_cooldown: 4096
+lr_steps_warmup: 512
+lr_steps_cooldown: 512
 lr_policy_warmup: "cosine"
 lr_policy_decay: "linear"
 lr_policy_cooldown: "linear"
@@ -110,8 +111,8 @@ nn_module: "te"
 start_date: 199801010000
 end_date: 202012310000
 start_date_val: 202101010000
-end_date_val: 202112310000
-len_hrs: 12
+end_date_val: 202101310000
+len_hrs: 6
 step_hrs: 6
 input_window_steps: 1
 
@@ -131,4 +132,12 @@ run_id: ???
 train_log:
   # The period to log metrics (in number of batch steps)
   log_interval: 20
+
+# Forecast MLP type: "dense" (default) or "moe"
+fe_mlp_type: "moe"    # set to "moe" to enable MoE
+
+# MoE-only params (ignored when fe_mlp_type != "moe")
+fe_moe_num_experts: 4
+fe_moe_top_k: 2
+fe_moe_hidden_factor: 0.5   # = HF_dense / 4
 
