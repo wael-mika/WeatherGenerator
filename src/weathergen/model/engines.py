@@ -25,7 +25,7 @@ from weathergen.model.embeddings import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.layers import MoEMLP
-from weathergen.model.utils import get_activation
+from weathergen.model.utils import ActivationFactory
 from weathergen.utils.config import Config, get_dtype
 
 

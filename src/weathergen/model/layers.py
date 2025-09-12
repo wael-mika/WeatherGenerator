@@ -111,7 +111,7 @@ class _DenseBlock(nn.Module):
 class MoEMLP(nn.Module):
     """
     Drop-in MoE MLP (memory-friendly):
-    - Same call pattern as your MLP: forward(*args) where args=(x, ...) and optional aux at the end
+    - Same call pattern as the current MLP: forward(*args) where args=(x, ...) and optional aux at the end
     - Supports residual add exactly like MLP
     - Optional AdaLayerNorm when dim_aux is provided
     - Simple top-k router; mixes experts with streaming accumulation (no big [E, ..., D] stack)

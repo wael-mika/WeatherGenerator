@@ -1,12 +1,11 @@
-
-streams_directory: "./config/streams/era5_1deg"
+streams_directory: "./config/streams/era5_1deg/"
 
 embed_orientation: "channels"
 embed_local_coords: True
 embed_centroids_local_coords: False
 embed_size_centroids: 0
 embed_unembed_mode: "block"
-embed_droput_rate: 0.1
+embed_dropout_rate: 0.1
 
 target_cell_local_prediction: True
 
@@ -16,7 +15,7 @@ ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
 
-ae_local_num_queries: 2
+ae_local_num_queries: 1
 ae_local_queries_per_cell: False
 ae_adapter_num_heads: 16
 ae_adapter_embed: 128
@@ -24,9 +23,9 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 512
+ae_global_dim_embed: 2048
 ae_global_num_blocks: 8
-ae_global_num_heads: 16
+ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
 ae_global_att_dense_rate: 0.2
@@ -46,7 +45,7 @@ forecast_delta_hrs: 0
 forecast_steps: 1
 forecast_policy: "fixed"
 forecast_freeze_model: False
-forecast_att_dense_rate: 0.25
+forecast_att_dense_rate: 1.0
 fe_num_blocks: 2
 fe_num_heads: 16
 fe_dropout_rate: 0.1
@@ -62,6 +61,12 @@ attention_dtype: bf16
 mlp_norm_eps: 1e-5
 norm_eps: 1e-4
 
+latent_noise_kl_weight: 0.0 # 1e-5
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5 
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True 
+
 loss_fcts:
   -
     - "mse"
@@ -71,8 +76,13 @@ loss_fcts_val:
     - "mse"
     - 1.0
 
-batch_size: 1
-batch_size_validation: 1
+batch_size_per_gpu: 1
+batch_size_validation_per_gpu: 1
+
+# a regex that needs to fully match the name of the modules you want to freeze
+# e.g. ".*ERA5" will match any module whose name ends in ERA5\
+# encoders and decoders that exist per stream have the stream name attached at the end
+freeze_modules: ""
 
 # training mode: "forecast" or "masking" (masked token modeling)
 # for "masking" to train with auto-encoder mode, forecast_offset should be 0
@@ -80,14 +90,24 @@ training_mode: "forecast"
 # masking rate when training mode is "masking"; ignored in foreacast mode
 masking_rate: 0.6
 # sample the masking rate (with normal distribution centered at masking_rate)
+# note that a sampled masking rate leads to varying requirements
 masking_rate_sampling: True
-# sample a subset of all target points, useful e.g. to reduce memory requirements
+# sample a subset of all target points, useful e.g. to reduce memory requirements (also can specify per-stream)
 sampling_rate_target: 1.0
-# include a masking strategy here, currently only supporting "random" and "block"
+# include a masking strategy here, currently only supporting "random", "block", "healpix", "channel", "causal" and "combination"
 masking_strategy: "random"
+# masking_strategy_config is a dictionary of additional parameters for the masking strategy
+# required for "healpix" and "channel" masking strategies
+# "healpix": requires healpix mask level to be specified with `hl_mask`
+# "channel": requires "mode" to be specified, "per_cell" or "global",
+masking_strategy_config: {"strategies": ["random", "healpix", "channel"], 
+                          "probabilities": [0.34, 0.33, 0.33],
+                          "hl_mask": 3, "mode": "per_cell",
+                          "same_strategy_per_batch": false
+                          }
 
-num_epochs: 32
-samples_per_epoch: 2096
+num_epochs: 24
+samples_per_epoch: 4096
 samples_per_validation: 512
 shuffle: True
 
@@ -96,7 +116,7 @@ lr_start: 1e-6
 lr_max: 5e-5
 lr_final_decay: 1e-6
 lr_final: 0.0
-lr_steps_warmup: 512
+lr_steps_warmup: 512 
 lr_steps_cooldown: 512
 lr_policy_warmup: "cosine"
 lr_policy_decay: "linear"
@@ -107,11 +127,10 @@ weight_decay: 0.1
 norm_type: "LayerNorm"
 nn_module: "te"
 
-
 start_date: 199801010000
 end_date: 202012310000
 start_date_val: 202101010000
-end_date_val: 202101310000
+end_date_val: 202101120000
 len_hrs: 6
 step_hrs: 6
 input_window_steps: 1
@@ -120,6 +139,7 @@ val_initial: False
 
 loader_num_workers: 8
 log_validation: 0
+analysis_streams_output: ["IMERG"]
 
 istep: 0
 run_history: []
@@ -134,10 +154,10 @@ train_log:
   log_interval: 20
 
 # Forecast MLP type: "dense" (default) or "moe"
-fe_mlp_type: "dense"    # set to "moe" to enable MoE
+fe_mlp_type: "moe"    # set to "moe" to enable MoE
 
 # MoE-only params (ignored when fe_mlp_type != "moe")
-fe_moe_num_experts: 4
+fe_moe_num_experts: 8
 fe_moe_top_k: 2
 fe_moe_hidden_factor: 0.5   # = HF_dense / 4
 
