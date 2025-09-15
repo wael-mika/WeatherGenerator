@@ -1,0 +1,52 @@
+# era5_netcdf:
+#   type: era5_netcdf
+#   filenames: ["/p/scratch/weatherai/shared/weather_generator_data/ERA5_netcdf/"]
+#   file_template: "era5_pl_{var}_{yyyymm}_L50-1000.nc"
+#   engine: h5netcdf
+
+#   variables:               # <- remove the stray quote and Python constant
+#     - specific_humidity
+#     - temperature
+#     - u_component_of_wind
+#     - v_component_of_wind
+#     - vertical_velocity
+#     - geopotential
+#   levels: [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+era5_netcdf:
+  type: era5_netcdf
+  filenames: ['/p/scratch/weatherai/shared/weather_generator_data/ERA5_netcdf/']
+  file_template: 'era5_pl_{var}_{yyyymm}_L50-1000.nc'
+  engine: h5netcdf
+  # chunks: {time: 64}
+  variables: ['q','t','u','v','w','z']   # you can use long names too
+  levels: [50,100,150,200,250,300,400,500,600,700,850,925,1000]
+  source_exclude: ['w_']
+  target_exclude: ['w_']
+  name: era5_netcdf
+  # Usual training knobs — passed through unchanged (reader ignores them)
+  loss_weight: 1.
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 8
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+
+  target_readout:
+    type: "obs_value"  # token or obs_value
+    num_layers: 2
+    num_heads: 4
+
+  pred_head:
+    ens_size: 1
+    num_layers: 1
