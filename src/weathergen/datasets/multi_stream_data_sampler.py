@@ -14,6 +14,7 @@ import torch
 
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_netcdf import DataReaderERA5NetCDF
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     ReaderData,
@@ -108,6 +109,13 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "icon":
                         dataset = IconDataset
                         datapath = cf.data_path_icon
+                    case "era5_netcdf":
+                        dataset = DataReaderERA5NetCDF
+                        datapath = (
+                            stream_info.get("streams_directory", cf.streams_directory)
+                            if stream_info.get("streams_directory", None) is not None
+                            else cf.streams_directory
+                        )   
                     case _:
                         msg = f"Unsupported stream type {stream_info['type']}"
                         f"for stream name '{stream_info['name']}'."
