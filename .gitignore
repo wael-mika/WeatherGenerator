@@ -207,19 +207,28 @@ _build/
 _version.py
 
 # development directories
-outputs/
-output/
-logs/
-models/
-results/
-plots/
+outputs
+output
+logs
+models
+results
+plots
 models
 results
 playground/
 .config/
+<<<<<<< HEAD
 plots
 logs
 outputs
 output
 models
 results
+=======
+outputs/
+logs/
+models/
+results/
+plots/
+
+>>>>>>> 35283fe (updating the .gitignore after creating symlinks)
