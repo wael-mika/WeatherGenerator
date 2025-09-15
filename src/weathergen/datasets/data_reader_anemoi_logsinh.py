@@ -236,7 +236,7 @@ class DataReaderAnemoiLogSinh(DataReaderAnemoi):
     """
 
     # Default scale (mm). You can override via stream_info or subclassing.
-    ALPHA_DEFAULT = 1.5e-1
+    ALPHA_DEFAULT = 0.000381472
 
     def __init__(
         self,
@@ -250,8 +250,8 @@ class DataReaderAnemoiLogSinh(DataReaderAnemoi):
         self.alpha: float = float(stream_info.get("logsinh_alpha", self.ALPHA_DEFAULT))
 
         # Optional z-score stats for the *scaled* transform asinh(x_mm/alpha)
-        mu = stream_info.get("logsinh_mu", 1.86866)
-        sigma = stream_info.get("logsinh_sigma", 1.65384)
+        mu = stream_info.get("logsinh_mu", 2.3638699054718018)
+        sigma = stream_info.get("logsinh_sigma", 3.6606361865997314)
 
         # If provided, use them; else, disable z-scoring
         self.mu = float(mu) if mu is not None else None

@@ -154,7 +154,7 @@ train_log:
   log_interval: 20
 
 # Forecast MLP type: "dense" (default) or "moe"
-fe_mlp_type: "moe"    # set to "moe" to enable MoE
+fe_mlp_type: "dense"    # set to "moe" to enable MoE
 
 # MoE-only params (ignored when fe_mlp_type != "moe")
 fe_moe_num_experts: 8
