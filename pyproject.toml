@@ -32,6 +32,10 @@ dependencies = [
  "numexpr>=2.11.0",
  "netcdf4>=1.7.2",
  "h5netcdf>=1.6.4",
+ "kerchunk>=0.2.7",
+ "numcodecs>=0.15.1",
+ "h5py>=3.14.0",
+ "fsspec>=2025.5.1",
 ]
 
 [project.urls]
