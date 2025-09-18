@@ -112,7 +112,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         dataset = DataReaderAnemoiLogTransEPS
                         datapath = cf.data_path_anemoi
                     case "anemoi_arcsinh":
-                        dataset = DataReaderAnemoiLogTrans  # TODO: implement
+                        dataset = DataReaderAnemoiLogSinh  # TODO: implement
                         datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
