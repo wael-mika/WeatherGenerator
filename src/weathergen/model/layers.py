@@ -214,9 +214,17 @@ class MoEMLP(nn.Module):
             probs = weights.mean(dim=tuple(range(weights.dim() - 1)))  # [E]
         else:
             # Build usage over experts from top-k selection
-            *prefix, K = weights.shape
-            flat_w = weights.reshape(-1, K)         # [N, K]
-            flat_i = top_idx.reshape(-1, K)         # [N, K]
+            # *prefix, K = weights.shape
+            # flat_w = weights.reshape(-1, K)         # [N, K]
+            # flat_i = top_idx.reshape(-1, K)         # [N, K]
+            if weights.shape != top_idx.shape:
+                raise ValueError(
+                    "Top-k weights and indices must share the same shape"
+                )
+
+            K = weights.shape[-1]
+            flat_w = weights.reshape(-1, K)  # [N, K]
+            flat_i = top_idx.reshape(-1, K)  # [N, K]
             E = num_experts
             usage = torch.zeros(E, device=weights.device, dtype=weights.dtype)
             usage.scatter_add_(0, flat_i.reshape(-1), flat_w.reshape(-1))
@@ -286,8 +294,10 @@ class MoEMLP(nn.Module):
         # Optional: update aux loss (not returned; read if you want)
         with torch.no_grad():
             self.last_aux_loss = self._compute_load_balance_aux(
-                w_full if top_idx is not None else weights,  # use full probs if we built them
-                None if top_idx is None else top_idx,
+                # w_full if top_idx is not None else weights,  # use full probs if we built them
+                # None if top_idx is None else top_idx,
+                weights,
+                top_idx,                
                 self.num_experts,
             )
 

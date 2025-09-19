@@ -8,7 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 IMERG :
-  type : anemoi_arcsinh
+  type : anemoi
   filenames : ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
   loss_weight : 1.
   diagnostic : False
