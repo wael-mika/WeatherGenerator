@@ -40,13 +40,13 @@ pred_mlp_adaln: True
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-forecast_offset : 0
+forecast_offset : 1
 forecast_delta_hrs: 0
-forecast_steps: 0
-forecast_policy: null
+forecast_steps: 1
+forecast_policy: "fixed"
 forecast_freeze_model: False
 forecast_att_dense_rate: 1.0
-fe_num_blocks: 0
+fe_num_blocks: 2
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -86,7 +86,7 @@ freeze_modules: ""
 
 # training mode: "forecast" or "masking" (masked token modeling)
 # for "masking" to train with auto-encoder mode, forecast_offset should be 0
-training_mode: "masking"
+training_mode: "forecast" # "masking" or "forecast"
 # masking rate when training mode is "masking"; ignored in foreacast mode
 masking_rate: 0.85
 # sample the masking rate (with normal distribution centered at masking_rate)
@@ -106,7 +106,7 @@ masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                           "same_strategy_per_batch": false
                           }
 
-num_epochs: 24
+num_epochs: 16
 samples_per_epoch: 4096
 samples_per_validation: 512
 shuffle: True
