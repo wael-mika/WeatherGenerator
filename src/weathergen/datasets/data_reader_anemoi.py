@@ -109,7 +109,11 @@ class DataReaderAnemoi(DataReaderTimestep):
         # select/filter requested target channels
         self.target_idx = self.select_channels(ds0, "target")
         self.target_channels = [ds.variables[i] for i in self.target_idx]
-
+        
+        # get target channel weights from stream config
+        self.target_channel_weights = self.parse_target_channel_weights()
+        _logger.info(f"Target channel weights: {self.target_channel_weights}")
+        
         self.geoinfo_channels = []
         self.geoinfo_idx = []
 
@@ -265,3 +269,23 @@ def _clip_lon(lons: NDArray) -> NDArray[np.float32]:
     Clip longitudes to the range [-180, 180] and ensure periodicity.
     """
     return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
+
+    def parse_target_channel_weights(self) -> list[float] | None:
+        target_channel_weights = [
+            self.stream_info["channel_weights"].get(ch, 1.0)
+            if self.stream_info.get("channel_weights", None)
+            else 1.0
+            for ch in self.target_channels
+        ]
+
+        if self.stream_info.get("channel_weights", None) is not None:
+            # Check whether all given channel_weights could be matched to a channel.
+            ch_unmatched = [
+                ch for ch in self.stream_info["channel_weights"] if ch not in self.target_channels
+            ]
+            if len(ch_unmatched) > 0:
+                _logger.info(
+                    f"Unmatched channel_weights in {self.stream_info.name}: {ch_unmatched}"
+                )
+
+        return target_channel_weights
