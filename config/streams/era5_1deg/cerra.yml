@@ -1,0 +1,113 @@
+# (C) Copyright 2024 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+CERRA :
+  type : anemoi
+  filenames : ['cerra-rr-an-oper-0001-mars-5p5km-1984-2022-6h-v3-hmsi.zarr']
+  loss_weight : 1.
+  source_exclude : ["r_100","r_1000","r_150","r_200","r_250","r_300","r_400","r_50","r_500","r_600","r_700","r_850","r_925","rsn","sde","sf","skt","sp","t_100","t_1000","t_150","t_200","t_250","t_300","t_400","t_50","t_500","t_600","t_700","t_850","t_925","tciwv","tp","u_100","u_1000","u_150","u_200","u_250","u_300","u_400","u_50","u_500","u_600","u_700","u_850","u_925","v_100","v_1000","v_150","v_200","v_250","v_300","v_400","v_50","v_500","v_600","v_700","v_850","v_925","z_100","z_1000","z_150","z_200","z_250","z_300","z_400","z_50","z_500","z_600","z_700","z_850","z_925"]
+  target_exclude : ["10si","10wdir","2t","al","msl","r_100","r_1000","r_150","r_200","r_250","r_300","r_400","r_50","r_500","r_600","r_700","r_850","r_925","rsn","sde","sf","skt","sp","t_100","t_1000","t_150","t_200","t_250","t_300","t_400","t_50","t_500","t_600","t_700","t_850","t_925","tciwv","tp","u_100","u_1000","u_150","u_200","u_250","u_300","u_400","u_50","u_500","u_600","u_700","u_850","u_925","v_100","v_1000","v_150","v_200","v_250","v_300","v_400","v_50","v_500","v_600","v_700","v_850","v_925"]
+  target_channels : ["10si","10wdir","2t","al","msl"]
+  masking_rate : 0.6
+  masking_rate_none : 0.05
+  token_size : 512
+  embed : 
+    net : transformer
+    num_tokens : 1
+    num_heads : 2
+    dim_embed : 256
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 256
+  target_readout :
+    type : 'obs_value'
+    num_layers : 2
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
+  channel_weights:
+    10si: 0.94
+    10wdir: 1.87
+    2t: 1.13
+    al: 0.25
+    msl: 1.51
+    # r_100: 0.77
+    # r_1000: 1.48
+    # r_150: 0.52
+    # r_200: 1.01
+    # r_250: 1.76
+    # r_300: 0.39
+    # r_400: 1.34
+    # r_50: 0.88
+    # r_500: 0.61
+    # r_600: 1.20
+    # r_700: 0.15
+    # r_850: 1.63
+    # r_925: 0.44
+    # rsn: 1.98
+    # sde: 0.32
+    # sf: 0.99
+    # skt: 1.06
+    # sp: 1.71
+    # t_100: 0.28
+    # t_1000: 1.40
+    # t_150: 0.72
+    # t_200: 1.83
+    # t_250: 0.47
+    # t_300: 1.68
+    # t_400: 0.81
+    # t_50: 1.25
+    # t_500: 0.35
+    # t_600: 1.94
+    # t_700: 0.58
+    # t_850: 1.17
+    # t_925: 0.11
+    # tciwv: 1.55
+    # tp: 0.69
+    # u_100: 1.91
+    # u_1000: 0.22
+    # u_150: 1.37
+    # u_200: 0.55
+    # u_250: 0.84
+    # u_300: 1.43
+    # u_400: 0.18
+    # u_50: 1.79
+    # u_500: 0.41
+    # u_600: 1.60
+    # u_700: 0.91
+    # u_850: 1.28
+    # u_925: 0.64
+    # v_100: 1.09
+    # v_1000: 1.31
+    # v_150: 0.13
+    # v_200: 1.74
+    # v_250: 0.49
+    # v_300: 1.22
+    # v_400: 0.74
+    # v_50: 1.96
+    # v_500: 0.30
+    # v_600: 1.57
+    # v_700: 0.66
+    # v_850: 0.96
+    # v_925: 1.46
+    # z_100: 0.51
+    # z_1000: 1.04
+    # z_150: 1.66
+    # z_200: 0.37
+    # z_250: 1.81
+    # z_300: 0.68
+    # z_400: 1.15
+    # z_50: 0.20
+    # z_500: 1.99
+    # z_600: 0.42
+    # z_700: 1.53
+    # z_850: 0.79
+    # z_925: 1.30

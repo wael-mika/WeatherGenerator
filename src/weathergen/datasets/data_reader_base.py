@@ -565,7 +565,7 @@ class DataReaderBase(metaclass=ABCMeta):
             else 1.0
             for ch in self.target_channels
         ]
-        self.stream_info["target_channel_weights"] = target_channel_weights
+        # self.stream_info["target_channel_weights"] = target_channel_weights
 
         if self.stream_info.get("channel_weights", None) is not None:
             # Check whether all given channel_weights could be matched to a channel.
