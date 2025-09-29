@@ -22,6 +22,61 @@ from weathergen.utils.train_logger import TRAIN, VAL, Stage
 _logger = logging.getLogger(__name__)
 
 
+from typing import Sequence
+try:
+    from omegaconf import DictConfig, OmegaConf  # safe import if you use Hydra
+except Exception:
+    DictConfig = tuple()  # sentinel so isinstance(w, DictConfig) is False
+    OmegaConf = None
+def _make_channel_weights_tensor(
+    stream_info: dict,
+    device: torch.device,
+    channel_order: Sequence[str] | None = None,  # optional explicit order
+) -> torch.Tensor | None:
+    w = stream_info.get("target_channel_weights", None)
+    if w is None:
+        return None
+
+    # Resolve OmegaConf DictConfig → plain Python
+    if isinstance(w, DictConfig) and OmegaConf is not None:
+        w = OmegaConf.to_container(w, resolve=True)
+
+    # Determine channel order (must match target tensor's channel dim)
+    if channel_order is None:
+        channel_order = (
+            list(stream_info.get("target_channels"))
+            or list(stream_info.get("channels", []))
+        )
+    if not channel_order:
+        raise ValueError(
+            "target_channel_weights provided as a mapping but no channel order "
+            "was found. Add 'target_channels' (or provide channel_order explicitly)."
+        )
+
+    # Build ordered list from mapping, or accept list-like directly
+    if isinstance(w, dict):
+        try:
+            weights_list = [float(w[ch]) for ch in channel_order]
+        except KeyError as e:
+            missing = e.args[0]
+            have = list(w.keys())
+            raise KeyError(
+                f"Missing weight for channel '{missing}'. "
+                f"Have weights for: {have}. Needed order: {channel_order}"
+            )
+    else:
+        # already list/tuple/np/torch in channel order
+        weights_list = w
+
+    weights = torch.as_tensor(weights_list, dtype=torch.float32, device=device)
+
+    if weights.numel() != len(channel_order):
+        raise ValueError(
+            f"Channel-weight length mismatch: got {weights.numel()}, "
+            f"expected {len(channel_order)}"
+        )
+    return weights
+
 @dataclasses.dataclass
 class LossValues:
     """
@@ -94,8 +149,9 @@ class LossCalculator:
             # set loss_weights to 1. when not specified
             stream_info_loss_weight = stream_info.get("loss_weight", 1.0)
             weights_channels = (
-                torch.tensor(stream_info["target_channel_weights"]).to(
-                    device=device, non_blocking=True
+                _make_channel_weights_tensor(
+                    stream_info=stream_info,
+                    device=device
                 )
                 if "target_channel_weights" in stream_info
                 else None

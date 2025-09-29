@@ -140,8 +140,10 @@ def mse_channel_location_weighted(
         diff2 = (diff2.transpose(1, 0) * weights_points).transpose(1, 0)
     loss_chs = diff2.mean(0)
     loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
-    print(f"mse loss per channel: {loss_chs}")
-
+    print(f"channel weights: {weights_channels}")
+    print(f"mse loss per channel: {loss_chs[:5]}")
+    print(f"mse loss (weighted): {loss}")
+    
     return loss, loss_chs
 
 
