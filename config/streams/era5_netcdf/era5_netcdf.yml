@@ -14,8 +14,8 @@
 #   levels: [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
 era5_netcdf:
   type: era5_netcdf
-  filenames: ['/p/scratch/weatherai/shared/weather_generator_data/ERA5_netcdf/']
-  file_template: 'era5_pl_{var}_{yyyymm}_L50-1000.nc'
+  filenames: ['/p/scratch/weatherai/shared/weather_generator_data/ERA5_netcdf/out_time_slice_6h_chunk/']
+  file_template: 'era5_pl_{var}_{yyyymm}_L50-1000_rechunk.nc'
   engine: h5netcdf
   # chunks: {time: 64}
   variables: ['q','t','u','v','w','z']   # you can use long names too

@@ -1,8 +1,8 @@
 era5_kerchunk:
   type: era5_kerchunk
   name: era5_kerchunk
-  filenames: ['playground/era5_pl_ref.manifest.json']
-  reference_path: playground/era5_pl_ref.manifest.json
+  filenames: ['playground/era5_pl_ref_rechunked.json']
+  reference_path: playground/era5_pl_ref_rechunked.json
   engine: zarr
   # chunks: {time: 64}
   variables: ['q','t','u','v','w','z']   # you can use long names too

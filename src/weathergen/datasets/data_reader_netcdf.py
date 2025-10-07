@@ -140,12 +140,25 @@ class DataReaderERA5NetCDF(DataReaderTimestep):
                 ds_v = ds_v.rename({"valid_time": "time"})
             if "level" in ds_v.dims:
                 ds_v = ds_v.rename({"level": "pressure_level"})
+            # if "values" not in ds_v.dims:
+            #     # reduced name variants (unlikely in your set)
+            #     for cand in ("number_of_points",):
+            #         if cand in ds_v.dims:
+            #             ds_v = ds_v.rename({cand: "values"})
+            #             break
             if "values" not in ds_v.dims:
-                # reduced name variants (unlikely in your set)
-                for cand in ("number_of_points",):
-                    if cand in ds_v.dims:
-                        ds_v = ds_v.rename({cand: "values"})
-                        break
+                # Some files may expose (latitude, longitude) as separate dims
+                if {"latitude", "longitude"}.issubset(ds_v.dims):
+                    ds_v = ds_v.stack(values=("latitude", "longitude"))
+                elif {"lat", "lon"}.issubset(ds_v.dims):
+                    ds_v = ds_v.stack(values=("lat", "lon"))
+                else:
+                    # last resort: look for any 2D spatial dims and stack them
+                    cand_spatial = [d for d in ds_v.dims if d not in {"time", "pressure_level"}]
+                    if len(cand_spatial) >= 2:
+                        ds_v = ds_v.stack(values=tuple(cand_spatial[:2]))
+                    else:
+                        raise ValueError(f"Cannot find spatial dims to stack in {list(ds_v.dims)}")
             # keep only this variable's data array (short name inside files)
             keep = v if v in ds_v.data_vars else list(ds_v.data_vars)[0]
             datasets.append(ds_v[[keep]])

@@ -458,22 +458,45 @@ class DataReaderERA5Kerchunk(DataReaderTimestep):
         # load manifest
         ref_path = Path(stream_info.get("reference_path", filename))
         m = json.loads(Path(ref_path).read_text())
-        refs = m.get("refs", [])
-        if not (isinstance(m, dict) and m.get("kind") == "kerchunk-manifest" and isinstance(refs, list) and refs):
-            raise ValueError(f"{ref_path} is not a non-empty kerchunk-manifest.")
+        # refs = m.get("refs", [])
+        # if not (isinstance(m, dict) and m.get("kind") == "kerchunk-manifest" and isinstance(refs, list) and refs):
+        #     raise ValueError(f"{ref_path} is not a non-empty kerchunk-manifest.")
+        if isinstance(m, dict) and m.get("kind") == "kerchunk-manifest" and isinstance(m.get("refs"), list) and m["refs"]:
+            refs = m["refs"]
+            single_ref_mode = False
+        elif isinstance(m, dict) and isinstance(m.get("refs"), dict):
+            # single combined kerchunk reference (MZZ output)
+            refs = [m]
+            single_ref_mode = True
+        else:
+            raise ValueError(f"{ref_path} is not a kerchunk-manifest or a single combined reference.")
 
         wanted_months = self._months_in_range(np.datetime64(tw_handler.t_start, "ns"),
                                             np.datetime64(tw_handler.t_end, "ns"))
-        vars_to_open = self.vars_short[:]
+        # vars_to_open = self.vars_short[:]
 
+        # filtered_refs = []
+        # for r in refs:
+        #     if not self._ref_has_any_var(r, vars_to_open):
+        #         continue
+        #     mm = self._ref_yyyymm(r)
+        #     if (mm is not None) and (mm not in wanted_months):
+        #         continue
+        #     filtered_refs.append(r)
+        vars_to_open = self.vars_short[:]
         filtered_refs = []
-        for r in refs:
-            if not self._ref_has_any_var(r, vars_to_open):
-                continue
-            mm = self._ref_yyyymm(r)
-            if (mm is not None) and (mm not in wanted_months):
-                continue
-            filtered_refs.append(r)
+        if single_ref_mode:
+            filtered_refs = refs[:]               # cannot filter by month; time slicing happens later
+        else:
+            wanted_months = self._months_in_range(np.datetime64(tw_handler.t_start, "ns"),
+                                                np.datetime64(tw_handler.t_end, "ns"))
+            for r in refs:
+                if not self._ref_has_any_var(r, vars_to_open):
+                    continue
+                mm = self._ref_yyyymm(r)
+                if (mm is not None) and (mm not in wanted_months):
+                    continue
+                filtered_refs.append(r)
 
         if not filtered_refs:
             _log.warning("%s: manifest filtering removed all refs; window/vars mismatch?", self.name)
@@ -556,9 +579,28 @@ class DataReaderERA5Kerchunk(DataReaderTimestep):
         self.n_values = int(ds.sizes["values"])
         latname = "latitude" if "latitude" in ds.coords else "lat"
         lonname = "longitude" if "longitude" in ds.coords else "lon"
-        self.latitudes = _clip_lat(np.asarray(ds[latname].values))
-        self.longitudes = _clip_lon(np.asarray(ds[lonname].values))
+        # self.latitudes = _clip_lat(np.asarray(ds[latname].values))
+        # self.longitudes = _clip_lon(np.asarray(ds[lonname].values))
+        lat = np.asarray(ds[latname].values)
+        lon = np.asarray(ds[lonname].values)
+        # handle possible shapes: (V,), (2,V), (V,1), (1,V), even extra leading dims
+        lat = np.squeeze(lat)
+        lon = np.squeeze(lon)
+        if lat.ndim == 2 and lat.shape[0] == 2 and lat.shape[1] != 2:
+            # extremely rare: some pipelines store a stacked [lat,lon] array
+            # pick the first row as latitude in that case
+            lat = lat[0]
+        if lon.ndim == 2 and lon.shape[0] == 2 and lon.shape[1] != 2:
+            lon = lon[1]
 
+        lat = lat.ravel().astype(np.float32)
+        lon = lon.ravel().astype(np.float32)
+
+        if lat.size != lon.size:
+            raise ValueError(f"lat/lon size mismatch: {lat.shape} vs {lon.shape}")
+        self.latitudes  = _clip_lat(lat)
+        self.longitudes = _clip_lon(lon)
+        self.n_values   = int(lat.size)  # keep V in sync with coords
         # build channel map (var-major × levels)
         keep_vars = [v for v in self.vars_short if v in ds.data_vars]
         self.levels_present = [int(x) for x in (ds["pressure_level"].values if "pressure_level" in ds.dims else [])]
@@ -612,28 +654,86 @@ class DataReaderERA5Kerchunk(DataReaderTimestep):
     def length(self) -> int:
         return getattr(self, "len", 0)
 
+    # @override
+    # def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+    #     if self._arr is None or self.len == 0 or len(channels_idx) == 0:
+    #         return ReaderData.empty(num_data_fields=len(channels_idx), num_geo_fields=0)
+
+    #     t_idxs = self._norm_idx(idx, self.len)
+    #     if t_idxs.size == 0:
+    #         return ReaderData.empty(num_data_fields=len(channels_idx), num_geo_fields=0)
+
+    #     i0, i1 = int(t_idxs[0]), int(t_idxs[-1]) + 1
+    #     T, V = (i1 - i0), self.n_values
+
+    #     csel = np.asarray(channels_idx, dtype=int)
+    #     # slice pre-stacked array → (T, V, C_sel)
+    #     block = self._arr.isel(time=slice(i0, i1), channel=csel).data
+    #     data = np.asarray(block.compute(), dtype=np.float32).reshape(T * V, csel.size)
+
+    #     # coords and times
+    #     # latlon = np.stack([self.latitudes, self.longitudes], axis=1).astype(np.float32)  # (V,2)
+    #     # coords = np.broadcast_to(latlon, (T, V, 2)).reshape(T * V, 2)
+    #     lat = self.latitudes.reshape(-1, 1)                    # (V,1)
+    #     lon = self.longitudes.reshape(-1, 1)                   # (V,1)
+    #     latlon = np.concatenate([lat, lon], axis=1)            # (V,2)
+    #     coords = np.repeat(latlon[None, :, :], T, axis=0)      # (T,V,2)
+    #     coords = coords.reshape(T * V, 2).astype(np.float32)
+    #     times = self.times[i0:i1]
+    #     datetimes = np.repeat(times, V)
+
+    #     return ReaderData(
+    #         coords=coords,
+    #         geoinfos=np.zeros((T * V, 0), dtype=np.float32),
+    #         data=data,
+    #         datetimes=datetimes,
+    #     )
     @override
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
         if self._arr is None or self.len == 0 or len(channels_idx) == 0:
             return ReaderData.empty(num_data_fields=len(channels_idx), num_geo_fields=0)
 
-        t_idxs = self._norm_idx(idx, self.len)
-        if t_idxs.size == 0:
+        # Use base helper: may return a slice OR an array of ints + a debug tuple
+        t_idxs, dtr = self._get_dataset_idxs(idx)
+        if t_idxs is None:
             return ReaderData.empty(num_data_fields=len(channels_idx), num_geo_fields=0)
 
-        i0, i1 = int(t_idxs[0]), int(t_idxs[-1]) + 1
-        T, V = (i1 - i0), self.n_values
-
+        # Channel select
         csel = np.asarray(channels_idx, dtype=int)
-        # slice pre-stacked array → (T, V, C_sel)
-        block = self._arr.isel(time=slice(i0, i1), channel=csel).data
-        data = np.asarray(block.compute(), dtype=np.float32).reshape(T * V, csel.size)
 
-        # coords and times
-        latlon = np.stack([self.latitudes, self.longitudes], axis=1).astype(np.float32)  # (V,2)
-        coords = np.broadcast_to(latlon, (T, V, 2)).reshape(T * V, 2)
-        times = self.times[i0:i1]
-        datetimes = np.repeat(times, V)
+        # Time select: pass slice through unchanged; else pass the int array
+        time_sel = t_idxs if isinstance(t_idxs, slice) else np.asarray(t_idxs, dtype=int)
+
+        # (T, V, C_sel) dask array
+        block = self._arr.isel(time=time_sel, channel=csel).data
+
+        # Get shapes from the actual selection (robust for slice/array)
+        T = int(block.shape[0])
+        V = int(block.shape[1])
+        C = int(block.shape[2])
+
+        # Materialize data
+        data = np.asarray(block.compute(), dtype=np.float32).reshape(T * V, C)
+
+        # --- FIX: build coords using V from block and tile, no 3D broadcast/reshape ---
+        lat = self.latitudes.ravel().astype(np.float32)
+        lon = self.longitudes.ravel().astype(np.float32)
+        if lat.size != lon.size:
+            raise ValueError(f"lat/lon size mismatch: {lat.shape} vs {lon.shape}")
+
+        latlon = np.column_stack([lat, lon])          # (V_full, 2)
+        if latlon.shape[0] < V:
+            raise ValueError(f"coords shorter than V: {latlon.shape[0]} < {V}")
+
+        # Tile exactly to T*V rows
+        coords = np.tile(latlon[:V], (T, 1)).astype(np.float32)   # (T*V, 2)
+
+        # Datetimes (works for slice or ndarray)
+        times = self.times[time_sel]
+        datetimes = np.repeat(np.asarray(times), V)
+
+        # Optional consistency checks
+        # assert data.shape[0] == coords.shape[0] == datetimes.shape[0]
 
         return ReaderData(
             coords=coords,
