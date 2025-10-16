@@ -25,6 +25,7 @@ from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
 from weathergen.datasets.icon_dataset import IconDataset
 from weathergen.datasets.data_reader_radklim import RadklimKerchunkReader
+from weathergen.datasets.data_reader_radklim_net import RadklimDirectReader
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData
 from weathergen.datasets.tokenizer_forecast import TokenizerForecast
@@ -112,6 +113,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "radklim":
                         dataset = RadklimKerchunkReader
                         datapath = "/p/scratch/weatherai/data/radklim/temp_radklim"  # TODO
+                    case "radklim_netcdf":
+                        dataset = RadklimDirectReader
+                        datapath = "/p/data1/slmet/met_data/dwd/radklim-rw/netcdf/orig_grid"
                     case _:
                         msg = f"Unsupported stream type {stream_info['type']}"
                         f"for stream name '{stream_info['name']}'."
@@ -120,11 +124,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 datapath = pathlib.Path(datapath)
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                if fname.is_absolute():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
-                    filename = pathlib.Path(datapath) / fname
+                    filename = datapath / fname
 
                     if not filename.exists():  # see above
                         msg = (
@@ -136,7 +140,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 ds_type = stream_info["type"]
                 logger.info(
                     f"Opening dataset with type: {ds_type}"
-                    + f"from stream config {stream_info['name']}.",
+                    + f" from stream config {stream_info['name']}.",
                 )
                 ds = dataset(filename=filename, **kwargs)
 

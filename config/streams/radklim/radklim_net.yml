@@ -7,15 +7,17 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-RADKLIM_KC:
-  type: radklim
+RADKLIM:
+  type: radklim_netcdf
   name: RADKLIM
-  filenames: ['.'] 
-  reference: "/p/scratch/weatherai/data/radklim/temp_radklim/Radklim_full_ref.json"
-  stats_path: "/p/scratch/weatherai/data/radklim/temp_radklim/dummy_radklim_stats.json"
-  sample_coord_file: "/p/scratch/weatherai/data/radklim/radklim-rw/2010/RW_2017.002_201009.nc"
+  filenames: ["."]
   source_channels: ['RR']
   target_channels: ['RR']
+  file_pattern: "RW_2017.002_{year}{month:02d}.nc"
+  stats_path: "/p/scratch/weatherai/data/radklim/temp_radklim/dummy_radklim_stats.json"
+  manifest_path: "/p/scratch/weatherai/data/radklim/temp_radklim/radklim_manifest.json"
+  apply_norm: false
+  cache_size: 18  # Keep 6 months in memory (adjust based on your RAM)
   geoinfo_channeldds: []
   loss_weight : 1.
   masking_rate : 0.6
