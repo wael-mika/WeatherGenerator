@@ -24,7 +24,7 @@ ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
 ae_global_dim_embed: 2048
-ae_global_num_blocks: 8
+ae_global_num_blocks: 6
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
@@ -106,7 +106,7 @@ masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                           "same_strategy_per_batch": false
                           }
 
-num_epochs: 16
+num_epochs: 32
 samples_per_epoch: 4096
 samples_per_validation: 512
 shuffle: True
@@ -139,7 +139,7 @@ val_initial: False
 
 loader_num_workers: 8
 log_validation: 0
-analysis_streams_output: ["IMERG"]
+analysis_streams_output: ["ERA5", "IMERG"]
 
 istep: 0
 run_history: []
@@ -153,11 +153,21 @@ train_log:
   # The period to log metrics (in number of batch steps)
   log_interval: 20
 
-# Forecast MLP type: "dense" (default) or "moe"
-fe_mlp_type: "dense"    # set to "moe" to enable MoE
+# Mixture of Experts (MoE) parameters
+fe_mlp_type: "moe"    # set to "moe" to enable MoE
+ae_global_mlp_type: "moe"    # set to "moe" to enable MoE
+# ffn_mlp_type: "dense"  # set to "moe" to enable MoE in the feed-forward network of the decoder blocks
+# decoder_mlp_type: "dense"  # set to "moe" to enable MoE in the decoder prediction MLP
+# moe_lambda: 0.02  # coefficient for thes MoE load balancing loss
 
 # MoE-only params (ignored when fe_mlp_type != "moe")
-fe_moe_num_experts: 8
-fe_moe_top_k: 2
+fe_moe_num_experts: 2
+fe_moe_top_k: 1
 fe_moe_hidden_factor: 0.5   # = HF_dense / 4
+
+# MoE-only params (ignored when ae_global_mlp_type != "moe")
+ae_global_moe_num_experts: 4
+ae_global_moe_top_k: 2
+ae_global_moe_hidden_factor: 0.5   # = HF_dense / 4
+
 

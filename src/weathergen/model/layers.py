@@ -43,6 +43,7 @@ class MLP(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         name: str | None = None,
+        # final_activation: None | str = None,
     ):
         """Constructor"""
 
@@ -77,6 +78,8 @@ class MLP(torch.nn.Module):
             self.layers.append(nonlin())
             self.layers.append(torch.nn.Dropout(p=dropout_rate))
 
+        # if self.final_activation is not None:
+        #     self.layers.append(torch.nn.LeakyReLU(dim_hidden, dim_out))
         self.layers.append(torch.nn.Linear(dim_hidden, dim_out))
 
     def forward(self, *args):

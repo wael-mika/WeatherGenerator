@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+from weathergen.common.config import Config
 from weathergen.model.attention import (
     MultiCrossAttentionHeadVarlen,
     MultiCrossAttentionHeadVarlenSlicedQ,
@@ -23,12 +24,12 @@ from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
 )
-from weathergen.model.layers import MLP
-from weathergen.model.layers import MoEMLP
+from weathergen.model.layers import MLP, MoEMLP
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.config import Config, get_dtype
 
-
+import logging
+logger = logging.getLogger(__name__)
 
 class EmbeddingEngine:
     name: "EmbeddingEngine"
@@ -250,17 +251,50 @@ class GlobalAssimilationEngine:
                     )
                 )
             # MLP block
-            self.ae_global_blocks.append(
-                MLP(
-                    self.cf.ae_global_dim_embed,
-                    self.cf.ae_global_dim_embed,
-                    with_residual=True,
-                    dropout_rate=self.cf.ae_global_dropout_rate,
-                    hidden_factor=self.cf.ae_global_mlp_hidden_factor,
-                    norm_type=self.cf.norm_type,
-                    norm_eps=self.cf.mlp_norm_eps,
-                )
+            # Add MoE option
+            use_moe = getattr(self.cf, "ae_global_mlp_type", "dense") == "moe"
+            mlp_common_kwargs = dict(
+                dim_in=self.cf.ae_global_dim_embed,
+                dim_out=self.cf.ae_global_dim_embed,
+                with_residual=True,
+                dropout_rate=self.cf.ae_global_dropout_rate,
+                norm_type=self.cf.norm_type,
+                norm_eps=self.cf.mlp_norm_eps,
             )
+            if use_moe:
+                self.ae_global_blocks.append(
+                    MoEMLP(
+                        **mlp_common_kwargs,
+                        num_experts=getattr(self.cf, "ae_global_moe_num_experts", 2),
+                        top_k=getattr(self.cf, "ae_global_moe_top_k", 1),
+                        router_noisy_std=getattr(self.cf, "ae_global_moe_router_noisy_std", 0.0),
+                        hidden_factor=getattr(self.cf, "ae_global_moe_hidden_factor", 2),
+                    )
+                )
+            else:
+                self.ae_global_blocks.append(
+                    MLP(
+                        self.cf.ae_global_dim_embed,
+                        self.cf.ae_global_dim_embed,
+                        with_residual=True,
+                        dropout_rate=self.cf.ae_global_dropout_rate,
+                        hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.mlp_norm_eps,
+                    )
+                )
+        # Count MoE blocks
+        num_moe = sum(1 for m in self.ae_global_blocks if isinstance(m, MoEMLP))
+        logger.info(
+            "[MoE] GlobalAssimilationEngine: %d MoEMLP blocks "
+            "(ae_global_mlp_type=%s, experts=%s, top_k=%s, hidden_factor=%s)",
+            num_moe,
+            getattr(self.cf, "ae_global_mlp_type", "dense"),
+            getattr(self.cf, "ae_global_moe_num_experts", None),
+            getattr(self.cf, "ae_global_moe_top_k", None),
+            getattr(self.cf, "ae_global_moe_hidden_factor", None),
+        )
+
         return self.ae_global_blocks
 
 
@@ -344,8 +378,8 @@ class ForecastingEngine:
                     self.fe_blocks.append(
                         MoEMLP(
                             **mlp_common_kwargs,
-                            num_experts=getattr(self.cf, "fe_moe_num_experts", 8),
-                            top_k=getattr(self.cf, "fe_moe_top_k", 4),
+                            num_experts=getattr(self.cf, "fe_moe_num_experts", 2),
+                            top_k=getattr(self.cf, "fe_moe_top_k", 2),
                             router_noisy_std=getattr(self.cf, "fe_moe_router_noisy_std", 0.0),
                             hidden_factor=getattr(self.cf, "fe_moe_hidden_factor", 2),
                         )
@@ -353,21 +387,36 @@ class ForecastingEngine:
                 else:
                     self.fe_blocks.append(
                         MLP(
-                            **mlp_common_kwargs,
-                            # keep your existing defaults; add hidden_factor here if you need to override
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=True,
+                            dropout_rate=self.cf.fe_dropout_rate,
+                            norm_type=self.cf.norm_type,
+                            dim_aux=1,
+                            norm_eps=self.cf.mlp_norm_eps,
                         )
                     )
                 # ------------------------------------------------------------------
-        def init_weights_final(m):
-            if isinstance(m, torch.nn.Linear):
-                torch.nn.init.normal_(m.weight, mean=0, std=0.001)
-                if m.bias is not None:
-                    torch.nn.init.normal_(m.bias, mean=0, std=0.001)
+        # def init_weights_final(m):
+        #     if isinstance(m, torch.nn.Linear) and not getattr(m, "is_moe_router", False):
+        #         torch.nn.init.normal_(m.weight, mean=0, std=0.001)
+        #         if m.bias is not None:
+        #             torch.nn.init.normal_(m.bias, mean=0, std=0.001)
 
-        for block in self.fe_blocks:
-            block.apply(init_weights_final)
-
+        # for block in self.fe_blocks:
+        #     block.apply(init_weights_final)
+        num_moe = sum(1 for m in self.fe_blocks if isinstance(m, MoEMLP))
+        logger.info(
+            "[MoE] ForecastingEngine: %d MoEMLP blocks "
+            "(fe_mlp_type=%s, experts=%s, top_k=%s, hidden_factor=%s)",
+            num_moe,
+            getattr(self.cf, "fe_mlp_type", "dense"),
+            getattr(self.cf, "fe_moe_num_experts", None),
+            getattr(self.cf, "fe_moe_top_k", None),
+            getattr(self.cf, "fe_moe_hidden_factor", None),
+        )
         return self.fe_blocks
+
 
 
 class EnsPredictionHead(torch.nn.Module):
@@ -380,7 +429,7 @@ class EnsPredictionHead(torch.nn.Module):
         stream_name: str,
         norm_type="LayerNorm",
         hidden_factor=2,
-        # final_activation: None | str = None,
+        final_activation: None | str = None,
     ):
         """Constructor"""
 
@@ -409,10 +458,10 @@ class EnsPredictionHead(torch.nn.Module):
                     torch.nn.Linear(dim_internal, dim_out if enl - 2 == i else dim_internal)
                 )
 
-            # Add optional final non-linear activation
-            # if final_activation is not None and enl >= 1:
-            #     fal = ActivationFactory.get(final_activation)
-            #     self.pred_heads[-1].append(fal)
+            #Add optional final non-linear activation
+            if final_activation is not None and enl >= 1:
+                fal = ActivationFactory.get(final_activation)
+                self.pred_heads[-1].append(fal)
 
     #########################################
     @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
@@ -439,6 +488,7 @@ class TargetPredictionEngineClassic(nn.Module):
         softcap,
         tro_type,
         stream_name: str,
+        final_activation: None | str = None,
     ):
         """
         Initialize the TargetPredictionEngine with the configuration.
@@ -462,7 +512,9 @@ class TargetPredictionEngineClassic(nn.Module):
         self.softcap = softcap
         self.tro_type = tro_type
         self.tte = torch.nn.ModuleList()
-
+        self.final_activation_layer = (
+            ActivationFactory.get(final_activation) if final_activation is not None else nn.Identity()
+        )   
         for i in range(len(self.dims_embed) - 1):
             # Multi-Cross Attention Head
             self.tte.append(
@@ -547,6 +599,7 @@ class TargetPredictionEngine(nn.Module):
         softcap,
         tro_type,
         stream_name: str,
+        final_activation: None | str = None,
     ):
         """
         Initialize the TargetPredictionEngine with the configuration.
