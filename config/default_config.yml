@@ -114,6 +114,13 @@ training_config:
   # when this is "masking", we are basically only using the model_input subconfig
   training_mode: "student_teacher"  # "masking", "student_teacher", "forecast"
 
+  # SSL strategy selection:
+  # - null/"standard": Basic student-teacher with configurable relationship
+  # - "jepa": JEPA-style (1 global teacher + N local students)
+  # - "dino2": Dino 2-style (2 global teachers + many local students)
+  # - "ibot": iBoT-style (global teacher + masked students)
+  # - "multi_scale": Multi-scale views at different HEALPix levels
+  ssl_strategy: null  # Options: null, "jepa", "dino2", "ibot", "multi_scale"
 
   model_input:
     masking_strategy: "healpix" # "random", "healpix". Masking strategy to use for model input for masking, and local (student) views when doing student-teacher
@@ -125,17 +132,109 @@ training_config:
                               "same_strategy_per_batch": false
                               }
     relationship: "subset"  # "independent", "subset", "disjoint". Relationship of student views to teacher view.
-  
+
+    # Additional parameters for SSL strategies:
+    # For iBoT:
+    # mask_ratio: 0.4  # Additional masking ratio for iBoT-style training
+
+    # For multi_scale:
+    # rates: [0.5, 0.3, 0.15]  # Coverage rates for different scales
+    # hl_masks: [2, 1, 0]  # HEALPix levels for different scales
+    # num_views_per_scale: 2  # Number of views per scale
+
   teacher_model_input:
     strategy: "healpix"  # Strategy for teacher (global) view: "random", "healpix"
     rate: 0.5  # Fraction of data to keep in global view (alternative: use "keep_m" for absolute count)
     # keep_m: 100  # Alternative to rate: keep exactly this many parent cells
     rate_sampling: true  # randomly sample the rate per batch
-    masking_strategy_config: {"strategies": ["random", "healpix", "channel"], 
+    masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                               "probabilities": [0.34, 0.33, 0.33],
                               "hl_mask": 4, "mode": "per_cell",
                               "same_strategy_per_batch": false
                               }
+
+    # Additional parameters for SSL strategies:
+    # For dino2:
+    # num_global_views: 2  # Number of global (teacher) views for Dino 2
+
+# Maybe we need to have the SSL strategy configs in a separate config file
+# ============================================================================
+# Example SSL Strategy Configurations
+# ============================================================================
+#
+# JEPA Configuration:
+# -------------------
+# training_config:
+#   training_mode: "student_teacher"
+#   ssl_strategy: "jepa"
+#
+#   teacher_model_input:
+#     strategy: "healpix"
+#     rate: 0.8  # High coverage (70-90%)
+#     masking_strategy_config: {"hl_mask": 3}
+#
+#   model_input:
+#     masking_strategy: "healpix"
+#     rate: 0.3  # Low coverage (20-50%)
+#     num_views: 4  # Multiple local views
+#     masking_strategy_config: {"hl_mask": 1}
+#     relationship: "subset"  # Students are subsets of teacher
+#
+#
+# Dino 2 Configuration:
+# ---------------------
+# training_config:
+#   training_mode: "student_teacher"
+#   ssl_strategy: "dino2"
+#
+#   teacher_model_input:
+#     strategy: "healpix"
+#     rate: 0.75  # High coverage (70-80%)
+#     num_global_views: 2  # Two global views (teachers)
+#     masking_strategy_config: {"hl_mask": 3}
+#
+#   model_input:
+#     masking_strategy: "healpix"
+#     rate: 0.2  # Low coverage (10-30%)
+#     num_views: 8  # Many local views
+#     masking_strategy_config: {"hl_mask": 0}
+#
+#
+# iBoT Configuration:
+# -------------------
+# training_config:
+#   training_mode: "student_teacher"
+#   ssl_strategy: "ibot"
+#
+#   teacher_model_input:
+#     strategy: "healpix"
+#     rate: 0.9  # Very high coverage
+#     masking_strategy_config: {"hl_mask": 3}
+#
+#   model_input:
+#     masking_strategy: "random"
+#     rate: 0.8  # Start with similar coverage
+#     mask_ratio: 0.4  # Additional 40% masking (BERT-style)
+#     num_views: 2
+#
+#
+# Multi-scale Configuration:
+# --------------------------
+# training_config:
+#   training_mode: "student_teacher"
+#   ssl_strategy: "multi_scale"
+#
+#   teacher_model_input:
+#     strategy: "healpix"
+#     rate: 0.8
+#     masking_strategy_config: {"hl_mask": 3}
+#
+#   model_input:
+#     masking_strategy: "healpix"
+#     rates: [0.5, 0.3, 0.15]  # Different coverage per scale
+#     hl_masks: [2, 1, 0]  # Different HEALPix levels
+#     num_views_per_scale: 2  # 2 views per scale = 6 total views
+#     relationship: "subset"
 
 
 

@@ -166,12 +166,15 @@ class TokenizerMasking(Tokenizer):
 
         Returns
         -------
-        teacher : tuple | None
-            (tokens_cells, tokens_lens) for teacher or None when not student_teacher.
-        students : list
-            List of (tokens_cells, tokens_lens) for each student view (or single masking view).
+        teacher : list[tuple] | None
+            List of (tokens_cells, tokens_lens, mask_state) tuples for teacher view(s).
+            - For standard/jepa/ibot/multi_scale: list with 1 teacher view
+            - For dino2: list with 2 teacher views
+            - None when not student_teacher mode
+        students : list[tuple]
+            List of (tokens_cells, tokens_lens, mask_state) for each student view (or single masking view).
         view_metadata : list[ViewMetadata] | None
-            Metadata for teacher + students when in student_teacher mode.
+            Metadata for teacher(s) + students when in student_teacher mode.
         """
         if training_cfg is None or training_cfg.get("training_mode") != "student_teacher":
             # Standard masking path: single view only (treated as 'student' for uniformity)
@@ -182,20 +185,34 @@ class TokenizerMasking(Tokenizer):
         teacher_cfg = training_cfg.get("teacher_model_input", {})
         student_cfg = training_cfg.get("model_input", {})
         relationship = student_cfg.get("relationship", "subset")
+        ssl_strategy = training_cfg.get("ssl_strategy", None)
 
         num_cells = self.num_healpix_cells_source
         teacher_keep_mask, student_keep_masks, view_meta = build_views_for_stream(
-            self.masker, num_cells, teacher_cfg, student_cfg, relationship
+            self.masker, num_cells, teacher_cfg, student_cfg, relationship, ssl_strategy
         )
 
-        # Convert keep masks to torch tensors for downstream masking override
-        teacher_keep_mask_t = torch.from_numpy(teacher_keep_mask)
+        # Handle multiple teachers (e.g., dino2) vs single teacher
+        # For dino2, teacher_keep_mask is a list; for others, it's a single array
+        # TODO: Ensure multidata sampler handles multiple teachers correctly
+        if isinstance(teacher_keep_mask, list):
+            # Multiple teachers (dino2 style)
+            teacher_keep_masks_t = [torch.from_numpy(m) for m in teacher_keep_mask]
+            teacher_tokens = [
+                self.batchify_source(stream_info, rdata, time_win, keep_mask=km)
+                for km in teacher_keep_masks_t
+            ]
+        else:
+            # Single teacher (standard, jepa, ibot, multi_scale)
+            teacher_keep_mask_t = torch.from_numpy(teacher_keep_mask)
+            t_cells, t_lens, t_mask_state = self.batchify_source(
+                stream_info, rdata, time_win, keep_mask=teacher_keep_mask_t
+            )
+            teacher_tokens = [(t_cells, t_lens, t_mask_state)]
+
+        # Convert student keep masks to torch tensors
         student_keep_masks_t = [torch.from_numpy(m) for m in student_keep_masks]
 
-        # Teacher tokens
-        t_cells, t_lens, t_mask_state = self.batchify_source(
-            stream_info, rdata, time_win, keep_mask=teacher_keep_mask_t
-        )
         # Student tokens
         student_tokens = [
             self.batchify_source(stream_info, rdata, time_win, keep_mask=km)
@@ -205,7 +222,8 @@ class TokenizerMasking(Tokenizer):
         student_tokens = [(cells, lens, mstate) for (cells, lens, mstate) in student_tokens]
 
         self._last_view_metadata = view_meta
-        return (t_cells, t_lens, t_mask_state), student_tokens, view_meta
+        # Return teacher_tokens (always a list now) and student_tokens
+        return teacher_tokens, student_tokens, view_meta
 
     def sample_tensors_uniform_vectorized(
         self, tensor_list: list, lengths: list, max_total_points: int
