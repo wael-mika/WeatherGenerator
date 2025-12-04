@@ -313,6 +313,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         input_data: list,
         input_tokens: list,
         mask: torch.Tensor | None = None,
+        mask_metadata: dict | None = None,
     ) -> tuple[StreamData, dict | None]:
         """
         Build model network input
@@ -324,6 +325,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             view_meta: ViewMetadata describing spatial mask
             stream_info: Stream configuration dict
             stream_ds: List of dataset readers for this stream
+            mask: Cell-level mask (for spatial strategies) or None (for temporal)
+            mask_metadata: Metadata for deferred temporal mask generation
 
         Returns:
             StreamData with source and targets masked according to view_meta
@@ -349,6 +352,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 token_data,
                 (time_win_source.start, time_win_source.end),
                 mask,
+                mask_metadata,
             )
 
             # collect data for stream
@@ -366,10 +370,14 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         output_data: list,
         output_tokens: list,
         target_mask,
+        target_mask_metadata: dict | None = None,
     ) -> StreamData:
         """
         Generate stream data for output
 
+        Args:
+            target_mask: Cell-level mask (for spatial strategies) or None (for temporal)
+            target_mask_metadata: Metadata for deferred temporal mask generation
         """
 
         # collect for all forecast steps
@@ -392,6 +400,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     token_data,
                     (time_win_target.start, time_win_target.end),
                     target_mask,
+                    target_mask_metadata,
                 )
                 stream_data.add_target_coords(fstep, tc, tc_l)
 
@@ -403,6 +412,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     token_data,
                     (time_win_target.start, time_win_target.end),
                     target_mask,
+                    target_mask_metadata,
                 )
                 stream_data.add_target_values(fstep, tt_cells, tt_c, tt_t, idxs_inv)
 
@@ -420,6 +430,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         output_tokens: list,
         target_mask,
         source_mask,
+        target_mask_metadata: dict | None = None,
+        source_mask_metadata: dict | None = None,
     ) -> StreamData:
         """
         Return one batch of data
@@ -432,6 +444,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             forecast_dt: Number of forecast steps
             stream_info: Stream configuration dict
             stream_ds: List of dataset readers for this stream
+            target_mask: Cell-level target mask (or None for temporal)
+            source_mask: Cell-level source mask (or None for temporal)
+            target_mask_metadata: Metadata for deferred temporal mask generation
+            source_mask_metadata: Metadata for deferred temporal mask generation
 
         Returns:
             StreamData with source and targets masked according to view_meta
@@ -448,6 +464,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             input_data,
             input_tokens,
             source_mask,
+            source_mask_metadata,
         )
 
         stream_data = self._build_stream_data_output(
@@ -459,6 +476,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             output_data,
             output_tokens,
             target_mask,
+            target_mask_metadata,
         )
 
         return stream_data
@@ -554,6 +572,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     student_to_teacher,
                     target_metadata_list,
                     source_metadata_list,
+                    target_mask_metadata_list,
+                    source_mask_metadata_list,
                 ) = masks_streams[name]
 
                 # input_data and output_data is conceptually consecutive but differs
@@ -568,8 +588,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 # collect source data for current stream
                 # loop over student views
                 stream_data_source = {}
-                for sidx, (target_mask, source_mask) in enumerate(
-                    zip(target_masks, source_masks, strict=False)
+                for sidx, (target_mask, source_mask, target_mask_meta, source_mask_meta) in enumerate(
+                    zip(target_masks, source_masks, target_mask_metadata_list, source_mask_metadata_list, strict=False)
                 ):
                     # stream_data_source[name] = self._build_stream_data(
                     sdata = self._build_stream_data(
@@ -583,6 +603,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         output_tokens,
                         target_mask,
                         source_mask,
+                        target_mask_meta,
+                        source_mask_meta,
                     )
 
                     stream_data_source[name] = sdata
@@ -597,8 +619,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 stream_data_target = {}
 
                 # for t_idx, mask in enumerate(source_masks):
-                for sidx, (target_mask, source_mask) in enumerate(
-                    zip(target_masks, source_masks, strict=False)
+                for sidx, (target_mask, source_mask, target_mask_meta, source_mask_meta) in enumerate(
+                    zip(target_masks, source_masks, target_mask_metadata_list, source_mask_metadata_list, strict=False)
                 ):
                     # stream_data_target[name] = self._build_stream_data(
                     sdata = self._build_stream_data(
@@ -612,6 +634,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         output_tokens,
                         target_mask,
                         source_mask,
+                        target_mask_meta,
+                        source_mask_meta,
                     )
                     stream_data_target[name] = sdata
 
@@ -746,6 +770,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
     def _get_source_target_masks(self, training_mode):
         """
         Generate source and target masks for all streams
+
+        Returns:
+            dict: Stream name -> (target_masks, source_masks, mapping,
+                                  target_metadata, source_metadata,
+                                  target_mask_metadata_list, source_mask_metadata_list)
         """
 
         masks = {}
@@ -754,6 +783,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             source_cfg = self.training_cfg.get("model_input", {})
 
             # Build one teacher and its student views
+            # Returns: ((target_masks, target_metadata, target_mask_metadata_list),
+            #          (source_masks, source_metadata, source_mask_metadata_list),
+            #          mapping)
             target_data, source_data, mapping = self.tokenizer.masker.build_samples_for_stream(
                 training_mode,
                 self.num_healpix_cells,
@@ -762,11 +794,13 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             )
 
             masks[stream_info["name"]] = (
-                target_data[0],
-                source_data[0],
-                mapping,
-                target_data[1],
-                source_data[1],
+                target_data[0],  # target_masks
+                source_data[0],  # source_masks
+                mapping,  # source_target_mapping
+                target_data[1],  # target_metadata
+                source_data[1],  # source_metadata
+                target_data[2],  # target_mask_metadata_list
+                source_data[2],  # source_mask_metadata_list
             )
 
         return masks
