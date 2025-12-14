@@ -366,38 +366,14 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
-                outputs = []
-                for sample in batch.source_samples:
-                    outputs.append(
-                        self.model(
-                            self.model_params,
-                            sample,
-                            cf.forecast_offset,
-                            sample.get_forecast_steps(),
-                        )
-                    )
+                outputs = self.model(self.model_params, batch)
 
-                targets_and_auxs = []
-                for sample in batch.target_samples:
-                    targets_and_auxs.append(
-                        self.target_and_aux_calculator.compute(
-                            sample,
-                            self.model_params,
-                            self.model,
-                            cf.forecast_offset,
-                            sample.get_forecast_steps(),
-                        )
-                    )
-                # targets, aux = zip(*targets_and_auxs)
+                targets_and_auxs = self.target_and_aux_calculator.compute(
+                    batch, self.model_params, self.model
+                )
+
             loss, loss_values = self.loss_calculator.compute_loss(
-                preds=outputs[0],
-                targets=targets_and_auxs[0],
-                # TOOD: view_metadata has to be part of targets and/or preds
-                # view_metadata=(batch[-1].source2target_matching_idxs,
-                #                 [sample.meta_info for sample in batch[-1].source_samples],
-                #                 batch[-1].target2source_matching_idxs,
-                #                 [sample.meta_info for sample in batch[-1].target_samples]
-                #                ),
+                preds=outputs, targets=targets_and_auxs
             )
 
             # TODO re-enable this, need to think on how to make it compatible with
@@ -528,20 +504,11 @@ class Trainer(TrainerBase):
                             if self.ema_model is None
                             else self.ema_model.forward_eval
                         )
-                        sample = batch.source_samples[0]
-                        output = model_forward(
-                            self.model_params,
-                            sample,
-                            cf.forecast_offset,
-                            sample.get_forecast_steps(),
-                        )
-                        sample = batch.target_samples[0]
+                        output = model_forward(self.model_params, batch)
                         target_aux_output = self.target_and_aux_calculator.compute(
-                            sample,
+                            batch,
                             self.model_params,
                             self.model,
-                            cf.forecast_offset,
-                            sample.get_forecast_steps(),
                         )
                     loss, loss_values = self.loss_calculator_val.compute_loss(
                         preds=output,
