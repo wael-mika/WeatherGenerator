@@ -492,7 +492,7 @@ class Model(torch.nn.Module):
             strict=False,
         )
         [
-            print("    {:,} / {:,} / {:,} / {:,}".format(si["name"], np0, np1, np2))
+            print("   {} : {:,} / {:,} / {:,}".format(si["name"], np0, np1, np2))
             for si, np0, np1, np2 in zps
         ]
         print("-----------------")
