@@ -366,15 +366,19 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
-                outputs = self.model(self.model_params, batch)
+                # evaluate model
+                preds = self.model(self.model_params, batch)
 
+                # evaluate targets and aux
                 targets_and_auxs = self.target_and_aux_calculator.compute(
                     batch, self.model_params, self.model
                 )
 
             loss, loss_values = self.loss_calculator.compute_loss(
-                preds=outputs, targets=targets_and_auxs
+                preds=preds, targets=targets_and_auxs
             )
+
+            loss = 0.5 * loss
 
             # TODO re-enable this, need to think on how to make it compatible with
             # TODO: CL, this should become a regular loss term
@@ -549,16 +553,6 @@ class Trainer(TrainerBase):
 
         # avoid that there is a systematic bias in the validation subset
         self.dataset_val.advance()
-
-    def batch_to_device(self, batch):
-        device_type = torch.accelerator.current_accelerator()
-        self.device = torch.device(f"{device_type}:{self.cf.local_rank}")
-        # forecast_steps is dropped here from the batch
-        return (
-            [[d.to_device(self.device) for d in db] for db in batch[0]],
-            [b.to(self.device) for b in batch[1]],
-            [[b.to(self.device) for b in bf] for bf in batch[2]],
-        )
 
     def _get_full_model_state_dict(self):
         maybe_sharded_sd = (
