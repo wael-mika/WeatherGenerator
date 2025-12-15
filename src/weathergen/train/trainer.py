@@ -378,8 +378,6 @@ class Trainer(TrainerBase):
                 preds=preds, targets=targets_and_auxs
             )
 
-            loss = 0.5 * loss
-
             # TODO re-enable this, need to think on how to make it compatible with
             # TODO: CL, this should become a regular loss term
             # student-teacher training
