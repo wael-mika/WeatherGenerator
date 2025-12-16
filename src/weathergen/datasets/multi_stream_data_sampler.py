@@ -37,6 +37,7 @@ from weathergen.utils.distributed import is_root
 from weathergen.utils.train_logger import Stage
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
+type StreamName = str
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +113,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.len = 100000000
 
-        self.streams_datasets: list[list[AnyDataReader]] = []
+        self.streams_datasets: dict[StreamName, list[AnyDataReader]] = {}
         for _, stream_info in enumerate(cf.streams):
-            self.streams_datasets.append([])
+            # list of sources for current stream
+            self.streams_datasets[stream_info["name"]] = []
 
             for fname in stream_info["filenames"]:
                 kwargs = {
@@ -171,7 +173,6 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 if len(ds) > 0:
                     self.len = min(self.len, len(ds) - (self.len_hrs * (fsm + 1)) // self.step_hrs)
 
-                # MODIFIES config !!!
                 stream_info[str(self._stage) + "_source_channels"] = ds.source_channels
                 stream_info[str(self._stage) + "_target_channels"] = ds.target_channels
                 stream_info["target_channel_weights"] = (
@@ -180,7 +181,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     else [1.0 for _ in ds.target_channels]
                 )
 
-                self.streams_datasets[-1] += [ds]
+                self.streams_datasets[stream_info["name"]] += [ds]
 
         index_range = self.time_window_handler.get_index_range()
         self.len = int(index_range.end - index_range.start)
@@ -188,6 +189,20 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # adjust len to split loading across all workers and ensure it is multiple of batch_size
         len_chunk = ((self.len // cf.world_size) // batch_size) * batch_size
         self.len = min(self.len, len_chunk)
+
+        forecast_len = (self.len_hrs * (fsm + 1)) // self.step_hrs
+        perms_len = int(index_range.end - index_range.start) - (forecast_len + self.forecast_offset)
+        n_duplicates = self.len - perms_len
+        if n_duplicates > 0:
+            # TODO fix this more permanently (#1085)
+            msg = (
+                "WARNING: Missmatch between length of permutation indexes and"
+                "length of MultiStreamDataSampler,"
+                f"{n_duplicates} duplicate samples will be sampled."
+                "To avoid this increase the the length of the"
+                f"global sampling window by {n_duplicates * cf.step_hrs} hours."
+            )
+            logger.warning(msg)
         logger.info(f"index_range={index_range}, len={self.len}, len_chunk={len_chunk}")
 
         self.rank = cf.rank
@@ -239,20 +254,21 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             + ds[0].get_geoinfo_size()
             + ds[0].get_coords_size()
             + self.tokenizer.get_size_time_embedding()
-            for ds in self.streams_datasets
+            for _, ds in self.streams_datasets.items()
         ]
 
     def get_sources_num_channels(self):
-        return [ds[0].get_source_num_channels() for ds in self.streams_datasets]
+        return [ds[0].get_source_num_channels() for _, ds in self.streams_datasets.items()]
 
     def get_targets_num_channels(self):
-        return [ds[0].get_target_num_channels() for ds in self.streams_datasets]
+        return [ds[0].get_target_num_channels() for _, ds in self.streams_datasets.items()]
 
     def get_targets_coords_size(self):
         # TODO: avoid hard coding magic values
         # +6 at the end for stram_id and time encoding
         return [
-            (ds[0].get_geoinfo_size() + (5 * (3 * 5)) + 3 * 8) + 6 for ds in self.streams_datasets
+            (ds[0].get_geoinfo_size() + (5 * (3 * 5)) + 3 * 8) + 6
+            for _, ds in self.streams_datasets.items()
         ]
 
     def reset(self):
@@ -296,13 +312,13 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.tokenizer.reset_rng(self.rng)
 
-    def denormalize_source_channels(self, stream_id, data) -> torch.Tensor:
+    def denormalize_source_channels(self, stream_name, data) -> torch.Tensor:
         # TODO: with multiple ds per stream we need to distinguish these here
-        return self.streams_datasets[stream_id][0].denormalize_source_channels(data)
+        return self.streams_datasets[stream_name][0].denormalize_source_channels(data)
 
-    def denormalize_target_channels(self, stream_id, data) -> torch.Tensor:
+    def denormalize_target_channels(self, stream_name, data) -> torch.Tensor:
         # TODO: with multiple ds per stream we need to distinguish these here
-        return self.streams_datasets[stream_id][0].denormalize_target_channels(data)
+        return self.streams_datasets[stream_name][0].denormalize_target_channels(data)
 
     def _build_stream_data_input(
         self,
@@ -533,7 +549,6 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         mode = self.training_cfg.get("training_mode")
         source_cfgs = self.training_cfg.get("model_input")
-        target_cfgs = self.training_cfg.get("target_input", source_cfgs)
 
         # get/coordinate masks
         # TODO: should also return number of views
@@ -542,7 +557,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         if mode == "masking":
             source_select = ["network_input", "target_coords"]
             target_select = ["target_values"]
-        elif mode == "student_teacher":
+        elif mode == "student_teacher" or mode == "latent_loss":
             source_select = ["network_input"]
             target_select = ["network_input"]
         else:
@@ -551,24 +566,16 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         batch = ModelBatch(self.streams, num_source_samples, num_target_samples)
 
         # for all streams
-        for stream_info, stream_ds in zip(self.streams, self.streams_datasets, strict=True):
-            stream_name = stream_info["name"]
-
-            # TODO: data class for this or something similar
-            (
-                target_masks,
-                source_masks,
-                student_to_teacher,
-                target_metadata_list,
-                source_metadata_list,
-                target_config_indices,  # Maps each target mask to its config index
-                source_config_indices,  # Maps each source mask to its config index
-            ) = masks_streams[stream_name]
+        for stream_info, (stream_name, stream_ds) in zip(
+            self.streams, self.streams_datasets.items(), strict=True
+        ):
+            (target_masks, source_masks, student_to_teacher) = masks_streams[stream_name]
 
             # input_data and output_data is conceptually consecutive but differs
             # in source and target channels; overlap in one window when self.forecast_offset=0
             # max number of input steps
             i_max = np.array([sc.get("num_steps_input", 1) for sc in source_cfgs]).max().item()
+            # TODO: remove
             self.num_steps_input = i_max
             (input_data, output_data) = self._get_data_windows(idx, forecast_dt, i_max, stream_ds)
 
@@ -579,41 +586,36 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
             # collect source data for current stream
             # loop over student views
-            for sidx, source_mask in enumerate(source_masks):
-                # Use config index mapping to access the correct config entry
-                # This allows num_samples > 1 to work correctly
-                cfg_idx = int(source_config_indices[sidx])  # Convert numpy int32 to Python int
+            for sidx, source_mask in enumerate(source_masks.masks):
                 sdata = self._build_stream_data(
                     source_select,
                     idx,
                     forecast_dt,
                     stream_info,
-                    source_cfgs[cfg_idx].get("num_steps_input", 1),
+                    source_masks.metadata[sidx].params.get("num_steps_input", 1),
                     input_data,
                     output_data,
                     input_tokens,
                     output_tokens,
-                    target_masks[student_to_teacher[sidx]],
+                    target_masks.masks[student_to_teacher[sidx]],
                     source_mask,
                 )
 
                 # also want to add the mask to the metadata
-                source_metadata = source_metadata_list[sidx]
+                source_metadata = source_masks.metadata[sidx]
                 source_metadata.mask = source_mask
 
                 # map each source to its target
                 t_idx = student_to_teacher[sidx]
                 batch.add_source_stream(sidx, t_idx, stream_name, sdata, source_metadata)
 
-            for sidx, target_mask in enumerate(target_masks):
-                # Use config index mapping to access the correct config entry
-                cfg_idx = int(target_config_indices[sidx])  # Convert numpy int32 to Python int
+            for sidx, target_mask in enumerate(target_masks.masks):
                 sdata = self._build_stream_data(
                     target_select,
                     idx,
                     forecast_dt,
                     stream_info,
-                    target_cfgs[cfg_idx].get("num_steps_input", 1),
+                    target_masks.metadata[sidx].params.get("num_steps_input", 1),
                     input_data,
                     output_data,
                     input_tokens,
@@ -623,7 +625,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 )
 
                 # get target config info
-                target_metadata = target_metadata_list[sidx]
+                target_metadata = target_masks.metadata[sidx]
                 target_metadata.mask = target_mask
 
                 # find indices of all sources for current target
@@ -642,21 +644,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         masks = {}
         for stream_info in self.streams:
             # Build source and target sample masks
-            target_data, source_data, mapping = self.tokenizer.masker.build_samples_for_stream(
+            masks[stream_info["name"]] = self.tokenizer.masker.build_samples_for_stream(
                 training_mode, self.num_healpix_cells, self.training_cfg
-            )
-
-            # TODO: avoid the unpacking here
-            # Unpack: target_data = (masks, metadata, config_mapping)
-            #         source_data = (masks, metadata, config_mapping)
-            masks[stream_info["name"]] = (
-                target_data[0],  # target_masks
-                source_data[0],  # source_masks
-                mapping,  # source_target_mapping
-                target_data[1],  # target_metadata
-                source_data[1],  # source_metadata
-                target_data[2],  # target_config_mapping
-                source_data[2],  # source_config_mapping
             )
 
         # Determine number of samples directly from config (teacher and student views)

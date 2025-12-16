@@ -10,6 +10,22 @@ from weathergen.datasets.batch import SampleMetaData
 _logger = logging.getLogger(__name__)
 
 
+class MaskData:
+    masks: list[np.typing.NDArray] = []
+    metadata: list[SampleMetaData] = []
+
+    def __init__(self):
+        self.masks = []
+        self.metadata = []
+
+    def __len__(self):
+        return len(self.masks)
+
+    def add_mask(self, mask, params, cfg):
+        self.masks += [mask]
+        self.metadata += [SampleMetaData(params={**cfg, **params})]
+
+
 # Convert to torch.bool
 def to_bool_tensor(arr):
     return torch.from_numpy(np.asarray(arr)).to(torch.bool)
@@ -525,9 +541,7 @@ class Masker:
             target_cfgs = source_cfgs
 
         # iterate over all target samples
-        target_masks: list[np.typing.NDArray] = []
-        target_metadata: list[SampleMetaData] = []
-        target_config_mapping = []  # Track which config each target mask came from
+        target_masks = MaskData()
         # different strategies
         for i_target, target_cfg in enumerate(target_cfgs):
             # different samples/view per strategy
@@ -538,17 +552,15 @@ class Masker:
                     target_mask=None,
                     masking_strategy_config=target_cfg.get("masking_strategy_config", {}),
                 )
-                target_masks += [target_mask]
-                target_metadata += [SampleMetaData(params={**target_cfg, **mask_params})]
-                target_config_mapping += [i_target]  # Track which config this mask came from
+                target_masks.add_mask(target_mask, mask_params, target_cfg)
 
         # iterate over all source samples
-        source_masks: list[np.typing.NDArray] = []
-        source_metadata: list[SampleMetaData] = []
+        source_masks = MaskData()
         source_target_mapping = []
         source_config_mapping = []  # Track which config each source mask came from
         # different strategies
-        for i_source, source_cfg in enumerate(source_cfgs):
+        i_source = 0
+        for source_cfg in source_cfgs:
             # samples per strategy
             for _ in range(source_cfg.get("num_samples", 1)):
                 # Prepare masking config - inject target mask if overlap_ratio is specified
@@ -565,25 +577,20 @@ class Masker:
                 source_mask, mask_params = self._get_mask(
                     num_cells=num_cells,
                     strategy=source_cfg.get("masking_strategy"),
-                    masking_strategy_config=masking_cfg,
-                    target_mask=target_masks[i_source % len(target_masks)],
+                    masking_strategy_config=source_cfg.get("masking_strategy_config", {}),
+                    target_mask=target_masks.masks[i_source % len(target_masks)],
                     relationship=source_cfg.get("relationship", "independent"),
                 )
-                source_masks += [source_mask]
-                source_metadata += [SampleMetaData(params={**target_cfg, **mask_params})]
+                source_masks.add_mask(source_mask, mask_params, source_cfg)
                 # TODO: proper correspondence between source and target
                 source_target_mapping += [i_source % len(target_masks)]
-                source_config_mapping += [i_source]  # Track which config this mask came from
+                i_source += 1
 
         source_target_mapping = np.array(source_target_mapping, dtype=np.int32)
         source_config_mapping = np.array(source_config_mapping, dtype=np.int32)
         target_config_mapping = np.array(target_config_mapping, dtype=np.int32)
 
-        return (
-            (target_masks, target_metadata, target_config_mapping),
-            (source_masks, source_metadata, source_config_mapping),
-            source_target_mapping,
-        )
+        return (target_masks, source_masks, source_target_mapping)
 
     def _get_mask(
         self,
@@ -591,7 +598,7 @@ class Masker:
         strategy: str | None = None,
         masking_strategy_config: dict | None = None,
         target_mask: np.typing.NDArray | None = None,
-        relationship: str = "subset",
+        relationship: str | None = None,
     ) -> (np.typing.NDArray, dict):
         """Get effective mask, combining with target mask if specified.
 
@@ -615,6 +622,12 @@ class Masker:
         dict
             Parameters describing the masking that was applied
         """
+
+        if strategy == "forecast":
+            if relationship is not None:
+                assert relationship == "independent", (
+                    "strategy forecast requires relationship independent "
+                )
 
         # handle cases where mask is directly derived from target_mask
         if target_mask is not None:
