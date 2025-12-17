@@ -63,11 +63,11 @@ class PhysicalTargetAndAux(TargetAndAuxModuleBase):
             targets[stream_name] = []
             for fstep in range(forecast_steps):
                 targets_cur, target_times_cur, target_coords_cur = [], [], []
-                for sample in batch.target_samples:             
+                for sample in batch.target_samples:
                     targets_cur += [sample.streams_data[stream_name].target_tokens[fstep]]
                     target_times_cur += [sample.streams_data[stream_name].target_times_raw[fstep]]
                     target_coords_cur += [sample.streams_data[stream_name].target_coords_raw[fstep]]
-                
+
                 targets[stream_name].append(
                     {
                         "target": torch.cat(targets_cur),
@@ -75,7 +75,6 @@ class PhysicalTargetAndAux(TargetAndAuxModuleBase):
                         "target_coords": np.concatenate(target_coords_cur),
                     }
                 )
-
 
             # use aux_outputs to collect spoof flag
             aux_outputs[stream_name] = {"is_spoof": sample.streams_data[stream_name].is_spoof()}

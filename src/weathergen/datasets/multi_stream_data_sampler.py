@@ -395,7 +395,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # collect for all forecast steps
         dt = self.forecast_offset + forecast_dt
         for step, fstep in enumerate(range(self.forecast_offset, dt + 1)):
-            step_forecast_dt = idx + (self.forecast_delta_hrs * fstep) // self.step_hrs
+            step_forecast_dt = idx + (self.forecast_delta_dt * fstep) // self.step_timedelta
             time_win_target = self.time_window_handler.window(step_forecast_dt)
 
             # collect all targets for current stream
@@ -518,7 +518,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # target data: collect for all forecast steps
         output_data = []
         for fstep in range(self.forecast_offset, self.forecast_offset + forecast_dt + 1):
-            step_forecast_dt = base_idx + (self.forecast_delta_hrs * fstep) // self.step_hrs
+            step_forecast_dt = base_idx + (self.forecast_delta_dt * fstep) // self.step_timedelta
 
             rdata = collect_datasources(stream_ds, step_forecast_dt, "target")
 
