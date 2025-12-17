@@ -63,15 +63,6 @@ class Masker:
 
     def __init__(self, cf: Config):
         self.rng = None
-        # self.masking_rate = cf.masking_rate
-        # self.masking_strategy = cf.masking_strategy
-        # self.current_strategy = cf.masking_strategy  # Current strategy in use
-        # self.masking_rate_sampling = cf.masking_rate_sampling
-        # # masking_strategy_config is a dictionary that can hold any additional parameters
-        # self.masking_strategy_config = cf.get("masking_strategy_config", {})
-        # self.perm_sel = None
-        # self.mask_tokens = None
-        # self.mask_channels = None
 
         self.mask_value = 0.0
         self.dim_time_enc = 6
@@ -80,86 +71,11 @@ class Masker:
         self.healpix_level_data = cf.healpix_level
         self.healpix_num_cells = 12 * (4**cf.healpix_level)
 
-    # # Per-batch strategy tracking
-    # self.same_strategy_per_batch = self.masking_strategy_config.get(
-    #     "same_strategy_per_batch", False
-    # )
-    # self.batch_strategy_set = False
-
-    # # Check for required masking_strategy_config at construction time
-    # if self.current_strategy == "healpix":
-    #     hl_data = self.healpix_level_data
-    #     hl_mask = self.masking_strategy_config.get("hl_mask")
-    #     assert hl_data is not None and hl_mask is not None, (
-    #         "If HEALPix masking, hl_mask must be given in masking_strategy_config."
-    #     )
-    #     assert hl_mask < hl_data, "hl_mask must be less than hl_data for HEALPix masking."
-
-    # if self.current_strategy == "channel":
-    #     # Ensure that masking_strategy_config contains either 'global' or 'per_cell'
-    #     assert self.masking_strategy_config.get("mode") in [
-    #         "global",
-    #         "per_cell",
-    #     ], "masking_strategy_config must contain 'mode' key with value 'global' or 'per_cell'."
-
-    #     # check all streams that source and target channels are identical
-    #     for stream in cf.streams:
-    #         # check explicit includes
-    #         source_include = stream.get("source_include", [])
-    #         target_include = stream.get("target_include", [])
-    #         assert set(source_include) == set(target_include), (
-    #             "Source and target channels not identical. Required for masking_mode=channel"
-    #         )
-    #         # check excludes
-    #         source_exclude = stream.get("source_exclude", [])
-    #         target_exclude = stream.get("target_exclude", [])
-    #         assert set(source_exclude) == set(target_exclude), (
-    #             "Source and target channels not identical. Required for masking_mode=channel"
-    #         )
-
     def reset_rng(self, rng) -> None:
         """
         Reset rng after mini_epoch to ensure proper randomization
         """
         self.rng = rng
-
-    # def set_batch_strategy(self):
-    #     """
-    #     Set strategy for this batch.
-    #     Only relevant with combination and same_strategy_per_batch.
-    #     """
-    #     if self.masking_strategy == "combination" and self.same_strategy_per_batch:
-    #         self.current_strategy = self.rng.choice(
-    #             self.masking_strategy_config["strategies"],
-    #             p=self.masking_strategy_config["probabilities"],
-    #         )
-    #         self.batch_strategy_set = True
-
-    # def reset_batch_strategy(self):
-    #     """
-    #     Reset for next batch.
-    #     """
-    #     if self.masking_strategy == "combination" and self.same_strategy_per_batch:
-    #         self.current_strategy = None
-    #         self.batch_strategy_set = False
-
-    def _select_strategy(self):
-        """
-        Select the strategy to use.
-        """
-        if self.masking_strategy == "combination":
-            if self.same_strategy_per_batch:
-                assert self.batch_strategy_set, "Must call set_batch_strategy() first"
-                return self.current_strategy
-            else:
-                # Sample new strategy for each stream
-                return self.rng.choice(
-                    self.masking_strategy_config["strategies"],
-                    p=self.masking_strategy_config["probabilities"],
-                )
-        else:
-            # Non-combination strategy, return as is
-            return self.masking_strategy
 
     def _get_sampling_rate(self):
         """
