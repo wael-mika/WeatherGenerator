@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from weathergen.common.io import IOReaderData
-from weathergen.datasets.batch import ModelBatch, Sample
+from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
@@ -28,9 +28,8 @@ from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import (
-    compute_idxs_predict,
     compute_offsets_scatter_embed,
-    compute_source_cell_lens,
+    get_tokens_lens,
 )
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.utils.distributed import is_root
@@ -536,6 +535,39 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         return (input_data, output_data)
 
+    def _get_source_target_masks(self, training_mode):
+        """
+        Generate source and target masks for all streams
+        """
+
+        masks = {}
+        for stream_info in self.streams:
+            # Build source and target sample masks
+            masks[stream_info["name"]] = self.tokenizer.masker.build_samples_for_stream(
+                training_mode, self.num_healpix_cells, self.training_cfg
+            )
+
+        # Determine number of samples directly from config (teacher and student views)
+        source_cfgs = self.training_cfg.get("model_input")
+        target_cfgs = self.training_cfg.get("target_input", source_cfgs)
+        target_cfgs = target_cfgs if target_cfgs is not None else source_cfgs
+        num_source_samples = np.array([sc.get("num_samples", 1) for sc in source_cfgs]).sum().item()
+        num_target_samples = np.array([tc.get("num_samples", 1) for tc in target_cfgs]).sum().item()
+
+        return masks, num_source_samples, num_target_samples
+
+    def _preprocess_model_batch(self, batch: ModelBatch, input_steps: int, forecast_dt: int):
+        """
+        Perform necessary pre-processing of model batch
+        """
+        batch.source_tokens_lens = get_tokens_lens(self.streams, batch.source_samples, input_steps)
+
+        compute_offsets_scatter_embed(
+            self.streams, batch.source_samples, batch.source_tokens_lens, input_steps
+        )
+
+        return batch
+
     def _get_batch(self, idx: int, forecast_dt: int):
         """
 
@@ -634,68 +666,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 ]
                 batch.add_target_stream(sidx, student_indices, stream_name, sdata, target_metadata)
 
+        batch = self._preprocess_model_batch(batch, self.num_steps_input, forecast_dt)
+
         return batch
-
-    def _get_source_target_masks(self, training_mode):
-        """
-        Generate source and target masks for all streams
-        """
-
-        masks = {}
-        for stream_info in self.streams:
-            # Build source and target sample masks
-            masks[stream_info["name"]] = self.tokenizer.masker.build_samples_for_stream(
-                training_mode, self.num_healpix_cells, self.training_cfg
-            )
-
-        # Determine number of samples directly from config (teacher and student views)
-        source_cfgs = self.training_cfg.get("model_input")
-        target_cfgs = self.training_cfg.get("target_input", source_cfgs)
-        target_cfgs = target_cfgs if target_cfgs is not None else source_cfgs
-        num_source_samples = np.array([sc.get("num_samples", 1) for sc in source_cfgs]).sum().item()
-        num_target_samples = np.array([tc.get("num_samples", 1) for tc in target_cfgs]).sum().item()
-
-        return masks, num_source_samples, num_target_samples
-
-    def _preprocess_model_data(self, batch, forecast_dt):
-        """ """
-
-        # TODO, TODO, TODO: cleanup
-        num_steps_input = self.num_steps_input
-
-        # aggregated lens of tokens per cell across input batch samples
-        source_cell_lens = compute_source_cell_lens(batch, num_steps_input)
-
-        # compute offsets for scatter computation after embedding
-        batch = compute_offsets_scatter_embed(batch, num_steps_input)
-
-        # compute offsets and auxiliary data needed for prediction computation
-        # (info is not per stream so separate data structure)
-
-        # TODO: only use when targets are predicted with decoders
-        target_coords_idx = compute_idxs_predict(
-            self.forecast_offset + forecast_dt, batch, self.streams
-        )
-
-        return batch, source_cell_lens, target_coords_idx
-
-    def _preprocess_model_batch_sample(self, sample: Sample, forecast_dt: int):
-        """ """
-        streams = [sd for sd in sample.streams_data.values() if sd is not None]
-        if not streams:
-            sample.set_preprocessed([], {})
-            return
-        _, scl, tci = self._preprocess_model_data([streams], forecast_dt)
-        sample.set_preprocessed(scl, tci)
-
-    def _preprocess_model_batch(self, model_batch: ModelBatch, forecast_dt: int):
-        """
-        Perform necessary pre-processing of model batch
-        """
-        for sample in model_batch.source_samples:
-            self._preprocess_model_batch_sample(sample, forecast_dt)
-        for sample in model_batch.target_samples:
-            self._preprocess_model_batch_sample(sample, forecast_dt)
 
     def __iter__(self) -> ModelBatch:
         """
@@ -731,8 +704,6 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     break
                 else:
                     logger.warning("Skipping empty batch.")
-
-            self._preprocess_model_batch(batch, forecast_dt)
 
             yield batch
 

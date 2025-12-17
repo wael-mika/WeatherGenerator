@@ -80,30 +80,15 @@ class EmbeddingEngine(torch.nn.Module):
             else:
                 raise ValueError("Unsupported embedding network type")
 
-    def get_num_tokens(self, num_steps_input, batch):
-        offsets_base = torch.cumsum(
-            torch.cat(
-                [
-                    sample.source_cell_lens[input_step][1:]
-                    for sample in batch.source_samples
-                    for input_step in range(num_steps_input)
-                ]
-            ),
-            0,
-        )
-
-        return int(offsets_base[-1])
-
     def forward(self, batch, pe_embed):
         num_steps_input = batch.get_num_source_steps()
 
-        num_tokens = self.get_num_tokens(num_steps_input, batch)
+        num_tokens = torch.sum(batch.source_tokens_lens, 2).flatten().sum().item()
         tokens_all = torch.empty(
             (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
         )
 
         # iterate over all streams
-        # for stream_name, s_data in sample.streams_data.items():
         for stream_name in self.stream_names:
             # collect all source tokens from all input_steps and all samples in the batch
             sdata, scatter_idxs, pe_idxs = [], [], []
@@ -114,11 +99,7 @@ class EmbeddingEngine(torch.nn.Module):
                     # indices for positional encoding
                     pe_idxs += [sample.streams_data[stream_name].source_idxs_embed_pe[istep]]
                     # scatter idxs for switching from stream to cell-based ordering
-                    # need to be offset for different samples
-                    idx = sample.streams_data[stream_name].source_idxs_embed[istep]
-                    scatter_idxs += [
-                        idx + (scatter_idxs[-1][-1] + 1 if len(scatter_idxs) > 0 else 0)
-                    ]
+                    scatter_idxs += [sample.streams_data[stream_name].source_idxs_embed[istep]]
 
             sdata = torch.cat(sdata)
             # skip empty stream

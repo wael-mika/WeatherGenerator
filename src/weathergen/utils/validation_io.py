@@ -35,7 +35,7 @@ def write_output(cf, mini_epoch, batch_idx, dn_data, batch, model_output, target
         for stream_info in cf.streams:
             # predictions
             pred = model_output.get_physical_prediction(fstep, stream_info["name"]).to(fp32)
-            target = target_aux_output.physical[stream_info["name"]][fstep][0].to(fp32)
+            target = target_aux_output.physical[stream_info["name"]][fstep]["target"].to(fp32)
 
             if not (target.shape[0] > 0 and pred.shape[0] > 0):
                 continue
@@ -49,8 +49,8 @@ def write_output(cf, mini_epoch, batch_idx, dn_data, batch, model_output, target
             targets_all[-1] += [[dn_data(stream_info["name"], target).detach().cpu().numpy()]]
 
             sname = stream_info["name"]
-            targets_coords_all[-1] += [target_aux_output.physical[sname][fstep][2]]
-            targets_times_all[-1] += [target_aux_output.physical[sname][fstep][1]]
+            targets_coords_all[-1] += [target_aux_output.physical[sname][fstep]["target_coords"]]
+            targets_times_all[-1] += [target_aux_output.physical[sname][fstep]["target_times"]]
 
     #         # TODO: re-enable
     #           if len(idxs_inv) > 0:
