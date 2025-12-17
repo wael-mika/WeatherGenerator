@@ -110,6 +110,9 @@ class ModelBatch:
     # device of the tensors in the batch
     device: str | torch.device
 
+    # number of tokens per cell per forecast step and stream
+    source_tokens_lens: torch.Tensor
+
     def __init__(self, streams, num_source_samples: int, num_target_samples: int) -> None:
         """ """
 

@@ -105,6 +105,10 @@ class Trainer(TrainerBase):
         self.init_perf_monitoring()
         self.train_logger = TrainLogger(cf, config.get_path_run(self.cf))
 
+        self.loss_model_hist = {}
+        self.loss_unweighted_hist = {}
+        self.stdev_unweighted_hist = {}
+
     def inference(self, cf, devices, run_id_contd, mini_epoch_contd):
         # general initalization
         self.init(cf, devices)
