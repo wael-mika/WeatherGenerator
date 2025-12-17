@@ -321,9 +321,9 @@ def compute_offsets_scatter_embed(
     if torch.cat(offsets_base).shape[0] == 0:
         return
 
-    for i_s in range(input_steps):
-        for ib, sb in enumerate(batch_data):  # batch items
-            for itype, stream_info in enumerate(streams):
+    for itype, stream_info in enumerate(streams):
+        for i_s in range(input_steps):
+            for ib, sb in enumerate(batch_data):  # batch items
                 stream_data = sb.streams_data[stream_info["name"]]
                 if not stream_data.source_empty():
                     stream_data.source_idxs_embed[i_s] = torch.cat(
