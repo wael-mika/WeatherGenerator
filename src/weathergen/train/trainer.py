@@ -64,6 +64,10 @@ class Trainer(TrainerBase):
         self.target_and_aux_calculator = None
         self.validate_with_ema: bool = False
 
+        self.loss_model_hist = {}
+        self.loss_unweighted_hist = {}
+        self.stdev_unweighted_hist = {}
+
     def init(self, cf: Config, devices):
         # pylint: disable=attribute-defined-outside-init
         self.cf = OmegaConf.merge(
@@ -104,10 +108,6 @@ class Trainer(TrainerBase):
 
         self.init_perf_monitoring()
         self.train_logger = TrainLogger(cf, config.get_path_run(self.cf))
-
-        self.loss_model_hist = {}
-        self.loss_unweighted_hist = {}
-        self.stdev_unweighted_hist = {}
 
     def inference(self, cf, devices, run_id_contd, mini_epoch_contd):
         # general initalization
