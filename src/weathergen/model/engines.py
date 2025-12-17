@@ -366,6 +366,10 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     norm_eps=self.cf.mlp_norm_eps,
                 )
             )
+        if self.cf.get("ae_global_trailing_layer_norm", False):
+            self.ae_global_blocks.append(
+                torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+            )
 
         self.ae_global_blocks.append(
             torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
@@ -380,7 +384,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
 class ForecastingEngine(torch.nn.Module):
     name: "ForecastingEngine"
 
-    def __init__(self, cf: Config, num_healpix_cells: int) -> None:
+    def __init__(self, cf: Config, num_healpix_cells: int, dim_aux: int = None) -> None:
         """
         Initialize the ForecastingEngine with the configuration.
 
@@ -405,7 +409,7 @@ class ForecastingEngine(torch.nn.Module):
                             with_qk_lnorm=self.cf.fe_with_qk_lnorm,
                             with_flash=self.cf.with_flash_attention,
                             norm_type=self.cf.norm_type,
-                            dim_aux=(1 if cf.forecast_with_step_conditioning else 0),
+                            dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                         )
@@ -421,7 +425,7 @@ class ForecastingEngine(torch.nn.Module):
                             with_qk_lnorm=self.cf.fe_with_qk_lnorm,
                             with_flash=self.cf.with_flash_attention,
                             norm_type=self.cf.norm_type,
-                            dim_aux=(1 if cf.forecast_with_step_conditioning else 0),
+                            dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                         )
@@ -434,10 +438,15 @@ class ForecastingEngine(torch.nn.Module):
                         with_residual=True,
                         dropout_rate=self.cf.fe_dropout_rate,
                         norm_type=self.cf.norm_type,
-                        dim_aux=1,
+                        dim_aux=dim_aux,
                         norm_eps=self.cf.mlp_norm_eps,
                     )
                 )
+                # Optionally, add LayerNorm after i-th layer
+                if i in self.cf.get("fe_layer_norm_after_blocks", []):
+                    self.fe_blocks.append(
+                        torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+                    )
 
             self.fe_blocks.append(
                 torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
@@ -453,20 +462,13 @@ class ForecastingEngine(torch.nn.Module):
             block.apply(init_weights_final)
 
     def forward(self, tokens, fstep):
-        # predict residual to last time step if requested
-        forecast_residual = self.cf.get("forecast_residual", False)
-        if forecast_residual:
-            tokens_in = tokens
-
-        # aux_info is forecast step, if not disabled with cf.forecast_with_step_conditioning
-        aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
-        for block in self.fe_blocks:
-            if type(block) is torch.nn.LayerNorm:
+        aux_info = None
+        for _b_idx, block in enumerate(self.fe_blocks):
+            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = block(tokens)
             else:
                 tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
-
-        return tokens if not forecast_residual else (tokens_in + tokens)
+        return tokens
 
 
 class EnsPredictionHead(torch.nn.Module):
