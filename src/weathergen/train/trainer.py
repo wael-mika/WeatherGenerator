@@ -30,6 +30,7 @@ from weathergen.model.model_interface import (
 from weathergen.train.loss_calculator import LossCalculator
 from weathergen.train.lr_scheduler import LearningRateScheduler
 from weathergen.train.trainer_base import TrainerBase
+from weathergen.train.utils import extract_batch_metadata
 from weathergen.utils.distributed import ddp_average, is_root
 from weathergen.utils.train_logger import TRAIN, VAL, Stage, TrainLogger, prepare_losses_for_logging
 from weathergen.utils.utils import get_batch_size, get_dtype
@@ -63,6 +64,10 @@ class Trainer(TrainerBase):
         self.t_start: float = 0
         self.target_and_aux_calculator = None
         self.validate_with_ema: bool = False
+
+        self.loss_model_hist = {}
+        self.loss_unweighted_hist = {}
+        self.stdev_unweighted_hist = {}
 
     def init(self, cf: Config, devices):
         # pylint: disable=attribute-defined-outside-init
@@ -375,7 +380,11 @@ class Trainer(TrainerBase):
                     batch, self.model_params, self.model
                 )
 
-            loss = self.loss_calculator.compute_loss(preds=preds, targets=targets_and_auxs)
+            loss = self.loss_calculator.compute_loss(
+                preds=preds,
+                targets=targets_and_auxs,
+                metadata=extract_batch_metadata(batch),
+            )
 
             # TODO re-enable this, need to think on how to make it compatible with
             # TODO: CL, this should become a regular loss term
@@ -472,6 +481,7 @@ class Trainer(TrainerBase):
                     _ = self.loss_calculator_val.compute_loss(
                         preds=output,
                         targets=target_aux_output,
+                        metadata=extract_batch_metadata(batch),
                     )
 
                     # log output

@@ -147,11 +147,7 @@ class LossPhysical(LossModuleBase):
 
         return loss_lfct, losses_chs
 
-    def compute_loss(
-        self,
-        preds: dict,
-        targets: dict,
-    ) -> LossValues:
+    def compute_loss(self, preds: dict, targets: dict, metadata) -> LossValues:
         """
         Computes the total loss for a given batch of predictions and corresponding
         stream data.
@@ -220,10 +216,9 @@ class LossPhysical(LossModuleBase):
                 # get current prediction and target
                 # TODO: consistent ordering of preds and targets
                 pred = preds.physical[fstep].get(stream_name, torch.tensor([]))
-                
+
                 target = targets.physical[stream_name][fstep]["target"]
                 target_times = targets.physical[stream_name][fstep]["target_times"]
-                target_coords = targets.physical[stream_name][fstep]["target_coords"]
 
                 # skip if either target or prediction has no data points
                 if not (target.shape[0] > 0 and pred.shape[0] > 0):
