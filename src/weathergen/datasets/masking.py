@@ -522,10 +522,6 @@ class Masker:
                 )
                 overlap_ratio = cfg.get("overlap_ratio", None)
 
-                import pdb
-
-                pdb.set_trace()
-
                 # If overlap is requested but no mask provided, log a warning
                 if overlap_ratio is not None and overlap_with_mask is None:
                     _logger.warning(
