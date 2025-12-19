@@ -27,11 +27,7 @@ def write_output(cf, mini_epoch, batch_idx, dn_data, batch, model_output, target
     # collect all target / prediction-related information
     fp32 = torch.float32
     preds_all, targets_all, targets_coords_all, targets_times_all = [], [], [], []
-<<<<<<< HEAD
-    for fstep in range(cf.forecast_offset, cf.forecast_steps + 2):
-=======
     for fstep in range(cf.forecast_offset, cf.forecast_steps + 1):
->>>>>>> origin/develop
         preds_all += [[]]
         targets_all += [[]]
         targets_coords_all += [[]]

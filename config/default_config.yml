@@ -56,11 +56,7 @@ forecast_policy: null
 forecast_freeze_model: False
 forecast_att_dense_rate: 1.0
 forecast_with_step_conditioning: True # False
-<<<<<<< HEAD
-fe_num_blocks: 6
-=======
 fe_num_blocks: 0
->>>>>>> origin/develop
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -101,10 +97,6 @@ ema_halflife_in_thousands: 1e-3
 validation_config: {"losses": {LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]},}}
 # Student-teacher configuration (only used when training_mode == "student_teacher")
 # TODO: adapt so that the masking or forecast config entry also sits here
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/develop
 training_config:
   # # when this is "masking", we are basically only using the model_input subconfig
   training_mode: "masking"  # "masking", "student_teacher", "forecast"
@@ -118,7 +110,6 @@ training_config:
       masking_strategy_config : { diffusion_rn : True, rate : 0.4 }
       relationship: "complement"  # "independent", "subset", "disjoint". Relationship of student views to teacher view.
       num_steps_input: 1
-<<<<<<< HEAD
 
 
     # - masking_strategy: "random"
@@ -238,12 +229,6 @@ training_config:
 
 
 num_register_tokens: 16
-=======
-      # loss : ibot
-
-
-num_register_tokens: 0
->>>>>>> origin/develop
 
 num_mini_epochs: 32
 samples_per_mini_epoch: 512 #4096
