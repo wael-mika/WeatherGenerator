@@ -774,10 +774,10 @@ class Masker:
         mask = np.zeros(num_cells, dtype=bool)
         mask[child_indices] = True
 
-        _logger.info(
-            f"Deterministic overlap: target={overlap_ratio:.1%}, "
-            f"actual={len(overlap_cell_indices) / len(child_indices):.1%} "
-            f"({len(overlap_cell_indices)}/{len(child_indices)} cells)"
-        )
+        #_logger.info(
+        #    f"Deterministic overlap: target={overlap_ratio:.1%}, "
+        #    f"actual={len(overlap_cell_indices) / len(child_indices):.1%} "
+        #    f"({len(overlap_cell_indices)}/{len(child_indices)} cells)"
+        #)
 
         return mask
