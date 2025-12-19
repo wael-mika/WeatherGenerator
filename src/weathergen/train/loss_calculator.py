@@ -11,6 +11,10 @@
 
 import logging
 from collections import defaultdict
+<<<<<<< HEAD
+=======
+from copy import deepcopy
+>>>>>>> origin/develop
 
 import torch
 from omegaconf import DictConfig
@@ -57,7 +61,13 @@ class LossCalculator:
         self.stddev_unweighted_hist = []
 
         calculator_configs = (
+<<<<<<< HEAD
             cf.training_config.losses if stage == TRAIN else cf.validation_config.losses
+=======
+            deepcopy(cf.training_config.losses)
+            if stage == TRAIN
+            else deepcopy(cf.validation_config.losses)
+>>>>>>> origin/develop
         )
 
         self.loss_calculators = [

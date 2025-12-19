@@ -93,6 +93,7 @@ class Masker:
         """
         self.rng = rng
 
+<<<<<<< HEAD
     def _select_spatially_contiguous_cells(
         self,
         healpix_level: int,
@@ -296,6 +297,8 @@ class Masker:
             # Non-combination strategy, return as is
             return self.masking_strategy
 
+=======
+>>>>>>> origin/develop
     def _get_sampling_rate(self):
         """
         Get the sampling, if requested by sampling it itself
@@ -521,6 +524,7 @@ class Masker:
                 )
                 target_masks.add_mask(target_mask, mask_params, target_cfg)
 
+<<<<<<< HEAD
 
                 for source_cfg in source_cfgs:
                     # samples per strategy
@@ -536,6 +540,13 @@ class Masker:
                                 else target_mask_for_overlap
                             )
 
+=======
+                # iterate over all source samples
+                # different strategies
+                for _i_source, source_cfg in enumerate(source_cfgs):
+                    # samples per strategy
+                    for _ in range(source_cfg.get("num_samples", 1)):
+>>>>>>> origin/develop
                         source_mask, mask_params = self._get_mask(
                             num_cells=num_cells,
                             strategy=source_cfg.get("masking_strategy"),
@@ -544,13 +555,19 @@ class Masker:
                             relationship=source_cfg.get("relationship", "independent"),
                         )
                         source_masks.add_mask(source_mask, mask_params, source_cfg)
+<<<<<<< HEAD
                         # TODO: proper correspondence between source and target
+=======
+>>>>>>> origin/develop
                         source_target_mapping += [i_target]
                 i_target += 1
 
         source_target_mapping = np.array(source_target_mapping, dtype=np.int32)
+<<<<<<< HEAD
         source_config_mapping = np.array(source_config_mapping, dtype=np.int32)
         target_config_mapping = np.array(target_config_mapping, dtype=np.int32)
+=======
+>>>>>>> origin/develop
 
         return (target_masks, source_masks, source_target_mapping)
 
@@ -697,6 +714,7 @@ class Masker:
                 mask = np.zeros(num_cells, dtype=bool)
                 mask[child_indices] = True
 
+<<<<<<< HEAD
         elif strategy == "cropping_healpix":
             # Spatial cropping: select contiguous region and KEEP it (mask rest)
             # This is the elegant inverse of healpix masking
@@ -807,6 +825,8 @@ class Masker:
                     mask = np.zeros(num_cells, dtype=bool)
                     mask[child_indices] = True
 
+=======
+>>>>>>> origin/develop
         else:
             raise NotImplementedError(
                 f"Cell selection strategy '{strategy}' not supported for keep mask generation."
