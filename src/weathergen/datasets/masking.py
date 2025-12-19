@@ -367,9 +367,9 @@ class Masker:
                         masking_cfg = source_cfg.get("masking_strategy_config", {}).copy()
                         if "overlap_ratio" in masking_cfg and len(target_masks) > 0:
                             # Enable overlap control by passing teacher's mask
-                            target_mask_for_overlap = target_masks[_i_source % len(target_masks)]
+                            target_mask_for_overlap = target_masks.masks[_i_source % len(target_masks)]
                             masking_cfg["overlap_with_mask"] = (
-                                target_mask_for_overlap.cpu().numpy()
+                                target_mask_for_overlap.cpu().numpy().tolist()
                                 if hasattr(target_mask_for_overlap, "cpu")
                                 else target_mask_for_overlap
                             )
@@ -377,7 +377,7 @@ class Masker:
                         source_mask, mask_params = self._get_mask(
                             num_cells=num_cells,
                             strategy=source_cfg.get("masking_strategy"),
-                            masking_strategy_config=source_cfg.get("masking_strategy_config", {}),
+                            masking_strategy_config=masking_cfg,
                             target_mask=target_mask,
                             relationship=source_cfg.get("relationship", "independent"),
                         )
@@ -553,8 +553,10 @@ class Masker:
             else:
                 # Spatial selection method
                 method = cfg.get("method", "geodesic_disk")  # Default to best method for SSL
-                overlap_with_mask = cfg.get("overlap_with_mask", None)
+                overlap_with_mask = np.array(cfg.get("overlap_with_mask", None)) if cfg.get("overlap_with_mask", None) is not None else None
                 overlap_ratio = cfg.get("overlap_ratio", None)
+
+                import pdb; pdb.set_trace()
 
                 # If overlap is requested but no mask provided, log a warning
                 if overlap_ratio is not None and overlap_with_mask is None:
@@ -577,8 +579,6 @@ class Masker:
                         num_cells_to_select=num_parents_to_keep,
                         center_cell=None,
                         method=method,
-                        overlap_with=None,
-                        overlap_ratio=None,
                     )
 
                     # Project to data level
@@ -641,8 +641,7 @@ class Masker:
 
         assert num_cells_to_select <= num_total_cells
 
-        # Random starting point
-        # Note we may want overlap here
+        # Random starting point. Note we may want overlap here
         # for now we basically control with chosen masking rates
         center_cell = self.rng.integers(0, num_total_cells)
 
@@ -659,8 +658,7 @@ class Masker:
 
         return np.array(sorted(selected))
     
-# separate functions for the different methods
-
+    # separate functions for the different methods of producing spatially contiguous regions
     def _select_disk(self, center_cell: int, num_cells_to_select: int, nside: int) -> set[int]:
         """
         Select cells in a disk shape by expanding layer by layer.
