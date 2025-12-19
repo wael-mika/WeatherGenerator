@@ -165,24 +165,25 @@ training_config:
 # This is the inverse of healpix masking - perfect for SSL methods like DINO/JEPA/IBOT
 
 # Example 1: Basic spatial cropping (single global crop - 75% of sphere)
-training_config:
-  training_mode: "masking"
-  model_input:
-    - masking_strategy: "cropping_healpix"
-      num_samples: 1
-      masking_strategy_config:
-        hl_mask: 0          # HEALPix level for cropping (must be < healpix_level)
-        rate: 0.75          # Fraction of cells to KEEP (0.75 = keep 75%, mask 25%)
-        method: "geodesic_disk"  # Options: "disk", "random_walk", "geodesic_disk" (recommended)
-      relationship: "independent"
-      num_steps_input: 1
-      loss:
-        training:
-          - LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]}
+# training_config:
+#   training_mode: "masking"
+#   losses :
+#       LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
+#   model_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 0          # HEALPix level for cropping (must be < healpix_level)
+#         rate: 0.75          # Fraction of cells to KEEP (0.75 = keep 75%, mask 25%)
+#         method: "geodesic_disk"  # Options: "disk", "random_walk", "geodesic_disk" (recommended)
+#       relationship: "independent"
+#       num_steps_input: 1
 
 # Example 2: DINO-style training (1 global + 3 local crops)
 # training_config:
 #   training_mode: "masking"
+#   losses :
+#       LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
 #   target_input:
 #     - masking_strategy: "cropping_healpix"
 #       num_samples: 1
@@ -193,13 +194,12 @@ training_config:
 #       masking_strategy_config: {hl_mask: 0, rate: 0.4, method: "geodesic_disk"}
 #       relationship: "independent"
 #       num_steps_input: 1
-#       loss:
-#         training:
-#           - LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]}
 
 # Example 3: IBOT-style training (1 global teacher + 1 local student with controlled overlap)
 # training_config:
 #   training_mode: "masking"
+#   losses :
+#     LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
 #   target_input:
 #     - masking_strategy: "cropping_healpix"
 #       num_samples: 1
@@ -214,12 +214,9 @@ training_config:
 #         hl_mask: 2          # Same level for consistent cropping
 #         rate: 0.3           # Student crop: 30% of sphere
 #         method: "geodesic_disk"
-#         overlap_ratio: 0.5  # 50% of student overlaps with teacher (15% overlap, 15% independent)
+#         overlap_ratio: 0.5   # 50% of student crop overlaps with teacher crop
 #       relationship: "independent"
 #       num_steps_input: 1
-#       loss:
-#         training:
-#           - LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]}
 #
 # Note: overlap_ratio controls what fraction of the STUDENT crop comes from the teacher:
 #   - 0.0 = completely disjoint (no overlap)
