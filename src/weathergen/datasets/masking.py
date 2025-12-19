@@ -95,44 +95,6 @@ class Masker:
         """
         self.rng = rng
 
-    # def set_batch_strategy(self):
-    #     """
-    #     Set strategy for this batch.
-    #     Only relevant with combination and same_strategy_per_batch.
-    #     """
-    #     if self.masking_strategy == "combination" and self.same_strategy_per_batch:
-    #         self.current_strategy = self.rng.choice(
-    #             self.masking_strategy_config["strategies"],
-    #             p=self.masking_strategy_config["probabilities"],
-    #         )
-    #         self.batch_strategy_set = True
-
-    # def reset_batch_strategy(self):
-    #     """
-    #     Reset for next batch.
-    #     """
-    #     if self.masking_strategy == "combination" and self.same_strategy_per_batch:
-    #         self.current_strategy = None
-    #         self.batch_strategy_set = False
-
-    def _select_strategy(self):
-        """
-        Select the strategy to use.
-        """
-        if self.masking_strategy == "combination":
-            if self.same_strategy_per_batch:
-                assert self.batch_strategy_set, "Must call set_batch_strategy() first"
-                return self.current_strategy
-            else:
-                # Sample new strategy for each stream
-                return self.rng.choice(
-                    self.masking_strategy_config["strategies"],
-                    p=self.masking_strategy_config["probabilities"],
-                )
-        else:
-            # Non-combination strategy, return as is
-            return self.masking_strategy
-
     def _get_sampling_rate(self):
         """
         Get the sampling, if requested by sampling it itself
