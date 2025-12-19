@@ -695,122 +695,121 @@ class Masker:
 
         assert num_cells_to_select <= num_total_cells
 
-        # Optimize center for controlled overlap if requested
-        # NOTE: This is the programmatic API approach. The config system uses a more
-        # deterministic approach in _generate_cell_mask (see lines 752-803).
-        if overlap_with is not None and overlap_ratio is not None and center_cell is None:
-            assert 0.0 <= overlap_ratio <= 1.0, "overlap_ratio must be in [0.0, 1.0]"
-
-            overlap_set = set(overlap_with)
-
-            # Use intelligent center selection based on overlap target
-            if overlap_ratio > 0.7:
-                # High overlap: select center from within existing crop
-                center_cell = self.rng.choice(list(overlap_set))
-            elif overlap_ratio < 0.3:
-                # Low overlap: select center from outside existing crop
-                non_overlap_cells = [c for c in range(num_total_cells) if c not in overlap_set]
-                if non_overlap_cells:
-                    center_cell = self.rng.choice(non_overlap_cells)
-                else:
-                    # Fallback if no non-overlap cells available
-                    center_cell = self.rng.integers(0, num_total_cells)
-            else:
-                # Medium overlap: random selection (boundary-agnostic)
-                center_cell = self.rng.integers(0, num_total_cells)
-
-        # Random starting point if not specified
-        elif center_cell is None:
-            center_cell = self.rng.integers(0, num_total_cells)
-
+        # Random starting point to create crops
+        # note we can determine overlap in next PR
+        center_cell = self.rng.integers(0, num_total_cells)
+        
         if method == "disk":
-            # Layer-by-layer neighbor growth - creates compact irregular regions
-            selected = {center_cell}
-            frontier = {center_cell}
-
-            while len(selected) < num_cells_to_select and frontier:
-                # Expand frontier by one layer
-                next_frontier = set()
-                for cell in frontier:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", message="invalid value encountered")
-                        neighbors = hp.neighbours(cell, nside, order="nested")
-                    valid_neighbors = [n for n in neighbors if n != -1 and n not in selected]
-                    next_frontier.update(valid_neighbors)
-
-                if not next_frontier:
-                    break
-
-                # Randomly select from frontier to reach target count
-                candidates = list(next_frontier)
-                self.rng.shuffle(candidates)
-                num_to_add = min(len(candidates), num_cells_to_select - len(selected))
-                selected.update(candidates[:num_to_add])
-                frontier = set(candidates[:num_to_add])
+            selected = self._select_disk(center_cell, num_cells_to_select, nside)
 
         elif method == "random_walk":
-            # Random walk through neighbors - creates elongated irregular regions
-            selected = {center_cell}
-            frontier = {center_cell}
-
-            while len(selected) < num_cells_to_select:
-                # Get all neighbors of current frontier
-                neighbors = set()
-                for cell in frontier:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", message="invalid value encountered")
-                        cell_neighbors = hp.neighbours(cell, nside, order="nested")
-                    valid = [n for n in cell_neighbors if n != -1 and n not in selected]
-                    neighbors.update(valid)
-
-                if not neighbors:
-                    break
-
-                # Randomly pick one neighbor and continue from there
-                next_cell = self.rng.choice(list(neighbors))
-                selected.add(next_cell)
-                frontier = {next_cell}
+            selected = self._select_random_walk(center_cell, num_cells_to_select, nside)
 
         elif method == "geodesic_disk":
-            # Angular distance selection - creates most uniform circular regions
-            # Best method for SSL (DINO/JEPA/IBOT) due to shape regularity
-
-            def lonlat_to_xyz(lon, lat):
-                """Convert lon/lat to 3D cartesian coordinates."""
-                return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
-
-            # Get center coordinates
-            center_lonlat = hp.healpix_to_lonlat(center_cell, nside, order="nested")
-            center_lon = float(
-                center_lonlat[0].value if hasattr(center_lonlat[0], "value") else center_lonlat[0]
+            selected = self._select_geodesic_disk(
+                center_cell, num_cells_to_select, nside, num_total_cells
             )
-            center_lat = float(
-                center_lonlat[1].value if hasattr(center_lonlat[1], "value") else center_lonlat[1]
-            )
-            center_xyz = lonlat_to_xyz(center_lon, center_lat)
-
-            # Get all cell coordinates
-            all_indices = np.arange(num_total_cells)
-            all_lonlat = hp.healpix_to_lonlat(all_indices, nside, order="nested")
-            all_lon = all_lonlat[0].value if hasattr(all_lonlat[0], "value") else all_lonlat[0]
-            all_lat = all_lonlat[1].value if hasattr(all_lonlat[1], "value") else all_lonlat[1]
-
-            all_xyz = np.stack(
-                [
-                    np.cos(all_lat) * np.cos(all_lon),
-                    np.cos(all_lat) * np.sin(all_lon),
-                    np.sin(all_lat),
-                ],
-                axis=1,
-            )
-
-            # Compute angular distances and select closest cells
-            dot_products = np.clip(np.dot(all_xyz, center_xyz), -1.0, 1.0)
-            angular_distances = np.arccos(dot_products)
-            selected = np.argsort(angular_distances)[:num_cells_to_select]
-
         else:
             raise ValueError(f"Unknown selection method: {method}")
 
         return np.array(sorted(selected))
+    
+# separate functions for the different methods
 
+    def _select_disk(self, center_cell: int, num_cells_to_select: int, nside: int) -> set[int]:
+        """
+        Select cells in a disk shape by expanding layer by layer.
+        """
+        selected = {center_cell}
+        frontier = {center_cell}
+
+        while len(selected) < num_cells_to_select and frontier:
+            # Expand frontier by one layer
+            next_frontier = set()
+            for cell in frontier:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="invalid value encountered")
+                    neighbors = hp.neighbours(cell, nside, order="nested")
+                valid_neighbors = [n for n in neighbors if n != -1 and n not in selected]
+                next_frontier.update(valid_neighbors)
+
+            if not next_frontier:
+                break
+
+            # Randomly select from frontier to reach target count
+            candidates = list(next_frontier)
+            self.rng.shuffle(candidates)
+            num_to_add = min(len(candidates), num_cells_to_select - len(selected))
+            selected.update(candidates[:num_to_add])
+            frontier = set(candidates[:num_to_add])
+        
+        return selected
+
+    def _select_random_walk(self, center_cell: int, num_cells_to_select: int, nside: int) -> set[int]:
+        '''
+        Random walk through neighbors, creates elongated irregular regions
+        '''
+        selected = {center_cell}
+        frontier = {center_cell}
+
+        while len(selected) < num_cells_to_select:
+            # Get all neighbors of current frontier
+            neighbors = set()
+            for cell in frontier:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="invalid value encountered")
+                    cell_neighbors = hp.neighbours(cell, nside, order="nested")
+                valid = [n for n in cell_neighbors if n != -1 and n not in selected]
+                neighbors.update(valid)
+
+            if not neighbors:
+                break
+
+            # Randomly pick one neighbor and continue from there
+            next_cell = self.rng.choice(list(neighbors))
+            selected.add(next_cell)
+            frontier = {next_cell}
+
+        return selected
+
+    def _select_geodesic_disk(self, center_cell: int, num_cells_to_select: int, nside: int, num_total_cells: int) -> set:
+        '''
+        Angular distance selection, creates most uniform somewhat circular regions
+        '''
+
+        def lonlat_to_xyz(lon, lat):
+            """
+            Convert lon/lat to 3D cartesian coordinates.
+            """
+            return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+
+        # Get center coordinates
+        center_lonlat = hp.healpix_to_lonlat(center_cell, nside, order="nested")
+        center_lon = float(
+            center_lonlat[0].value if hasattr(center_lonlat[0], "value") else center_lonlat[0]
+        )
+        center_lat = float(
+            center_lonlat[1].value if hasattr(center_lonlat[1], "value") else center_lonlat[1]
+        )
+        center_xyz = lonlat_to_xyz(center_lon, center_lat)
+
+        # Get all cell coordinates
+        all_indices = np.arange(num_total_cells)
+        all_lonlat = hp.healpix_to_lonlat(all_indices, nside, order="nested")
+        all_lon = all_lonlat[0].value if hasattr(all_lonlat[0], "value") else all_lonlat[0]
+        all_lat = all_lonlat[1].value if hasattr(all_lonlat[1], "value") else all_lonlat[1]
+
+        all_xyz = np.stack(
+            [
+                np.cos(all_lat) * np.cos(all_lon),
+                np.cos(all_lat) * np.sin(all_lon),
+                np.sin(all_lat),
+            ],
+            axis=1,
+        )
+        # Compute angular distances and select closest cells
+        dot_products = np.clip(np.dot(all_xyz, center_xyz), -1.0, 1.0)
+        angular_distances = np.arccos(dot_products)
+        selected = np.argsort(angular_distances)[:num_cells_to_select]
+
+        return selected
