@@ -695,10 +695,32 @@ class Masker:
 
         assert num_cells_to_select <= num_total_cells
 
-        # Random starting point to create crops
-        # note we can determine overlap in next PR
-        center_cell = self.rng.integers(0, num_total_cells)
-        
+        # Optimize center for controlled overlap if requested
+        if overlap_with is not None and overlap_ratio is not None and center_cell is None:
+            assert 0.0 <= overlap_ratio <= 1.0, "overlap_ratio must be in [0.0, 1.0]"
+
+            overlap_set = set(overlap_with)
+
+            # Center selection based on overlap target
+            if overlap_ratio > 0.7:
+                # Select center from within existing crop
+                center_cell = self.rng.choice(list(overlap_set))
+            elif overlap_ratio < 0.3:
+                # Select center from outside existing crop
+                non_overlap_cells = [c for c in range(num_total_cells) if c not in overlap_set]
+                if non_overlap_cells:
+                    center_cell = self.rng.choice(non_overlap_cells)
+                else:
+                    # Fallback if no non-overlap cells available
+                    center_cell = self.rng.integers(0, num_total_cells)
+            else:
+                # Medium overlap: random selection (boundary-agnostic)
+                center_cell = self.rng.integers(0, num_total_cells)
+
+        # Random starting point if not specified
+        elif center_cell is None:
+            center_cell = self.rng.integers(0, num_total_cells)
+
         if method == "disk":
             selected = self._select_disk(center_cell, num_cells_to_select, nside)
 
@@ -709,6 +731,7 @@ class Masker:
             selected = self._select_geodesic_disk(
                 center_cell, num_cells_to_select, nside, num_total_cells
             )
+
         else:
             raise ValueError(f"Unknown selection method: {method}")
 
