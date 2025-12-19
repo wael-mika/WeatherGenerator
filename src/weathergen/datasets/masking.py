@@ -1,14 +1,13 @@
 import logging
+import warnings
 
+import astropy_healpix as hp
 import numpy as np
 import torch
 from numpy.typing import NDArray
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import SampleMetaData
-
-import warnings
-import astropy_healpix as hp
 
 _logger = logging.getLogger(__name__)
 
@@ -359,7 +358,6 @@ class Masker:
                 )
                 target_masks.add_mask(target_mask, mask_params, target_cfg)
 
-
                 for _i_source, source_cfg in enumerate(source_cfgs):
                     # samples per strategy
                     for _ in range(source_cfg.get("num_samples", 1)):
@@ -367,7 +365,9 @@ class Masker:
                         masking_cfg = source_cfg.get("masking_strategy_config", {}).copy()
                         if "overlap_ratio" in masking_cfg and len(target_masks) > 0:
                             # Enable overlap control by passing teacher's mask
-                            target_mask_for_overlap = target_masks.masks[_i_source % len(target_masks)]
+                            target_mask_for_overlap = target_masks.masks[
+                                _i_source % len(target_masks)
+                            ]
                             masking_cfg["overlap_with_mask"] = (
                                 target_mask_for_overlap.cpu().numpy().tolist()
                                 if hasattr(target_mask_for_overlap, "cpu")
@@ -553,10 +553,16 @@ class Masker:
             else:
                 # Spatial selection method
                 method = cfg.get("method", "geodesic_disk")  # Default to best method for SSL
-                overlap_with_mask = np.array(cfg.get("overlap_with_mask", None)) if cfg.get("overlap_with_mask", None) is not None else None
+                overlap_with_mask = (
+                    np.array(cfg.get("overlap_with_mask", None))
+                    if cfg.get("overlap_with_mask", None) is not None
+                    else None
+                )
                 overlap_ratio = cfg.get("overlap_ratio", None)
 
-                import pdb; pdb.set_trace()
+                import pdb
+
+                pdb.set_trace()
 
                 # If overlap is requested but no mask provided, log a warning
                 if overlap_ratio is not None and overlap_with_mask is None:
@@ -569,8 +575,9 @@ class Masker:
                 # Work at data level (hl=5) for exact overlap
                 if overlap_with_mask is not None and overlap_ratio is not None:
                     total_student_cells = num_parents_to_keep * num_children_per_parent
-                    mask = self._generate_overlap_mask(num_cells, total_student_cells, 
-                                                       overlap_with_mask, overlap_ratio)
+                    mask = self._generate_overlap_mask(
+                        num_cells, total_student_cells, overlap_with_mask, overlap_ratio
+                    )
 
                 else:
                     # No overlap control - use standard spatial selection
@@ -657,7 +664,7 @@ class Masker:
             raise ValueError(f"Unknown selection method: {method}")
 
         return np.array(sorted(selected))
-    
+
     # separate functions for the different methods of producing spatially contiguous regions
     def _select_disk(self, center_cell: int, num_cells_to_select: int, nside: int) -> set[int]:
         """
@@ -685,13 +692,15 @@ class Masker:
             num_to_add = min(len(candidates), num_cells_to_select - len(selected))
             selected.update(candidates[:num_to_add])
             frontier = set(candidates[:num_to_add])
-        
+
         return selected
 
-    def _select_random_walk(self, center_cell: int, num_cells_to_select: int, nside: int) -> set[int]:
-        '''
+    def _select_random_walk(
+        self, center_cell: int, num_cells_to_select: int, nside: int
+    ) -> set[int]:
+        """
         Random walk through neighbors, creates elongated irregular regions
-        '''
+        """
         selected = {center_cell}
         frontier = {center_cell}
 
@@ -715,10 +724,12 @@ class Masker:
 
         return selected
 
-    def _select_geodesic_disk(self, center_cell: int, num_cells_to_select: int, nside: int, num_total_cells: int) -> set:
-        '''
+    def _select_geodesic_disk(
+        self, center_cell: int, num_cells_to_select: int, nside: int, num_total_cells: int
+    ) -> set:
+        """
         Angular distance selection, creates most uniform somewhat circular regions
-        '''
+        """
 
         def lonlat_to_xyz(lon, lat):
             """
@@ -757,7 +768,6 @@ class Masker:
 
         return selected
 
-
     def _generate_overlap_mask(
         self,
         num_cells: int,
@@ -765,7 +775,6 @@ class Masker:
         overlap_with_mask: np.typing.NDArray,
         overlap_ratio: float,
     ) -> np.typing.NDArray:
-     
         assert 0.0 <= overlap_ratio <= 1.0, "overlap_ratio must be in [0.0, 1.0]"
 
         # Get indices of teacher's cells (at data level)
@@ -801,9 +810,7 @@ class Masker:
             non_overlap_child_indices = np.array([], dtype=int)
 
         # Combine overlap and non-overlap cells
-        child_indices = np.concatenate(
-            [overlap_cell_indices, non_overlap_child_indices]
-        )
+        child_indices = np.concatenate([overlap_cell_indices, non_overlap_child_indices])
 
         # Create mask
         mask = np.zeros(num_cells, dtype=bool)
