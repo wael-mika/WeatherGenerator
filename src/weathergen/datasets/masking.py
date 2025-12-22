@@ -539,14 +539,11 @@ class Masker:
         Args:
             healpix_level: HEALPix level for selection
             num_cells_to_select: Number of cells to select
-            center_cell: Starting cell (None = random, or optimized for overlap if specified)
+            center_cell: Starting cell (None = random)
             method: Selection method:
                 - "disk": Layer-by-layer neighbor growth (compact regions)
                 - "random_walk": Random neighbor selection (irregular shapes)
                 - "geodesic_disk": Angular distance selection (circular regions, best for SSL)
-            overlap_with: Existing crop to control overlap with (for IBOT-style training)
-            overlap_ratio: Target overlap ratio [0.0-1.0] (requires overlap_with)
-                         0.0 = no overlap, 0.5 = 50% overlap, 1.0 = complete overlap
 
         Returns:
             Array of selected cell indices forming a spatially contiguous region
@@ -554,10 +551,6 @@ class Masker:
         Examples:
             # Independent crop
             crop1 = _select_spatially_contiguous_cells(0, 9, method="geodesic_disk")
-
-            # Crop with 30% overlap (IBOT-style)
-            crop2 = _select_spatially_contiguous_cells(0, 9, method="geodesic_disk",
-                                                       overlap_with=crop1, overlap_ratio=0.3)
         """
 
         num_total_cells = 12 * (4**healpix_level)
