@@ -64,7 +64,7 @@ class Masker:
                     e.g. level 1 very large cells masked
         "cropping_healpix" - spatial cropping that keeps spatially contiguous regions
                     and masks everything else. Uses neighbor relationships or geodesic
-                    distance to ensure spatial contiguity. Perfect for DINO/JEPA/IBOT.
+                    distance to ensure spatial contiguity. For DINO/JEPA/IBOT.
                     e.g. masking_strategy_config = {"hl_mask": 0, "method": "geodesic_disk"}
                     method: "disk" (neighbor growth), "random_walk", or "geodesic_disk" (circular)
         "channel" - masking data channels, where channels of the data are masked
@@ -519,7 +519,7 @@ class Masker:
 
                 # Create mask: True = MASK (masked tokens), False = KEEP (kept tokens)
                 mask = np.zeros(num_cells, dtype=bool)
-                mask[~child_indices] = True
+                mask[child_indices] = True
 
         else:
             raise NotImplementedError(
