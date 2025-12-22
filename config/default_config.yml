@@ -195,7 +195,7 @@ training_config:
 #       relationship: "independent"
 #       num_steps_input: 1
 
-# Example 3: IBOT-style training (1 global teacher + 1 local student with controlled overlap)
+# Example 3: IBOT-style training (1 global teacher + 1 local student)
 # training_config:
 #   training_mode: "masking"
 #   losses :
@@ -214,14 +214,8 @@ training_config:
 #         hl_mask: 2          # Same level for consistent cropping
 #         rate: 0.3           # Student crop: 30% of sphere
 #         method: "geodesic_disk"
-#         overlap_ratio: 0.5   # 50% of student crop overlaps with teacher crop
 #       relationship: "independent"
 #       num_steps_input: 1
-#
-# Note: overlap_ratio controls what fraction of the STUDENT crop comes from the teacher:
-#   - 0.0 = completely disjoint (no overlap)
-#   - 0.5 = half of student overlaps with teacher
-#   - 1.0 = student is complete subset of teacher
 
 
 
