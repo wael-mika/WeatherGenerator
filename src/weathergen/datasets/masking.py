@@ -554,7 +554,7 @@ class Masker:
 
                     # Create mask: True = KEEP (the crop), False = MASK (everything else)
                     mask = np.zeros(num_cells, dtype=bool)
-                    mask[child_indices] = True
+                    mask[~child_indices] = True
 
         else:
             raise NotImplementedError(
@@ -772,7 +772,7 @@ class Masker:
 
         # Create mask
         mask = np.zeros(num_cells, dtype=bool)
-        mask[child_indices] = True
+        mask[~child_indices] = True
 
         #_logger.info(
         #    f"Deterministic overlap: target={overlap_ratio:.1%}, "
