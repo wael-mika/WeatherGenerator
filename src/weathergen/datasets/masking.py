@@ -552,7 +552,7 @@ class Masker:
                         parent_ids[:, None] * num_children_per_parent + child_offsets
                     ).reshape(-1)
 
-                    # Create mask: True = KEEP (the crop), False = MASK (everything else)
+                    # Create mask: True = MASK (masked tokens), False = KEEP (kept tokens)
                     mask = np.zeros(num_cells, dtype=bool)
                     mask[~child_indices] = True
 
@@ -774,10 +774,10 @@ class Masker:
         mask = np.zeros(num_cells, dtype=bool)
         mask[~child_indices] = True
 
-        #_logger.info(
+        # _logger.info(
         #    f"Deterministic overlap: target={overlap_ratio:.1%}, "
         #    f"actual={len(overlap_cell_indices) / len(child_indices):.1%} "
         #    f"({len(overlap_cell_indices)}/{len(child_indices)} cells)"
-        #)
+        # )
 
         return mask
