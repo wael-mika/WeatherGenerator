@@ -323,24 +323,11 @@ class Masker:
                 for _i_source, source_cfg in enumerate(source_cfgs):
                     # samples per strategy
                     for _ in range(source_cfg.get("num_samples", 1)):
-                        # Prepare masking config - inject target mask if overlap_ratio is specified
-                        masking_cfg = source_cfg.get("masking_strategy_config", {}).copy()
-                        if "overlap_ratio" in masking_cfg and len(target_masks) > 0:
-                            # Enable overlap control by passing teacher's mask
-                            target_mask_for_overlap = target_masks.masks[
-                                _i_source % len(target_masks)
-                            ]
-                            masking_cfg["overlap_with_mask"] = (
-                                target_mask_for_overlap.cpu().numpy().tolist()
-                                if hasattr(target_mask_for_overlap, "cpu")
-                                else target_mask_for_overlap
-                            )
-
                         source_mask, mask_params = self._get_mask(
                             num_cells=num_cells,
                             strategy=source_cfg.get("masking_strategy"),
-                            masking_strategy_config=masking_cfg,
                             target_mask=target_mask,
+                            masking_strategy_config=source_cfg.get("masking_strategy_config", {}),
                             relationship=source_cfg.get("relationship", "independent"),
                         )
                         source_masks.add_mask(source_mask, mask_params, source_cfg)
@@ -515,46 +502,24 @@ class Masker:
             else:
                 # Spatial selection method
                 method = cfg.get("method", "geodesic_disk")  # Default to best method for SSL
-                overlap_with_mask = (
-                    np.array(cfg.get("overlap_with_mask", None))
-                    if cfg.get("overlap_with_mask", None) is not None
-                    else None
+
+                # Use standard spatial selection
+                parent_ids = self._select_spatially_contiguous_cells(
+                    healpix_level=hl_mask,
+                    num_cells_to_select=num_parents_to_keep,
+                    center_cell=None,
+                    method=method,
                 )
-                overlap_ratio = cfg.get("overlap_ratio", None)
 
-                # If overlap is requested but no mask provided, log a warning
-                if overlap_ratio is not None and overlap_with_mask is None:
-                    _logger.warning(
-                        "overlap_ratio specified but no overlap_with_mask provided. "
-                        "Overlap control requires reference mask from previous crop. "
-                        "Use programmatic API for controlled overlap."
-                    )
+                # Project to data level
+                child_offsets = np.arange(num_children_per_parent)
+                child_indices = (
+                    parent_ids[:, None] * num_children_per_parent + child_offsets
+                ).reshape(-1)
 
-                # Work at data level (hl=5) for exact overlap
-                if overlap_with_mask is not None and overlap_ratio is not None:
-                    total_student_cells = num_parents_to_keep * num_children_per_parent
-                    mask = self._generate_overlap_mask(
-                        num_cells, total_student_cells, overlap_with_mask, overlap_ratio
-                    )
-
-                else:
-                    # No overlap control - use standard spatial selection
-                    parent_ids = self._select_spatially_contiguous_cells(
-                        healpix_level=hl_mask,
-                        num_cells_to_select=num_parents_to_keep,
-                        center_cell=None,
-                        method=method,
-                    )
-
-                    # Project to data level
-                    child_offsets = np.arange(num_children_per_parent)
-                    child_indices = (
-                        parent_ids[:, None] * num_children_per_parent + child_offsets
-                    ).reshape(-1)
-
-                    # Create mask: True = MASK (masked tokens), False = KEEP (kept tokens)
-                    mask = np.zeros(num_cells, dtype=bool)
-                    mask[~child_indices] = True
+                # Create mask: True = MASK (masked tokens), False = KEEP (kept tokens)
+                mask = np.zeros(num_cells, dtype=bool)
+                mask[~child_indices] = True
 
         else:
             raise NotImplementedError(
@@ -725,59 +690,3 @@ class Masker:
         selected = np.argsort(angular_distances)[:num_cells_to_select]
 
         return selected
-
-    def _generate_overlap_mask(
-        self,
-        num_cells: int,
-        total_student_cells: int,
-        overlap_with_mask: np.typing.NDArray,
-        overlap_ratio: float,
-    ) -> np.typing.NDArray:
-        assert 0.0 <= overlap_ratio <= 1.0, "overlap_ratio must be in [0.0, 1.0]"
-
-        # Get indices of teacher's cells (at data level)
-        teacher_cell_indices = np.where(overlap_with_mask)[0]
-        non_teacher_cell_indices = np.where(~overlap_with_mask)[0]
-
-        # Deterministically select overlap cells from teacher
-        num_overlap_cells = int(np.round(overlap_ratio * total_student_cells))
-        num_overlap_cells = min(
-            num_overlap_cells, len(teacher_cell_indices)
-        )  # Can't exceed teacher size
-
-        # Randomly select which teacher cells to use for overlap
-        if num_overlap_cells > 0:
-            overlap_cell_indices = self.rng.choice(
-                teacher_cell_indices, size=num_overlap_cells, replace=False
-            )
-        else:
-            overlap_cell_indices = np.array([], dtype=int)
-
-        # Select remaining cells from outside teacher crop
-        # Simplified: directly sample from non-teacher cells to guarantee correct count
-        num_non_overlap_cells = total_student_cells - num_overlap_cells
-
-        if num_non_overlap_cells > 0 and len(non_teacher_cell_indices) > 0:
-            # Directly sample from non-teacher cells at data level
-            # This ensures we get exactly the right number
-            num_available = min(num_non_overlap_cells, len(non_teacher_cell_indices))
-            non_overlap_child_indices = self.rng.choice(
-                non_teacher_cell_indices, size=num_available, replace=False
-            )
-        else:
-            non_overlap_child_indices = np.array([], dtype=int)
-
-        # Combine overlap and non-overlap cells
-        child_indices = np.concatenate([overlap_cell_indices, non_overlap_child_indices])
-
-        # Create mask
-        mask = np.zeros(num_cells, dtype=bool)
-        mask[~child_indices] = True
-
-        # _logger.info(
-        #    f"Deterministic overlap: target={overlap_ratio:.1%}, "
-        #    f"actual={len(overlap_cell_indices) / len(child_indices):.1%} "
-        #    f"({len(overlap_cell_indices)}/{len(child_indices)} cells)"
-        # )
-
-        return mask
