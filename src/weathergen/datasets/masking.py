@@ -358,9 +358,6 @@ class Masker:
             instance default if None.
         masking_strategy_config : dict | None
             Optional override of strategy config (e.g., {'hl_mask': 3}).
-        constraint_keep_mask : np.ndarray | None
-            Optional boolean mask of allowed cells (True = allowed). Selection will be
-            limited to these cells. For subset/disjoint relationships.
 
         Returns
         -------
@@ -421,9 +418,6 @@ class Masker:
             instance default if None.
         masking_strategy_config : dict | None
             Optional override of strategy config (e.g., {'hl_mask': 3}).
-        constraint_keep_mask : np.ndarray | None
-            Optional boolean mask of allowed cells (True = allowed). Selection will be
-            limited to these cells. For subset/disjoint relationships.
 
         Returns
         -------
