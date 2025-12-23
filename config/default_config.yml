@@ -195,10 +195,10 @@ training_config:
 #       relationship: "independent"
 #       num_steps_input: 1
 
-# Example 3: IBOT-style training (1 global teacher + 1 local student)
+# Example 3: IBOT-style training with deterministic fractional overlap
 # training_config:
 #   training_mode: "masking"
-#   losses :
+#   losses:
 #     LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
 #   target_input:
 #     - masking_strategy: "cropping_healpix"
@@ -211,11 +211,20 @@ training_config:
 #     - masking_strategy: "cropping_healpix"
 #       num_samples: 1
 #       masking_strategy_config:
-#         hl_mask: 2          # Same level for consistent cropping
+#         hl_mask: 2          # Same level as teacher
 #         rate: 0.3           # Student crop: 30% of sphere
 #         method: "geodesic_disk"
-#       relationship: "independent"
+#         overlap_ratio: 0.5  # 50% of student overlaps with teacher (deterministic!)
+#       relationship: "overlap"  # Use fractional overlap relationship
 #       num_steps_input: 1
+#
+# Note on overlap_ratio:
+#   - overlap_ratio controls the fraction of STUDENT cells that come from teacher
+#   - Example with teacher=50% (6144 cells), student=30% (3686 cells), overlap_ratio=0.5:
+#     * 1843 cells (50% of student) randomly selected from teacher's 6144 cells
+#     * 1843 cells (50% of student) randomly selected from non-teacher cells
+#   - This gives deterministic overlap, unlike "independent" which is probabilistic
+#   - For edge cases: use "subset" (100% overlap) or "disjoint" (0% overlap)
 
 
 

@@ -358,6 +358,16 @@ class Masker:
             instance default if None.
         masking_strategy_config : dict | None
             Optional override of strategy config (e.g., {'hl_mask': 3}).
+        target_mask : np.ndarray | None
+            Optional teacher mask for controlled overlap (used with 'overlap' relationship)
+        relationship : str | None
+            How to relate student to teacher mask:
+            - "independent": no relationship (default)
+            - "complement": student = NOT teacher (0% overlap)
+            - "subset": student ⊆ teacher (100% overlap)
+            - "disjoint": student ∩ teacher = ∅ (0% overlap)
+            - "identity": student = teacher (100% overlap)
+            - "overlap": fractional overlap controlled by overlap_ratio in config
 
         Returns
         -------
@@ -401,6 +411,18 @@ class Masker:
                 "relationship: {relationship} incompatible with target_mask None"
             )
             mask = target_mask
+        elif relationship == "overlap":
+            # Fractional overlap: deterministically control overlap percentage
+            assert target_mask is not None, (
+                "relationship 'overlap' requires target_mask"
+            )
+            overlap_ratio = masking_strategy_config.get("overlap_ratio", None)
+            assert overlap_ratio is not None, (
+                "relationship 'overlap' requires 'overlap_ratio' in masking_strategy_config"
+            )
+            mask = self._create_fractional_overlap_mask(
+                mask, target_mask, overlap_ratio, num_cells
+            )
 
         return (mask, params)
 
@@ -677,3 +699,129 @@ class Masker:
         selected = np.argsort(angular_distances)[:num_cells_to_select]
 
         return selected
+
+    def _create_fractional_overlap_mask(
+        self,
+        proposed_mask: torch.Tensor,
+        target_mask: torch.Tensor,
+        overlap_ratio: float,
+        num_cells: int,
+    ) -> torch.Tensor:
+        """
+        Create a student mask with deterministic fractional overlap with teacher.
+
+        This method takes a proposed mask (from cropping/healpix strategy) and adjusts it
+        to have exactly the specified overlap with the teacher mask, while maintaining
+        spatial contiguity by preferentially selecting from the proposed crop.
+
+        Args:
+            proposed_mask: Initial mask determining student crop size (True = keep)
+                          This is typically a spatially contiguous crop from cropping_healpix
+            target_mask: Teacher mask to overlap with (True = keep)
+            overlap_ratio: Fraction of student that should overlap with teacher [0.0-1.0]
+                         0.0 = no overlap (disjoint)
+                         0.5 = half of student overlaps
+                         1.0 = complete overlap (subset)
+            num_cells: Total cells at data level
+
+        Returns:
+            Student mask with exact overlap_ratio with teacher
+
+        Example:
+            - Teacher: 6000 cells (50% of 12288)
+            - Proposed student crop: 3000 cells (spatially contiguous)
+            - overlap_ratio: 0.5
+            - Result: 1500 cells from proposed∩teacher, 1500 cells from proposed\teacher
+                     (maintains spatial structure of proposed crop)
+        """
+        assert 0.0 <= overlap_ratio <= 1.0, f"overlap_ratio must be in [0.0, 1.0], got {overlap_ratio}"
+
+        # Convert to numpy for easier manipulation
+        proposed_np = proposed_mask.cpu().numpy() if hasattr(proposed_mask, 'cpu') else proposed_mask
+        target_np = target_mask.cpu().numpy() if hasattr(target_mask, 'cpu') else target_mask
+
+        # Get cells from the proposed contiguous crop
+        proposed_cells = np.where(proposed_np)[0]
+        num_student_cells = len(proposed_cells)
+
+        if num_student_cells == 0:
+            _logger.warning("Proposed mask is empty, returning empty student mask")
+            return to_bool_tensor(np.zeros(num_cells, dtype=bool))
+
+        # Calculate exact cell counts
+        num_overlap_cells = int(np.round(overlap_ratio * num_student_cells))
+        num_non_overlap_cells = num_student_cells - num_overlap_cells
+
+        # Partition proposed cells into those overlapping with teacher and those not
+        # This maintains spatial structure since we're selecting from the contiguous proposed crop
+        proposed_in_teacher = proposed_cells[target_np[proposed_cells]]  # Cells in both
+        proposed_not_in_teacher = proposed_cells[~target_np[proposed_cells]]  # Cells only in proposed
+
+        # Select overlap cells (preferentially from proposed∩teacher to maintain contiguity)
+        if num_overlap_cells > 0 and len(proposed_in_teacher) > 0:
+            actual_overlap = min(num_overlap_cells, len(proposed_in_teacher))
+            overlap_cells = self.rng.choice(
+                proposed_in_teacher,
+                size=actual_overlap,
+                replace=False
+            )
+        else:
+            overlap_cells = np.array([], dtype=int)
+            actual_overlap = 0
+
+        # If we need more overlap cells than available in proposed∩teacher,
+        # fall back to selecting from teacher globally
+        if actual_overlap < num_overlap_cells:
+            teacher_cells = np.where(target_np)[0]
+            additional_teacher = np.setdiff1d(teacher_cells, proposed_in_teacher)
+            if len(additional_teacher) > 0:
+                num_additional = min(num_overlap_cells - actual_overlap, len(additional_teacher))
+                additional_cells = self.rng.choice(additional_teacher, size=num_additional, replace=False)
+                overlap_cells = np.concatenate([overlap_cells, additional_cells])
+                actual_overlap += num_additional
+
+        # Select non-overlap cells (preferentially from proposed\teacher to maintain contiguity)
+        if num_non_overlap_cells > 0 and len(proposed_not_in_teacher) > 0:
+            actual_non_overlap = min(num_non_overlap_cells, len(proposed_not_in_teacher))
+            non_overlap_cells = self.rng.choice(
+                proposed_not_in_teacher,
+                size=actual_non_overlap,
+                replace=False
+            )
+        else:
+            non_overlap_cells = np.array([], dtype=int)
+            actual_non_overlap = 0
+
+        # If we need more non-overlap cells, fill from outside both masks
+        if actual_non_overlap < num_non_overlap_cells:
+            non_teacher_cells = np.where(~target_np)[0]
+            additional_non = np.setdiff1d(non_teacher_cells, proposed_not_in_teacher)
+            if len(additional_non) > 0:
+                num_additional = min(num_non_overlap_cells - actual_non_overlap, len(additional_non))
+                additional_cells = self.rng.choice(additional_non, size=num_additional, replace=False)
+                non_overlap_cells = np.concatenate([non_overlap_cells, additional_cells])
+                actual_non_overlap += num_additional
+
+        # Create final student mask
+        student_mask = np.zeros(num_cells, dtype=bool)
+        student_mask[overlap_cells] = True
+        student_mask[non_overlap_cells] = True
+
+        # Log actual overlap achieved
+        actual_student_size = len(overlap_cells) + len(non_overlap_cells)
+        actual_overlap_ratio = len(overlap_cells) / actual_student_size if actual_student_size > 0 else 0.0
+
+        _logger.debug(
+            f"Fractional overlap - Target: {overlap_ratio:.1%}, "
+            f"Actual: {actual_overlap_ratio:.1%} "
+            f"({len(overlap_cells)}/{actual_student_size} cells)"
+        )
+
+        if abs(actual_overlap_ratio - overlap_ratio) > 0.05:
+            _logger.warning(
+                f"Overlap ratio deviation: target={overlap_ratio:.1%}, "
+                f"actual={actual_overlap_ratio:.1%}. "
+                f"This may happen if teacher/student sizes are incompatible."
+            )
+
+        return to_bool_tensor(student_mask)
