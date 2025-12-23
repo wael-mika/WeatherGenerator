@@ -22,7 +22,9 @@ from weathergen.datasets.data_reader_base import (
     str_to_datetime64,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_radklim import DataReaderRadklim
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_forecast import TokenizerForecast
@@ -145,6 +147,12 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "fesom":
                         dataset = DataReaderFesom
                         datapath = cf.data_path_fesom
+                    case "imerg":
+                        dataset = DataReaderImerg
+                        datapath = cf.data_path_imerg
+                    case "radklim":
+                        dataset = DataReaderRadklim
+                        datapath = cf.data_path_radklim
                     case type_name:
                         reader_entry = get_extra_reader(type_name, cf)
                         if reader_entry is not None:
