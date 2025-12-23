@@ -1,0 +1,40 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+IMERG:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+  source: ['precipitation']
+  target: ['precipitation']
+  source_exclude: []
+  target_exclude: []
+  frequency: "00:30:00"  # 30 minutes
+  loss_weight: 1.0
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 64
+  tokenize_spacetime: True
+  max_num_targets: -1
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'  # token or obs_value
+    num_layers: 2
+    num_heads: 4
+    # sampling_rate: 0.2
+  pred_head:
+    ens_size: 1
+    num_layers: 1
