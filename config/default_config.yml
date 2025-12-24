@@ -248,6 +248,82 @@ training_config:
 #       relationship: "independent"
 #       num_steps_input: 1
 
+# ========================================
+# ADVANCED OVERLAP CONTROL (NEW!)
+# ========================================
+# These examples use the new optimized functions for precise overlap control
+
+# Example 4: Fractional Overlap - Deterministic overlap ratio control
+# Use this when you want EXACT control over how much student overlaps with teacher
+# while maintaining spatial contiguity
+#
+# training_config:
+#   training_mode: "masking"
+#   losses:
+#     LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
+#   target_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2          # HEALPix level 2 = 192 parent cells
+#         rate: 0.5           # Teacher crop: 50% of sphere (~6144 cells)
+#         method: "geodesic_disk"
+#   model_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2          # Same level as teacher
+#         rate: 0.3           # Student crop: 30% of sphere (~3712 cells)
+#         method: "geodesic_disk"
+#         overlap_ratio: 0.5  # 50% of student cells will overlap with teacher
+#       relationship: "overlap"  # NEW: Use fractional overlap relationship
+#       num_steps_input: 1
+#
+# How overlap_ratio works:
+#   - overlap_ratio controls the fraction of STUDENT cells that overlap with teacher
+#   - The implementation maintains spatial contiguity by selecting from the proposed crop
+#   - Example: teacher=50% (6144 cells), student=30% (3712 cells), overlap_ratio=0.5
+#     * Result: ~1856 cells from (proposed ∩ teacher) + ~1856 from (proposed \ teacher)
+#   - This gives deterministic overlap control, unlike "independent" (probabilistic)
+#   - Edge cases: use "subset" (100% overlap) or "disjoint" (0% overlap)
+
+# Example 5: Cone Distance - Geometric overlap via angular separation
+# Use this when you want PERFECT geometric control where both teacher and student
+# are clean geodesic disks (circular regions) separated by a specific angle
+#
+# training_config:
+#   training_mode: "masking"
+#   losses:
+#     LossPhysical: {weight: 0.7, loss_fcts: [['mse', 0.8], ['mae', 0.2]]}
+#   target_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2                     # HEALPix level 2 = 192 parent cells
+#         rate: 0.6                      # Teacher cone: 60% of sphere (~108° radius)
+#         method: "geodesic_disk"        # Must be geodesic_disk for cone distance
+#   model_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2                     # Same level as teacher (recommended)
+#         rate: 0.4                      # Student cone: 40% of sphere (~72° radius)
+#         method: "geodesic_disk"        # Must be geodesic_disk
+#         center_distance_degrees: 45    # REQUIRED: Student center is 45° from teacher
+#         center_azimuth_degrees: 90     # OPTIONAL: Direction (0-360°, default=random)
+#                                         # 0=north, 90=east, 180=south, 270=west
+#       relationship: "cone_distance"    # NEW: Geometric overlap via cone separation
+#       num_steps_input: 1
+#
+# How cone distance works:
+#   - Both teacher and student are PERFECT geodesic disks (spatially contiguous circles)
+#   - Overlap is geometrically determined by radii and center separation
+#   - Example: Teacher radius ~108° (rate=0.6), Student radius ~72° (rate=0.4)
+#     * center_distance_degrees=0°   → 100% overlap (concentric)
+#     * center_distance_degrees=45°  → Large overlap (108°+72° > 45°)
+#     * center_distance_degrees=90°  → Moderate overlap
+#     * center_distance_degrees=180° → 0% overlap (antipodal, opposite sides)
+
 # ### Example validation and training config for student-teacher with iBOT and DINO
 # validation_config:
 #   losses:
