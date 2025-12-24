@@ -219,13 +219,53 @@ training_config:
 #       num_steps_input: 1
 #
 # Note on overlap_ratio:
-#   - overlap_ratio controls the fraction of STUDENT cells that come from teacher
-#   - Example with teacher=50% (6144 cells), student=30% (3686 cells), overlap_ratio=0.5:
-#     * 1843 cells (50% of student) randomly selected from teacher's 6144 cells
-#     * 1843 cells (50% of student) randomly selected from non-teacher cells
-#   - This gives deterministic overlap, unlike "independent" which is probabilistic
+#   - overlap_ratio controls the fraction of STUDENT cells that overlap with teacher
+#   - The implementation maintains spatial contiguity by selecting from the proposed crop:
+#     * Overlap cells are selected preferentially from (proposed ∩ teacher)
+#     * Non-overlap cells are selected preferentially from (proposed \ teacher)
+#     * This keeps student mask spatially contiguous while achieving exact overlap
+#   - Example with teacher=50% (6144 cells), student=30% (3712 cells), overlap_ratio=0.5:
+#     * ~1856 cells (50% of student) from proposed crop cells that overlap teacher
+#     * ~1856 cells (50% of student) from proposed crop cells outside teacher
+#   - This gives deterministic overlap control, unlike "independent" which is probabilistic
 #   - For edge cases: use "subset" (100% overlap) or "disjoint" (0% overlap)
 
+# Example 4: Geometric overlap control via cone distance (NEW!)
+# This approach uses geometric placement of cone centers for perfect spatial contiguity
+# training_config:
+#   training_mode: "masking"
+#   target_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2                     # HEALPix level 2 = 192 parent cells
+#         rate: 0.6                      # Teacher cone: 60% of sphere (~108° radius)
+#         method: "geodesic_disk"        # Creates circular cone
+#   model_input:
+#     - masking_strategy: "cropping_healpix"
+#       num_samples: 1
+#       masking_strategy_config:
+#         hl_mask: 2                     # Same level as teacher
+#         rate: 0.4                      # Student cone: 40% of sphere (~72° radius)
+#         method: "geodesic_disk"        # Creates circular cone
+#         center_distance_degrees: 45    # Student center is 45° from teacher center
+#         # center_azimuth_degrees: 90   # Optional: specify direction (0-360°)
+#                                         # If not specified, random direction is chosen
+#       relationship: "cone_distance"    # NEW: Geometric overlap via cone separation
+#       num_steps_input: 1
+#
+# How overlap is determined:
+#   - Teacher radius: ~108° (from rate=0.6)
+#   - Student radius: ~72° (from rate=0.4)
+#   - Center distance: 45°
+#   - Geometric overlap exists because: 108° + 72° = 180° > 45°
+#   - The actual overlap is computed by spherical cap intersection geometry
+#
+# Advantages over "overlap" relationship:
+#   - Both teacher and student are PERFECT geodesic disks (spatially contiguous)
+#   - Overlap is geometrically determined (no random cell selection)
+#   - Very intuitive: "cones are X degrees apart"
+#   - Easy to reason about: distance=0 (full overlap), distance=radius₁+radius₂ (no overlap)
 
 
 num_register_tokens: 0

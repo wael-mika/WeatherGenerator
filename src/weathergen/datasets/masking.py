@@ -2,6 +2,7 @@ import logging
 import warnings
 
 import astropy_healpix as hp
+from astropy import units as u
 import numpy as np
 import torch
 from numpy.typing import NDArray
@@ -312,25 +313,27 @@ class Masker:
         for _, target_cfg in enumerate(target_cfgs):
             # different samples/view per strategy
             for _ in range(target_cfg.get("num_samples", 1)):
-                target_mask, mask_params = self._get_mask(
+                target_mask, target_params = self._get_mask(
                     num_cells=num_cells,
                     strategy=target_cfg.get("masking_strategy"),
                     target_mask=None,
+                    target_metadata=None,
                     masking_strategy_config=target_cfg.get("masking_strategy_config", {}),
                 )
-                target_masks.add_mask(target_mask, mask_params, target_cfg)
+                target_masks.add_mask(target_mask, target_params, target_cfg)
 
                 for _i_source, source_cfg in enumerate(source_cfgs):
                     # samples per strategy
                     for _ in range(source_cfg.get("num_samples", 1)):
-                        source_mask, mask_params = self._get_mask(
+                        source_mask, source_params = self._get_mask(
                             num_cells=num_cells,
                             strategy=source_cfg.get("masking_strategy"),
                             target_mask=target_mask,
+                            target_metadata=target_params,  # Pass teacher metadata for cone_distance
                             masking_strategy_config=source_cfg.get("masking_strategy_config", {}),
                             relationship=source_cfg.get("relationship", "independent"),
                         )
-                        source_masks.add_mask(source_mask, mask_params, source_cfg)
+                        source_masks.add_mask(source_mask, source_params, source_cfg)
                         # TODO: proper correspondence between source and target
                         source_target_mapping += [i_target]
                 i_target += 1
@@ -345,6 +348,7 @@ class Masker:
         strategy: str | None = None,
         masking_strategy_config: dict | None = None,
         target_mask: np.typing.NDArray | None = None,
+        target_metadata: dict | None = None,
         relationship: str | None = None,
     ) -> (np.typing.NDArray, dict):
         """Get effective mask, combining with target mask if specified.
@@ -360,6 +364,8 @@ class Masker:
             Optional override of strategy config (e.g., {'hl_mask': 3}).
         target_mask : np.ndarray | None
             Optional teacher mask for controlled overlap (used with 'overlap' relationship)
+        target_metadata : dict | None
+            Optional teacher metadata (e.g., contains 'center_cell' for cone_distance relationship)
         relationship : str | None
             How to relate student to teacher mask:
             - "independent": no relationship (default)
@@ -368,6 +374,7 @@ class Masker:
             - "disjoint": student ∩ teacher = ∅ (0% overlap)
             - "identity": student = teacher (100% overlap)
             - "overlap": fractional overlap controlled by overlap_ratio in config
+            - "cone_distance": geometric overlap via cone centers at specified angular distance
 
         Returns
         -------
@@ -423,6 +430,35 @@ class Masker:
             mask = self._create_fractional_overlap_mask(
                 mask, target_mask, overlap_ratio, num_cells
             )
+        elif relationship == "cone_distance":
+            # Geometric overlap via cone centers separated by angular distance
+            assert target_mask is not None, (
+                "relationship 'cone_distance' requires target_mask"
+            )
+            assert target_metadata is not None, (
+                "relationship 'cone_distance' requires target_metadata with center_cell"
+            )
+            center_distance_degrees = masking_strategy_config.get("center_distance_degrees", None)
+            assert center_distance_degrees is not None, (
+                "relationship 'cone_distance' requires 'center_distance_degrees' in masking_strategy_config"
+            )
+
+            # Get teacher center from metadata
+            teacher_center_cell = target_metadata.get("center_cell", None)
+            assert teacher_center_cell is not None, (
+                "Teacher metadata must contain 'center_cell' for cone_distance relationship"
+            )
+
+            # Create student cone at specified distance from teacher
+            mask, student_center_cell = self._create_cone_distance_mask(
+                num_cells,
+                masking_strategy_config,
+                teacher_center_cell,
+                center_distance_degrees
+            )
+
+            # Store student center in params for potential chaining
+            params["center_cell"] = student_center_cell
 
         return (mask, params)
 
@@ -527,6 +563,10 @@ class Masker:
                     method=method,
                 )
 
+                # Store center cell for potential use by cone_distance relationship
+                # (stored in self._last_center_cell by _select_spatially_contiguous_cells)
+                masking_params["center_cell"] = self._last_center_cell
+
                 # Project to data level
                 child_offsets = np.arange(num_children_per_parent)
                 child_indices = (
@@ -570,9 +610,14 @@ class Masker:
         Returns:
             Array of selected cell indices forming a spatially contiguous region
 
+        Note:
+            The center cell used for selection is stored in self._last_center_cell for use
+            by relationships like "cone_distance" that need geometric information.
+
         Examples:
             # Independent crop
             crop1 = _select_spatially_contiguous_cells(0, 9, method="geodesic_disk")
+            # Access center via self._last_center_cell if needed
         """
 
         num_total_cells = 12 * (4**healpix_level)
@@ -580,9 +625,12 @@ class Masker:
 
         assert num_cells_to_select <= num_total_cells
 
-        # Random starting point. Note we may want overlap here
-        # for now we basically control with chosen masking rates
-        center_cell = self.rng.integers(0, num_total_cells)
+        # Random starting point if not specified
+        if center_cell is None:
+            center_cell = self.rng.integers(0, num_total_cells)
+
+        # Store center cell for potential use by cone_distance relationship
+        self._last_center_cell = int(center_cell)
 
         if method == "disk":
             selected = self._select_disk(center_cell, num_cells_to_select, nside)
@@ -700,6 +748,137 @@ class Masker:
 
         return selected
 
+    def _create_cone_distance_mask(
+        self,
+        num_cells: int,
+        masking_strategy_config: dict,
+        teacher_center_cell: int,
+        center_distance_degrees: float,
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Create a student cone (geodesic disk) at specified angular distance from teacher center.
+
+        This creates geometrically controlled overlap where both teacher and student are perfect
+        geodesic disks (spatially contiguous circular regions) and their overlap is determined by:
+        - The radii of the two cones (from their 'rate' configs)
+        - The angular distance between their centers
+
+        This is ideal for SSL training as it provides:
+        - Perfect spatial contiguity (both are clean circular regions)
+        - Deterministic geometric overlap (no random cell selection)
+        - Intuitive control ("cones are X degrees apart")
+
+        Args:
+            num_cells: Total cells at data level
+            masking_strategy_config: Config for student cone, must contain:
+                - 'rate': Fraction of sphere for student cone (e.g., 0.4 = 40%)
+                - 'hl_mask': HEALPix level for cone generation
+                - 'center_azimuth_degrees' (optional): Direction from teacher (0-360°).
+                  If not specified, random direction is chosen.
+            teacher_center_cell: HEALPix cell index of teacher cone center (at hl_mask level)
+            center_distance_degrees: Angular distance between centers (in degrees, 0-180)
+
+        Returns:
+            Tuple of (student_mask, student_center_cell):
+                - student_mask: Boolean mask with student cone (geodesic disk)
+                - student_center_cell: HEALPix cell index of student cone center (at hl_mask level)
+
+        Example:
+            Teacher: cone with radius ~108° (rate=0.6) centered at cell 1000
+            Student: cone with radius ~72° (rate=0.4)
+            center_distance_degrees: 45°
+            Result: Student cone centered 45° away from teacher
+                   Overlap exists because 108° + 72° = 180° > 45° (cones intersect)
+        """
+        # ============================================================================
+        # 1. Configuration and Setup
+        # ============================================================================
+        hl_mask = masking_strategy_config.get("hl_mask", 0)
+        rate = masking_strategy_config.get("rate", 0.5)
+        nside = 2**hl_mask
+        num_parent_cells = 12 * (4**hl_mask)
+        num_parents_to_keep = max(1, int(np.round(rate * num_parent_cells)))
+
+        # ============================================================================
+        # 2. Get Teacher Center Coordinates (lon, lat in radians)
+        # ============================================================================
+        teacher_lonlat = hp.healpix_to_lonlat(teacher_center_cell, nside, order="nested")
+        # Handle astropy Quantity objects (extract float values)
+        teacher_lon = float(
+            teacher_lonlat[0].value if hasattr(teacher_lonlat[0], "value") else teacher_lonlat[0]
+        )
+        teacher_lat = float(
+            teacher_lonlat[1].value if hasattr(teacher_lonlat[1], "value") else teacher_lonlat[1]
+        )
+
+        # ============================================================================
+        # 3. Determine Azimuth (Direction from Teacher to Student)
+        # ============================================================================
+        center_azimuth_degrees = masking_strategy_config.get("center_azimuth_degrees", None)
+        if center_azimuth_degrees is None:
+            # Random direction if not specified
+            center_azimuth_degrees = self.rng.uniform(0, 360)
+
+        # Convert angles to radians for trigonometry
+        distance_rad = np.deg2rad(center_distance_degrees)
+        azimuth_rad = np.deg2rad(center_azimuth_degrees)
+
+        # ============================================================================
+        # 4. Calculate Student Center Using Spherical Trigonometry
+        # ============================================================================
+        # Great circle navigation formula: given starting point (lon, lat), distance, and azimuth,
+        # compute destination point on sphere
+        student_lat_rad = np.arcsin(
+            np.sin(teacher_lat) * np.cos(distance_rad)
+            + np.cos(teacher_lat) * np.sin(distance_rad) * np.cos(azimuth_rad)
+        )
+
+        student_lon_rad = teacher_lon + np.arctan2(
+            np.sin(azimuth_rad) * np.sin(distance_rad) * np.cos(teacher_lat),
+            np.cos(distance_rad) - np.sin(teacher_lat) * np.sin(student_lat_rad),
+        )
+
+        # Normalize longitude to [-π, π] range
+        student_lon_rad = np.arctan2(np.sin(student_lon_rad), np.cos(student_lon_rad))
+
+        # Convert student center coordinates to HEALPix cell index
+        # (astropy_healpix expects Quantity objects with units)
+        student_center_cell = hp.lonlat_to_healpix(
+            student_lon_rad * u.rad, student_lat_rad * u.rad, nside, order="nested"
+        )
+
+        _logger.debug(
+            f"Cone distance - Teacher center: cell {teacher_center_cell} "
+            f"({np.rad2deg(teacher_lon):.1f}°, {np.rad2deg(teacher_lat):.1f}°), "
+            f"Student center: cell {student_center_cell} "
+            f"({np.rad2deg(student_lon_rad):.1f}°, {np.rad2deg(student_lat_rad):.1f}°), "
+            f"Distance: {center_distance_degrees:.1f}°, Azimuth: {center_azimuth_degrees:.1f}°"
+        )
+
+        # ============================================================================
+        # 5. Create Student Cone (Geodesic Disk)
+        # ============================================================================
+        # Select cells within angular radius from student center
+        selected_parents = self._select_geodesic_disk(
+            student_center_cell, num_parents_to_keep, nside, num_parent_cells
+        )
+
+        # ============================================================================
+        # 6. Expand Parent Cells to Data Level
+        # ============================================================================
+        # Each parent cell at hl_mask level has 4^(level_diff) children at data level
+        level_diff = self.healpix_level_data - hl_mask
+        num_children_per_parent = 4**level_diff
+        parent_ids = np.asarray(list(selected_parents))
+        child_offsets = np.arange(num_children_per_parent)
+        child_indices = (parent_ids[:, None] * num_children_per_parent + child_offsets).reshape(-1)
+
+        # Create final mask at data level
+        mask = np.zeros(num_cells, dtype=bool)
+        mask[child_indices] = True
+
+        return to_bool_tensor(mask), int(student_center_cell)
+
     def _create_fractional_overlap_mask(
         self,
         proposed_mask: torch.Tensor,
@@ -710,32 +889,43 @@ class Masker:
         """
         Create a student mask with deterministic fractional overlap with teacher.
 
-        This method takes a proposed mask (from cropping/healpix strategy) and adjusts it
-        to have exactly the specified overlap with the teacher mask, while maintaining
-        spatial contiguity by preferentially selecting from the proposed crop.
+        This method takes a proposed mask (typically a spatially contiguous crop from
+        cropping_healpix strategy) and adjusts it to achieve exactly the specified overlap
+        fraction with the teacher mask. The key innovation is maintaining spatial contiguity
+        by preferentially selecting cells from the proposed crop.
+
+        Strategy:
+            1. Partition proposed crop into cells that overlap teacher vs. those that don't
+            2. Select overlap cells preferentially from proposed∩teacher (maintains contiguity)
+            3. Select non-overlap cells preferentially from proposed\teacher (maintains contiguity)
+            4. Fall back to global selection only if proposed crop doesn't have enough cells
 
         Args:
-            proposed_mask: Initial mask determining student crop size (True = keep)
-                          This is typically a spatially contiguous crop from cropping_healpix
+            proposed_mask: Initial mask determining student crop size and shape (True = keep).
+                          Typically a spatially contiguous crop from cropping_healpix.
             target_mask: Teacher mask to overlap with (True = keep)
-            overlap_ratio: Fraction of student that should overlap with teacher [0.0-1.0]
-                         0.0 = no overlap (disjoint)
-                         0.5 = half of student overlaps
-                         1.0 = complete overlap (subset)
+            overlap_ratio: Fraction of student cells that should overlap with teacher [0.0-1.0]
+                         - 0.0 = disjoint (no overlap)
+                         - 0.5 = half of student cells come from teacher
+                         - 1.0 = subset (complete overlap)
             num_cells: Total cells at data level
 
         Returns:
-            Student mask with exact overlap_ratio with teacher
+            Student mask with exact overlap_ratio with teacher, maintaining spatial structure
+            of the proposed crop as much as possible
 
         Example:
-            - Teacher: 6000 cells (50% of 12288)
-            - Proposed student crop: 3000 cells (spatially contiguous)
-            - overlap_ratio: 0.5
-            - Result: 1500 cells from proposed∩teacher, 1500 cells from proposed\teacher
-                     (maintains spatial structure of proposed crop)
+            Teacher: 6144 cells (50% of sphere)
+            Proposed student crop: 3712 cells (30% of sphere, spatially contiguous)
+            overlap_ratio: 0.5
+            Result: 1856 cells from proposed∩teacher + 1856 cells from proposed\teacher
+                   (maintains spatial structure of proposed crop)
         """
         assert 0.0 <= overlap_ratio <= 1.0, f"overlap_ratio must be in [0.0, 1.0], got {overlap_ratio}"
 
+        # ============================================================================
+        # 1. Setup and Validation
+        # ============================================================================
         # Convert to numpy for easier manipulation
         proposed_np = proposed_mask.cpu().numpy() if hasattr(proposed_mask, 'cpu') else proposed_mask
         target_np = target_mask.cpu().numpy() if hasattr(target_mask, 'cpu') else target_mask
@@ -748,16 +938,23 @@ class Masker:
             _logger.warning("Proposed mask is empty, returning empty student mask")
             return to_bool_tensor(np.zeros(num_cells, dtype=bool))
 
-        # Calculate exact cell counts
+        # Calculate target cell counts for overlap and non-overlap
         num_overlap_cells = int(np.round(overlap_ratio * num_student_cells))
         num_non_overlap_cells = num_student_cells - num_overlap_cells
 
-        # Partition proposed cells into those overlapping with teacher and those not
-        # This maintains spatial structure since we're selecting from the contiguous proposed crop
-        proposed_in_teacher = proposed_cells[target_np[proposed_cells]]  # Cells in both
-        proposed_not_in_teacher = proposed_cells[~target_np[proposed_cells]]  # Cells only in proposed
+        # ============================================================================
+        # 2. Partition Proposed Crop by Teacher Overlap
+        # ============================================================================
+        # Split proposed cells into two sets based on teacher overlap
+        # This is key to maintaining spatial contiguity while controlling overlap
+        proposed_in_teacher = proposed_cells[target_np[proposed_cells]]  # proposed ∩ teacher
+        proposed_not_in_teacher = proposed_cells[~target_np[proposed_cells]]  # proposed \ teacher
 
-        # Select overlap cells (preferentially from proposed∩teacher to maintain contiguity)
+        # ============================================================================
+        # 3. Select Overlap Cells (preferentially from proposed ∩ teacher)
+        # ============================================================================
+        # Primary selection: from proposed cells that overlap with teacher
+        # This maintains spatial contiguity since proposed is a contiguous crop
         if num_overlap_cells > 0 and len(proposed_in_teacher) > 0:
             actual_overlap = min(num_overlap_cells, len(proposed_in_teacher))
             overlap_cells = self.rng.choice(
@@ -769,8 +966,7 @@ class Masker:
             overlap_cells = np.array([], dtype=int)
             actual_overlap = 0
 
-        # If we need more overlap cells than available in proposed∩teacher,
-        # fall back to selecting from teacher globally
+        # Fallback: if proposed∩teacher doesn't have enough cells, select from teacher globally
         if actual_overlap < num_overlap_cells:
             teacher_cells = np.where(target_np)[0]
             additional_teacher = np.setdiff1d(teacher_cells, proposed_in_teacher)
@@ -780,7 +976,11 @@ class Masker:
                 overlap_cells = np.concatenate([overlap_cells, additional_cells])
                 actual_overlap += num_additional
 
-        # Select non-overlap cells (preferentially from proposed\teacher to maintain contiguity)
+        # ============================================================================
+        # 4. Select Non-Overlap Cells (preferentially from proposed \ teacher)
+        # ============================================================================
+        # Primary selection: from proposed cells that don't overlap with teacher
+        # Again, this maintains spatial contiguity
         if num_non_overlap_cells > 0 and len(proposed_not_in_teacher) > 0:
             actual_non_overlap = min(num_non_overlap_cells, len(proposed_not_in_teacher))
             non_overlap_cells = self.rng.choice(
@@ -792,7 +992,7 @@ class Masker:
             non_overlap_cells = np.array([], dtype=int)
             actual_non_overlap = 0
 
-        # If we need more non-overlap cells, fill from outside both masks
+        # Fallback: if proposed\teacher doesn't have enough cells, select from outside teacher globally
         if actual_non_overlap < num_non_overlap_cells:
             non_teacher_cells = np.where(~target_np)[0]
             additional_non = np.setdiff1d(non_teacher_cells, proposed_not_in_teacher)
@@ -802,12 +1002,14 @@ class Masker:
                 non_overlap_cells = np.concatenate([non_overlap_cells, additional_cells])
                 actual_non_overlap += num_additional
 
-        # Create final student mask
+        # ============================================================================
+        # 5. Create Final Student Mask and Validate
+        # ============================================================================
         student_mask = np.zeros(num_cells, dtype=bool)
         student_mask[overlap_cells] = True
         student_mask[non_overlap_cells] = True
 
-        # Log actual overlap achieved
+        # Diagnostics: log actual overlap achieved
         actual_student_size = len(overlap_cells) + len(non_overlap_cells)
         actual_overlap_ratio = len(overlap_cells) / actual_student_size if actual_student_size > 0 else 0.0
 
@@ -817,6 +1019,7 @@ class Masker:
             f"({len(overlap_cells)}/{actual_student_size} cells)"
         )
 
+        # Warning if overlap deviates significantly (may indicate incompatible teacher/student sizes)
         if abs(actual_overlap_ratio - overlap_ratio) > 0.05:
             _logger.warning(
                 f"Overlap ratio deviation: target={overlap_ratio:.1%}, "
