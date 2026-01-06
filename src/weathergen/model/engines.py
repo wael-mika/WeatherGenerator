@@ -24,7 +24,7 @@ from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
 )
-from weathergen.model.layers import MLP
+from weathergen.model.layers import MLP, MoEBlock
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -287,22 +287,105 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     )
                 )
             # MLP block
-            self.ae_global_blocks.append(
-                MLP(
-                    self.cf.ae_global_dim_embed,
-                    self.cf.ae_global_dim_embed,
-                    with_residual=True,
-                    dropout_rate=self.cf.ae_global_dropout_rate,
-                    hidden_factor=self.cf.ae_global_mlp_hidden_factor,
-                    norm_type=self.cf.norm_type,
-                    norm_eps=self.cf.mlp_norm_eps,
+            # ORIGINAL MLP VERSION (commented out for MoE integration)
+            # self.ae_global_blocks.append(
+            #     MLP(
+            #         self.cf.ae_global_dim_embed,
+            #         self.cf.ae_global_dim_embed,
+            #         with_residual=True,
+            #         dropout_rate=self.cf.ae_global_dropout_rate,
+            #         hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+            #         norm_type=self.cf.norm_type,
+            #         norm_eps=self.cf.mlp_norm_eps,
+            #     )
+            # )
+
+            # NEW MoE VERSION WITH SELECTIVE BLOCK SUPPORT
+            # Check if MoE is enabled in config (defaults to False for backward compatibility)
+            use_moe = getattr(self.cf, "ae_global_use_moe", False)
+
+            # Check if this specific block should use MoE
+            moe_blocks = getattr(self.cf, "ae_global_moe_blocks", "all")
+            should_use_moe = use_moe and (moe_blocks == "all" or i in moe_blocks)
+
+            if should_use_moe:
+                # MoE block with multiple expert MLPs
+                moe_num_experts = getattr(self.cf, "ae_global_moe_num_experts", 8)
+                moe_top_k = getattr(self.cf, "ae_global_moe_top_k", 2)
+                moe_load_balance_weight = getattr(self.cf, "ae_global_moe_load_balance_weight", 0.01)
+                moe_jitter_noise = getattr(self.cf, "ae_global_moe_jitter_noise", 0.0)
+
+                self.ae_global_blocks.append(
+                    MoEBlock(
+                        expert_fn=lambda: MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=False,  # MoEBlock handles residual
+                            dropout_rate=self.cf.ae_global_dropout_rate,
+                            hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                            norm_type=self.cf.norm_type,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        ),
+                        dim_in=self.cf.ae_global_dim_embed,
+                        num_experts=moe_num_experts,
+                        top_k=moe_top_k,
+                        load_balance_weight=moe_load_balance_weight,
+                        jitter_noise=moe_jitter_noise,
+                        with_residual=True,  # MoEBlock manages residual connection
+                    )
                 )
-            )
+            else:
+                # Standard MLP block (backward compatible)
+                self.ae_global_blocks.append(
+                    MLP(
+                        self.cf.ae_global_dim_embed,
+                        self.cf.ae_global_dim_embed,
+                        with_residual=True,
+                        dropout_rate=self.cf.ae_global_dropout_rate,
+                        hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.mlp_norm_eps,
+                    )
+                )
 
     def forward(self, tokens, use_reentrant):
+        # ORIGINAL VERSION (commented out for MoE integration)
+        # for block in self.ae_global_blocks:
+        #     tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+        # return tokens
+
+        # NEW VERSION: Handle both MLP and MoE blocks
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+            if isinstance(block, MoEBlock):
+                # MoEBlock returns (output, aux_loss)
+                # We need to handle checkpointing differently for MoE
+                if use_reentrant:
+                    # For checkpointed forward, we need a wrapper that only returns output
+                    def moe_forward_wrapper(block, x):
+                        output, _ = block(x)
+                        return output
+                    tokens = checkpoint(moe_forward_wrapper, block, tokens, use_reentrant=use_reentrant)
+                else:
+                    tokens, _ = block(tokens)
+            else:
+                # Standard MLP or attention block
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
         return tokens
+
+    def get_moe_aux_losses(self):
+        """
+        Collect auxiliary losses from all MoE blocks in this engine.
+
+        Returns:
+            List of auxiliary losses from MoE blocks (empty list if no MoE blocks)
+        """
+        aux_losses = []
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
 
 
 class ForecastingEngine(torch.nn.Module):
@@ -355,17 +438,66 @@ class ForecastingEngine(torch.nn.Module):
                         )
                     )
                 # Add MLP block
-                self.fe_blocks.append(
-                    MLP(
-                        self.cf.ae_global_dim_embed,
-                        self.cf.ae_global_dim_embed,
-                        with_residual=True,
-                        dropout_rate=self.cf.fe_dropout_rate,
-                        norm_type=self.cf.norm_type,
-                        dim_aux=1,
-                        norm_eps=self.cf.mlp_norm_eps,
+                # ORIGINAL MLP VERSION (commented out for MoE integration)
+                # self.fe_blocks.append(
+                #     MLP(
+                #         self.cf.ae_global_dim_embed,
+                #         self.cf.ae_global_dim_embed,
+                #         with_residual=True,
+                #         dropout_rate=self.cf.fe_dropout_rate,
+                #         norm_type=self.cf.norm_type,
+                #         dim_aux=1,
+                #         norm_eps=self.cf.mlp_norm_eps,
+                #     )
+                # )
+
+                # NEW MoE VERSION WITH SELECTIVE BLOCK SUPPORT
+                # Check if MoE is enabled in config (defaults to False for backward compatibility)
+                use_moe = getattr(self.cf, "fe_use_moe", False)
+
+                # Check if this specific block should use MoE
+                moe_blocks = getattr(self.cf, "fe_moe_blocks", "all")
+                should_use_moe = use_moe and (moe_blocks == "all" or i in moe_blocks)
+
+                if should_use_moe:
+                    # MoE block with multiple expert MLPs
+                    moe_num_experts = getattr(self.cf, "fe_moe_num_experts", 8)
+                    moe_top_k = getattr(self.cf, "fe_moe_top_k", 2)
+                    moe_load_balance_weight = getattr(self.cf, "fe_moe_load_balance_weight", 0.01)
+                    moe_jitter_noise = getattr(self.cf, "fe_moe_jitter_noise", 0.0)
+
+                    self.fe_blocks.append(
+                        MoEBlock(
+                            expert_fn=lambda: MLP(
+                                self.cf.ae_global_dim_embed,
+                                self.cf.ae_global_dim_embed,
+                                with_residual=False,  # MoEBlock handles residual
+                                dropout_rate=self.cf.fe_dropout_rate,
+                                norm_type=self.cf.norm_type,
+                                dim_aux=1,  # Timestep conditioning
+                                norm_eps=self.cf.mlp_norm_eps,
+                            ),
+                            dim_in=self.cf.ae_global_dim_embed,
+                            num_experts=moe_num_experts,
+                            top_k=moe_top_k,
+                            load_balance_weight=moe_load_balance_weight,
+                            jitter_noise=moe_jitter_noise,
+                            with_residual=True,  # MoEBlock manages residual connection
+                        )
                     )
-                )
+                else:
+                    # Standard MLP block (backward compatible)
+                    self.fe_blocks.append(
+                        MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=True,
+                            dropout_rate=self.cf.fe_dropout_rate,
+                            norm_type=self.cf.norm_type,
+                            dim_aux=1,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        )
+                    )
 
         def init_weights_final(m):
             if isinstance(m, torch.nn.Linear):
@@ -377,11 +509,42 @@ class ForecastingEngine(torch.nn.Module):
             block.apply(init_weights_final)
 
     def forward(self, tokens, fstep):
+        # ORIGINAL VERSION (commented out for MoE integration)
+        # aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
+        # for block in self.fe_blocks:
+        #     tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+        # return tokens
+
+        # NEW VERSION: Handle both MLP and MoE blocks
         aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
         for block in self.fe_blocks:
-            tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+            if isinstance(block, MoEBlock):
+                # MoEBlock returns (output, aux_loss)
+                # For checkpointed forward, we need a wrapper that only returns output
+                def moe_forward_wrapper(block, x, aux):
+                    output, _ = block(x, aux)
+                    return output
+                tokens = checkpoint(moe_forward_wrapper, block, tokens, aux_info, use_reentrant=False)
+            else:
+                # Standard MLP or attention block
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
 
         return tokens
+
+    def get_moe_aux_losses(self):
+        """
+        Collect auxiliary losses from all MoE blocks in this engine.
+
+        Returns:
+            List of auxiliary losses from MoE blocks (empty list if no MoE blocks)
+        """
+        aux_losses = []
+        for block in self.fe_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
 
 
 class EnsPredictionHead(torch.nn.Module):
