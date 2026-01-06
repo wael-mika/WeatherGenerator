@@ -34,6 +34,15 @@ ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 
+# Mixture of Experts (MoE) Configuration for Global Assimilation Engine
+# Enable MoE to replace MLP blocks with mixture of expert networks
+ae_global_use_moe: True                    # Enable/disable MoE (default: False for backward compatibility)
+ae_global_moe_blocks: "all"                 # Which blocks to use MoE: "all" or list of block indices [0, 2, 4, 6] (default: "all")
+ae_global_moe_num_experts: 4                # Number of expert networks in the mixture (default: 8)
+ae_global_moe_top_k: 2                      # Number of experts each token is routed to (default: 2) - Changed from 1 for better balance
+ae_global_moe_load_balance_weight: 0.025      # Weight for load balancing loss to prevent expert collapse (default: 0.01) - INCREASED from 0.01 to fix high router loss
+ae_global_moe_jitter_noise: 0.01            # Noise added to router for exploration during training (default: 0.0) - Added to help exploration
+
 decoder_type: PerceiverIOCoordConditioning # CrossAttentionAdaNormConditioning
 pred_adapter_kv: False
 pred_self_attention: True
@@ -52,6 +61,15 @@ fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 impute_latent_noise_std: 0.0  # 1e-4
+
+# Mixture of Experts (MoE) Configuration for Forecasting Engine
+# Enable MoE to replace MLP blocks with mixture of expert networks
+fe_use_moe: False                           # Enable/disable MoE (default: False for backward compatibility)
+fe_moe_blocks: "all"                        # Which blocks to use MoE: "all" or list of block indices [0, 1, 2] (default: "all")
+fe_moe_num_experts: 8                       # Number of expert networks in the mixture (default: 8)
+fe_moe_top_k: 2                             # Number of experts each token is routed to (default: 2)
+fe_moe_load_balance_weight: 0.01            # Weight for load balancing loss to prevent expert collapse (default: 0.01)
+fe_moe_jitter_noise: 0.0                    # Noise added to router for exploration during training (default: 0.0)
 
 healpix_level: 5
 
