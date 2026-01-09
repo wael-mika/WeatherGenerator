@@ -696,8 +696,8 @@ class Trainer(TrainerBase):
 
             self.cf.istep += 1
 
-            # Log MoE routing statistics every 100 steps
-            if bidx % 100 == 0 and bidx > 0:
+            # Log MoE routing statistics every 500 steps
+            if bidx % 500 == 0 and bidx > 0:
                 self._log_moe_routing_stats()
 
         self.dataset.advance()
@@ -1112,6 +1112,7 @@ class Trainer(TrainerBase):
         """
         Log expert utilization and routing statistics from all MoE blocks.
         This helps diagnose expert collapse and routing issues.
+        Also logs spatial coherence for geographic data.
         """
         if not is_root():
             return
@@ -1123,6 +1124,10 @@ class Trainer(TrainerBase):
         # We need to do this to get the intermediate representations for routing stats
         try:
             with torch.no_grad():
+                # Import spatial diagnostics
+                from weathergen.model.moe_diagnostics import analyze_routing_spatial_coherence, log_expert_assignments
+                from weathergen.model.router_diagnostics import analyze_router_internals, analyze_loss_components
+
                 # We'll check routing stats by inspecting the model's MoE blocks
                 moe_blocks = []
                 for name, module in self.model.named_modules():
@@ -1133,40 +1138,67 @@ class Trainer(TrainerBase):
                     return
 
                 logger.info("\n" + "=" * 80)
-                logger.info("MoE Expert Utilization Statistics")
+                logger.info("MoE Routing Statistics (Step %d)" % self.cf.istep)
                 logger.info("=" * 80)
 
-                # For a quick check, we can create a dummy input with the right shape
                 # Get dimension from first MoE block
                 first_moe = moe_blocks[0][1]
-                dim_embed = first_moe.router.router_weights.in_features
-
-                # Create sample input (batch_size=1, seq_len=100, dim=dim_embed)
-                sample_input = torch.randn(1, 100, dim_embed, device=self.device)
+                dim_embed = first_moe.dim_in
+                sample_input = torch.randn(1, 12288, dim_embed, device=self.device)
 
                 for name, module in moe_blocks:
                     stats = module.get_routing_stats(sample_input)
 
-                    logger.info(f"\n{name}:")
-                    logger.info(f"  Expert utilization: {stats['expert_utilization']}")
-                    logger.info(f"  Router entropy: {stats['router_entropy']:.4f} (max: {np.log(module.num_experts):.4f})")
+                    # Get routing decisions
+                    router_probs, expert_indices, expert_weights = module.router(sample_input)
+                    hp_nbours = self.model_params.hp_nbours.cpu() if hasattr(self.model_params, 'hp_nbours') else None
+                    coherence_metrics = analyze_routing_spatial_coherence(
+                        expert_indices, neighbor_structure=hp_nbours, log_details=False
+                    )
 
-                    # Check for expert collapse
+                    # Router diagnostics (compact)
+                    router_metrics = analyze_router_internals(module, sample_input, log_details=False)
+                    loss_metrics = analyze_loss_components(module, sample_input, log_details=False)
+
+                    # Compact single-line summary
                     max_util = stats['expert_utilization'].max()
                     min_util = stats['expert_utilization'].min()
+                    neighbor_agreement = coherence_metrics.get('neighbor_agreement_rate', 0.0)
 
+                    # Determine status emoji
+                    if neighbor_agreement > 0.35:
+                        status = "⚡"
+                    elif neighbor_agreement > 0.25:
+                        status = "⚠️"
+                    else:
+                        status = "❌"
+
+                    # Single compact line per block
+                    logger.info(f"\n{name}:")
+                    logger.info(f"  Experts: [{', '.join([f'{u:.1%}' for u in stats['expert_utilization']])}] | "
+                               f"Neighbor: {status} {neighbor_agreement:.1%} | "
+                               f"Confidence: {router_metrics.get('routing_confidence', 0):.1%} | "
+                               f"LB Loss: {loss_metrics.get('load_balance_loss_weighted', 0):.4f}")
+
+                    # Warnings only
                     if max_util > 0.6:
-                        logger.warning(f" POTENTIAL EXPERT COLLAPSE! Max expert has {max_util:.1%} of tokens")
-                    elif max_util < 0.4 and module.num_experts == 4:
-                        logger.info(f"  ✓ Good balance! Max expert has {max_util:.1%} of tokens")
+                        logger.warning(f"  ⚠️  Potential collapse: max={max_util:.1%}")
+                    if neighbor_agreement < 0.25:
+                        logger.warning(f"  ⚠️  Spatial coherence is random (baseline ~25%)")
 
-                    if max_util / min_util > 5.0:
-                        logger.warning(f" High imbalance ratio: {max_util/min_util:.1f}x between max and min")
+                    # Position embedding usage (if spatial router)
+                    if 'position_contribution_kl' in router_metrics:
+                        pos_kl = router_metrics['position_contribution_kl']
+                        pos_ratio = router_metrics['position_to_feature_ratio']
+                        if pos_kl < 0.01 or pos_ratio < 0.1:
+                            logger.warning(f"  ⚠️  Position embeddings weak: KL={pos_kl:.3f}, Ratio={pos_ratio:.3f}")
 
                 logger.info("=" * 80 + "\n")
 
         except Exception as e:
             logger.warning(f"Failed to compute MoE routing stats: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
 
     def _collect_moe_aux_losses(self):
         """

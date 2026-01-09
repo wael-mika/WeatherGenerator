@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -211,6 +212,156 @@ class MoERouter(torch.nn.Module):
         return router_probs, expert_indices, expert_weights
 
 
+class SpatialMoERouter(torch.nn.Module):
+    """
+    Spatially-aware router for Mixture of Experts.
+
+    Extends basic routing with learned position embeddings to provide
+    spatial context for geographic/structured data (e.g., HEALPix cells).
+    This helps achieve both load balancing AND spatial coherence.
+    """
+
+    def __init__(
+        self,
+        dim_in: int,
+        num_experts: int,
+        num_positions: int,
+        top_k: int = 2,
+        jitter_noise: float = 0.0,
+        router_bias: bool = False,
+        position_embed_dim: int = 128,
+    ):
+        """
+        Args:
+            dim_in: Input feature dimension
+            num_experts: Number of experts in the mixture
+            num_positions: Number of spatial positions (e.g., HEALPix cells)
+            top_k: Number of experts to route each token to (default: 2)
+            jitter_noise: Standard deviation of noise added during training (default: 0.0)
+            router_bias: Whether to use bias in router linear layer (default: False)
+            position_embed_dim: Dimension of position embeddings (default: 128)
+        """
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.jitter_noise = jitter_noise
+        self.position_embed_dim = position_embed_dim
+
+        # Learn position embeddings for each spatial position
+        # This allows router to learn "polar cells should use similar experts"
+        self.position_embed = nn.Embedding(num_positions, position_embed_dim)
+
+        # Will be initialized with geographic coordinates for better starting point
+        self.num_positions = num_positions
+
+        # Router sees both features AND position
+        self.router_weights = nn.Linear(dim_in + position_embed_dim, num_experts, bias=router_bias)
+
+    def initialize_from_coordinates(self, theta: torch.Tensor, phi: torch.Tensor):
+        """
+        Initialize position embeddings from HEALPix coordinates using sinusoidal encoding.
+        This provides immediate spatial awareness before training.
+
+        Args:
+            theta: Colatitude angles [num_positions] in radians (0 at North Pole, π at South Pole)
+            phi: Azimuthal angles [num_positions] in radians (0 to 2π)
+        """
+        assert len(theta) == self.num_positions, f"theta length {len(theta)} != num_positions {self.num_positions}"
+        assert len(phi) == self.num_positions, f"phi length {len(phi)} != num_positions {self.num_positions}"
+
+        device = self.position_embed.weight.device
+        theta = theta.to(device)
+        phi = phi.to(device)
+
+        # Sinusoidal encoding of spherical coordinates
+        # Similar to transformer positional encoding but for sphere
+        with torch.no_grad():
+            embed_dim = self.position_embed_dim
+            embeddings = torch.zeros(self.num_positions, embed_dim, device=device)
+
+            # Use different frequency bands for theta (colatitude) and phi (azimuth)
+            # Lower half: encode theta (latitude-like), Upper half: encode phi (longitude-like)
+            half_dim = embed_dim // 2
+
+            # Encode colatitude (theta) in first half
+            freqs_theta = torch.exp(
+                torch.arange(0, half_dim, 2, device=device).float() *
+                -(np.log(10000.0) / half_dim)
+            )
+            embeddings[:, 0:half_dim:2] = torch.sin(theta.unsqueeze(1) * freqs_theta)
+            embeddings[:, 1:half_dim:2] = torch.cos(theta.unsqueeze(1) * freqs_theta)
+
+            # Encode azimuth (phi) in second half
+            freqs_phi = torch.exp(
+                torch.arange(0, half_dim, 2, device=device).float() *
+                -(np.log(10000.0) / half_dim)
+            )
+            embeddings[:, half_dim+0::2] = torch.sin(phi.unsqueeze(1) * freqs_phi)
+            embeddings[:, half_dim+1::2] = torch.cos(phi.unsqueeze(1) * freqs_phi)
+
+            # Set the embedding weights
+            self.position_embed.weight.copy_(embeddings)
+
+        return self
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Route tokens to experts with spatial awareness.
+
+        Args:
+            x: Input tensor [batch_size, seq_len, dim_in]
+            position_ids: Position indices [seq_len] or [batch_size, seq_len]
+                         If None, falls back to sequential indices [0, 1, 2, ..., seq_len-1]
+
+        Returns:
+            router_probs: Softmax probabilities over all experts [batch_size, seq_len, num_experts]
+            expert_indices: Indices of selected experts [batch_size, seq_len, top_k]
+            expert_weights: Normalized weights for selected experts [batch_size, seq_len, top_k]
+        """
+        batch_size, seq_len, dim_in = x.shape
+
+        # Get position embeddings
+        if position_ids is None:
+            # Default: use sequential indices [0, 1, 2, ..., seq_len-1]
+            position_ids = torch.arange(seq_len, device=x.device, dtype=torch.long)
+
+        # Handle both [seq_len] and [batch_size, seq_len] shapes
+        if position_ids.ndim == 1:
+            # [seq_len] → [batch_size, seq_len]
+            pos_embed = self.position_embed(position_ids)  # [seq_len, position_embed_dim]
+            pos_embed = pos_embed.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, seq_len, position_embed_dim]
+        else:
+            # [batch_size, seq_len]
+            pos_embed = self.position_embed(position_ids)  # [batch_size, seq_len, position_embed_dim]
+
+        # Concatenate features + position embeddings
+        x_with_pos = torch.cat([x, pos_embed], dim=-1)  # [batch_size, seq_len, dim_in + position_embed_dim]
+
+        # Compute router logits with spatial context
+        router_logits = self.router_weights(x_with_pos)  # [batch_size, seq_len, num_experts]
+
+        # Add jitter noise during training for exploration
+        if self.training and self.jitter_noise > 0:
+            router_logits = router_logits + torch.randn_like(router_logits) * self.jitter_noise
+
+        # Compute probabilities
+        router_probs = F.softmax(router_logits, dim=-1)  # [batch_size, seq_len, num_experts]
+
+        # Select top-k experts
+        expert_weights, expert_indices = torch.topk(
+            router_probs, self.top_k, dim=-1
+        )  # [batch_size, seq_len, top_k]
+
+        # Normalize weights of selected experts to sum to 1
+        expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
+
+        return router_probs, expert_indices, expert_weights
+
+
 class MoEBlock(torch.nn.Module):
     """
     Mixture of Experts (MoE) block with load-balanced routing.
@@ -251,6 +402,10 @@ class MoEBlock(torch.nn.Module):
         load_balance_weight: float = 0.01,
         with_residual: bool = True,
         name: str | None = None,
+        # NEW: Spatial routing parameters
+        use_spatial_router: bool = False,
+        num_positions: int = None,
+        position_embed_dim: int = 128,
     ):
         """
         Args:
@@ -266,28 +421,57 @@ class MoEBlock(torch.nn.Module):
             load_balance_weight: Weight for load balancing auxiliary loss (default: 0.01)
             with_residual: Whether to add residual connection (default: True)
             name: Optional name for the module
+            use_spatial_router: Whether to use spatially-aware routing (default: False)
+            num_positions: Number of spatial positions (required if use_spatial_router=True)
+            position_embed_dim: Dimension of position embeddings (default: 128)
         """
         super().__init__()
 
         if name is not None:
             self.name = name
 
+        self.dim_in = dim_in  # Store input dimension for routing stats
         self.num_experts = num_experts
         self.top_k = top_k
         self.capacity_factor = capacity_factor
         self.with_residual = with_residual
+        self.use_spatial_router = use_spatial_router
 
         # Create experts using the factory function
         self.experts = nn.ModuleList([expert_fn() for _ in range(num_experts)])
 
-        # Router for expert selection
-        self.router = MoERouter(
-            dim_in=dim_in,
-            num_experts=num_experts,
-            top_k=top_k,
-            jitter_noise=jitter_noise,
-            router_bias=router_bias,
-        )
+        # ORIGINAL ROUTER (commented out - now conditional below)
+        # self.router = MoERouter(
+        #     dim_in=dim_in,
+        #     num_experts=num_experts,
+        #     top_k=top_k,
+        #     jitter_noise=jitter_noise,
+        #     router_bias=router_bias,
+        # )
+
+        # NEW: Router for expert selection (spatial-aware or basic)
+        if use_spatial_router:
+            if num_positions is None:
+                raise ValueError("num_positions must be specified when use_spatial_router=True")
+
+            self.router = SpatialMoERouter(
+                dim_in=dim_in,
+                num_experts=num_experts,
+                num_positions=num_positions,
+                top_k=top_k,
+                jitter_noise=jitter_noise,
+                router_bias=router_bias,
+                position_embed_dim=position_embed_dim,
+            )
+        else:
+            # Standard router (backward compatible)
+            self.router = MoERouter(
+                dim_in=dim_in,
+                num_experts=num_experts,
+                top_k=top_k,
+                jitter_noise=jitter_noise,
+                router_bias=router_bias,
+            )
 
         # Load balancing loss
         self.load_balance_loss = LoadBalancingLoss(

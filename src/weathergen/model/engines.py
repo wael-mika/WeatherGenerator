@@ -25,6 +25,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP, MoEBlock
+from weathergen.model.shape_logger import get_shape_logger
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -315,6 +316,10 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 moe_load_balance_weight = getattr(self.cf, "ae_global_moe_load_balance_weight", 0.01)
                 moe_jitter_noise = getattr(self.cf, "ae_global_moe_jitter_noise", 0.0)
 
+                # NEW: Spatial routing parameters
+                use_spatial_routing = getattr(self.cf, "ae_global_moe_use_spatial_routing", False)
+                position_embed_dim = getattr(self.cf, "ae_global_moe_position_embed_dim", 128)
+
                 self.ae_global_blocks.append(
                     MoEBlock(
                         expert_fn=lambda: MLP(
@@ -332,6 +337,10 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         load_balance_weight=moe_load_balance_weight,
                         jitter_noise=moe_jitter_noise,
                         with_residual=True,  # MoEBlock manages residual connection
+                        # NEW: Spatial routing support
+                        use_spatial_router=use_spatial_routing,
+                        num_positions=self.num_healpix_cells,
+                        position_embed_dim=position_embed_dim,
                     )
                 )
             else:
@@ -348,14 +357,38 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     )
                 )
 
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+        Called from Model after coordinates are computed.
+
+        Args:
+            theta: Colatitude angles [num_healpix_cells] in radians
+            phi: Azimuthal angles [num_healpix_cells] in radians
+        """
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock) and hasattr(block, 'use_spatial_router') and block.use_spatial_router:
+                block.router.initialize_from_coordinates(theta, phi)
+
     def forward(self, tokens, use_reentrant):
         # ORIGINAL VERSION (commented out for MoE integration)
         # for block in self.ae_global_blocks:
         #     tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
         # return tokens
 
-        # NEW VERSION: Handle both MLP and MoE blocks
-        for block in self.ae_global_blocks:
+        # NEW VERSION: Handle both MLP and MoE blocks with shape logging
+        shape_logger = get_shape_logger()
+        should_log = shape_logger.should_log()
+
+        # Track block indices (attention and MLP alternate)
+        mlp_idx = 0
+
+        for i, block in enumerate(self.ae_global_blocks):
+            # Store input for logging
+            if should_log:
+                tokens_before = tokens
+
+            # Process block
             if isinstance(block, MoEBlock):
                 # MoEBlock returns (output, aux_loss)
                 # We need to handle checkpointing differently for MoE
@@ -365,11 +398,42 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         output, _ = block(x)
                         return output
                     tokens = checkpoint(moe_forward_wrapper, block, tokens, use_reentrant=use_reentrant)
+                    aux_loss = block.get_aux_loss()
                 else:
-                    tokens, _ = block(tokens)
-            else:
-                # Standard MLP or attention block
+                    tokens, aux_loss = block(tokens)
+
+                # Log MoE block
+                if should_log:
+                    shape_logger.log_global_assimilation_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        aux_loss=aux_loss.item() if aux_loss is not None else None,
+                        is_moe=True
+                    )
+                mlp_idx += 1
+
+            elif isinstance(block, MLP):
+                # Standard MLP block
                 tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+
+                # Log MLP block
+                if should_log:
+                    shape_logger.log_global_assimilation_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        aux_loss=None,
+                        is_moe=False
+                    )
+                mlp_idx += 1
+
+            else:
+                # Attention block (don't log to reduce verbosity)
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+
         return tokens
 
     def get_moe_aux_losses(self):
@@ -466,6 +530,10 @@ class ForecastingEngine(torch.nn.Module):
                     moe_load_balance_weight = getattr(self.cf, "fe_moe_load_balance_weight", 0.01)
                     moe_jitter_noise = getattr(self.cf, "fe_moe_jitter_noise", 0.0)
 
+                    # NEW: Spatial routing parameters
+                    use_spatial_routing = getattr(self.cf, "fe_moe_use_spatial_routing", False)
+                    position_embed_dim = getattr(self.cf, "fe_moe_position_embed_dim", 128)
+
                     self.fe_blocks.append(
                         MoEBlock(
                             expert_fn=lambda: MLP(
@@ -483,6 +551,10 @@ class ForecastingEngine(torch.nn.Module):
                             load_balance_weight=moe_load_balance_weight,
                             jitter_noise=moe_jitter_noise,
                             with_residual=True,  # MoEBlock manages residual connection
+                            # NEW: Spatial routing support
+                            use_spatial_router=use_spatial_routing,
+                            num_positions=self.num_healpix_cells,
+                            position_embed_dim=position_embed_dim,
                         )
                     )
                 else:
@@ -498,6 +570,20 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.mlp_norm_eps,
                         )
                     )
+
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+        Called from Model after coordinates are computed.
+
+        Args:
+            theta: Colatitude angles [num_healpix_cells] in radians
+            phi: Azimuthal angles [num_healpix_cells] in radians
+        """
+        if self.cf.forecast_policy is not None:
+            for block in self.fe_blocks:
+                if isinstance(block, MoEBlock) and hasattr(block, 'use_spatial_router') and block.use_spatial_router:
+                    block.router.initialize_from_coordinates(theta, phi)
 
         def init_weights_final(m):
             if isinstance(m, torch.nn.Linear):
@@ -515,9 +601,19 @@ class ForecastingEngine(torch.nn.Module):
         #     tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
         # return tokens
 
-        # NEW VERSION: Handle both MLP and MoE blocks
+        # NEW VERSION: Handle both MLP and MoE blocks with shape logging
+        shape_logger = get_shape_logger()
+        should_log = shape_logger.should_log()
+
         aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
-        for block in self.fe_blocks:
+        mlp_idx = 0
+
+        for i, block in enumerate(self.fe_blocks):
+            # Store input for logging
+            if should_log:
+                tokens_before = tokens
+
+            # Process block
             if isinstance(block, MoEBlock):
                 # MoEBlock returns (output, aux_loss)
                 # For checkpointed forward, we need a wrapper that only returns output
@@ -525,8 +621,40 @@ class ForecastingEngine(torch.nn.Module):
                     output, _ = block(x, aux)
                     return output
                 tokens = checkpoint(moe_forward_wrapper, block, tokens, aux_info, use_reentrant=False)
+                aux_loss = block.get_aux_loss()
+
+                # Log MoE block
+                if should_log:
+                    shape_logger.log_forecast_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        fstep,
+                        aux_loss=aux_loss.item() if aux_loss is not None else None,
+                        is_moe=True
+                    )
+                mlp_idx += 1
+
+            elif isinstance(block, MLP):
+                # Standard MLP block
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+
+                # Log MLP block
+                if should_log:
+                    shape_logger.log_forecast_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        fstep,
+                        aux_loss=None,
+                        is_moe=False
+                    )
+                mlp_idx += 1
+
             else:
-                # Standard MLP or attention block
+                # Attention block (don't log to reduce verbosity)
                 tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
 
         return tokens
