@@ -7,6 +7,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import json
 import logging
 from pathlib import Path
 from typing import override
@@ -63,9 +64,29 @@ class DataReaderRadklim(DataReaderTimestep):
         if not self.base_path.exists():
             raise FileNotFoundError(f"RADKLIM base path not found: {self.base_path}")
 
-        # Build file index mapping time ranges to file paths
-        _logger.info(f"Building file index for RADKLIM data in {self.base_path}")
-        self.file_index = self._build_file_index()
+        # Load file index from pre-built config file or build from scratch
+        index_file = stream_info.get("index_file", None)
+
+        if index_file:
+            # Load from pre-built index file in config directory
+            index_path = Path(index_file)
+            if not index_path.is_absolute():
+                # Make path relative to repo root
+                index_path = Path(__file__).parent.parent.parent.parent / index_path
+
+            if index_path.exists():
+                _logger.info(f"Loading file index from: {index_path}")
+                self.file_index = self._load_file_index(index_path)
+                _logger.info(f"Loaded {len(self.file_index)} files from index")
+            else:
+                raise FileNotFoundError(
+                    f"Index file not found: {index_path}\n"
+                    f"Run 'python build_radklim_index.py' to create it"
+                )
+        else:
+            # Fall back to building index (slower)
+            _logger.info(f"Building file index for RADKLIM data in {self.base_path}")
+            self.file_index = self._build_file_index()
 
         if not self.file_index:
             name = stream_info["name"]
@@ -83,10 +104,20 @@ class DataReaderRadklim(DataReaderTimestep):
 
         # Load spatial grid from first file
         first_file = self.file_index[0]["path"]
+
+        # Get spatial subsampling stride from stream_info (default: 1 = no subsampling)
+        self.spatial_stride = stream_info.get("spatial_stride", 1)
+
         with nc.Dataset(first_file, "r") as ds:
             # Read lat/lon arrays (2D)
             lat_2d = ds.variables["lat"][:]
             lon_2d = ds.variables["lon"][:]
+
+            # Apply spatial subsampling if stride > 1
+            if self.spatial_stride > 1:
+                lat_2d = lat_2d[::self.spatial_stride, ::self.spatial_stride]
+                lon_2d = lon_2d[::self.spatial_stride, ::self.spatial_stride]
+                _logger.info(f"Applied spatial stride {self.spatial_stride}: grid reduced to {lat_2d.shape}")
 
             # Flatten and create coordinate template
             lat_flat = lat_2d.flatten()
@@ -151,6 +182,11 @@ class DataReaderRadklim(DataReaderTimestep):
         # Get target channel weights
         self.target_channel_weights = self.parse_target_channel_weights()
 
+        # Set properties (required by downstream code)
+        self.properties = {
+            "stream_id": 1,
+        }
+
         # File caching
         self.current_file = None
         self.current_filepath = None
@@ -212,6 +248,37 @@ class DataReaderRadklim(DataReaderTimestep):
                     continue
 
         return sorted(file_index, key=lambda x: x["start"])
+
+    def _load_file_index(self, index_file: Path) -> list[dict]:
+        """
+        Load file index from pre-built JSON file
+
+        Parameters
+        ----------
+        index_file :
+            Path to index file (created by build_radklim_index.py)
+
+        Returns
+        -------
+        file_index :
+            List of dicts with 'path', 'start', 'end', 'year', 'month'
+        """
+        with index_file.open("r") as f:
+            index_data = json.load(f)
+
+        # Convert paths and datetimes
+        file_index = [
+            {
+                "path": self.base_path / entry["path"],  # Relative path from index + base_path
+                "start": np.datetime64(entry["start"]),
+                "end": np.datetime64(entry["end"]),
+                "year": entry["year"],
+                "month": entry["month"],
+            }
+            for entry in index_data.get("files", [])
+        ]
+
+        return file_index
 
     def _get_files_for_time_range(self, start: NPDT64, end: NPDT64) -> list[dict]:
         """
@@ -277,6 +344,9 @@ class DataReaderRadklim(DataReaderTimestep):
         self.n_grid_points = 0
         self.grid_shape = (0, 0)
         self.file_index = []
+        # Set properties for empty reader
+        if not hasattr(self, 'properties'):
+            self.properties = {"stream_id": 0}
 
     @override
     def length(self) -> int:
@@ -338,18 +408,35 @@ class DataReaderRadklim(DataReaderTimestep):
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
         # Return empty if no valid data
-        if self.len == 0 or len(t_idxs) == 0 or len(channels_idx) == 0:
+        if self.len == 0:
+            _logger.debug(f"RADKLIM: Dataset is empty (len=0)")
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=max(len(channels_idx), len(self.target_idx)),
+                num_geo_fields=len(self.geoinfo_idx)
+            )
+
+        if len(t_idxs) == 0:
+            _logger.debug(f"RADKLIM: No time indices for window {idx}, range [{dtr.start}, {dtr.end})")
+            return ReaderData.empty(
+                num_data_fields=max(len(channels_idx), len(self.target_idx)),
+                num_geo_fields=len(self.geoinfo_idx)
+            )
+
+        if len(channels_idx) == 0:
+            _logger.debug(f"RADKLIM: No channels selected (channels_idx is empty)")
+            return ReaderData.empty(
+                num_data_fields=0,
+                num_geo_fields=len(self.geoinfo_idx)
             )
 
         # Find files that contain data for this time range
         files_needed = self._get_files_for_time_range(dtr.start, dtr.end)
 
         if not files_needed:
-            _logger.debug(f"No files found for time range {dtr.start} to {dtr.end}")
+            _logger.warning(f"RADKLIM: No files found for time range {dtr.start} to {dtr.end}")
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=max(len(channels_idx), len(self.target_idx)),
+                num_geo_fields=len(self.geoinfo_idx)
             )
 
         # Load data from each file
@@ -374,6 +461,10 @@ class DataReaderRadklim(DataReaderTimestep):
                     # Load rainfall data for these times
                     # Shape: (n_times, ny, nx)
                     rr_data = ds.variables["RR"][time_indices, :, :]
+
+                    # Apply spatial subsampling if stride > 1
+                    if self.spatial_stride > 1:
+                        rr_data = rr_data[:, ::self.spatial_stride, ::self.spatial_stride]
 
                     # Convert masked array to regular array, replacing fill values with NaN
                     if np.ma.is_masked(rr_data):
@@ -401,9 +492,10 @@ class DataReaderRadklim(DataReaderTimestep):
 
         # Check if we got any data
         if not data_chunks:
-            _logger.debug(f"No valid data found for time range {dtr.start} to {dtr.end}")
+            _logger.warning(f"RADKLIM: No valid data found for time range {dtr.start} to {dtr.end}")
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=max(len(channels_idx), len(self.target_idx)),
+                num_geo_fields=len(self.geoinfo_idx)
             )
 
         # Concatenate all chunks

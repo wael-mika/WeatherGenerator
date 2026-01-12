@@ -122,6 +122,9 @@ class EmbeddingEngine(torch.nn.Module):
 
                     # scatter write to reorder from per stream to per cell ordering
                     tokens_all.scatter_(0, idxs, x_embed + pe_embed[idxs_pe])
+                    # possible workaround for sequence length limitation 
+                    # tokens_all.scatter_(0, idxs, x_embed + pe_embed[idxs_pe % len(pe_embed)])
+                    
         return tokens_all
 
 
