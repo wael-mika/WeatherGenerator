@@ -166,7 +166,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 datapath = pathlib.Path(datapath)
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                # Handle empty filename: use datapath directly
+                if str(fname) in ('', '.'):
+                    filename = datapath
+                elif fname.exists():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
