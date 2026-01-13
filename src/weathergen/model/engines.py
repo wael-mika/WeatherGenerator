@@ -320,6 +320,9 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 use_spatial_routing = getattr(self.cf, "ae_global_moe_use_spatial_routing", False)
                 position_embed_dim = getattr(self.cf, "ae_global_moe_position_embed_dim", 128)
 
+                # NEW: Expert size control
+                expert_hidden_factor = getattr(self.cf, "ae_global_moe_expert_hidden_factor", self.cf.ae_global_mlp_hidden_factor)
+
                 self.ae_global_blocks.append(
                     MoEBlock(
                         expert_fn=lambda: MLP(
@@ -327,7 +330,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                             self.cf.ae_global_dim_embed,
                             with_residual=False,  # MoEBlock handles residual
                             dropout_rate=self.cf.ae_global_dropout_rate,
-                            hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                            hidden_factor=expert_hidden_factor,  # Use expert-specific hidden factor
                             norm_type=self.cf.norm_type,
                             norm_eps=self.cf.mlp_norm_eps,
                         ),
@@ -534,6 +537,9 @@ class ForecastingEngine(torch.nn.Module):
                     use_spatial_routing = getattr(self.cf, "fe_moe_use_spatial_routing", False)
                     position_embed_dim = getattr(self.cf, "fe_moe_position_embed_dim", 128)
 
+                    # NEW: Expert size control
+                    expert_hidden_factor = getattr(self.cf, "fe_moe_expert_hidden_factor", 2.0)  # Default to 2.0 if not specified
+
                     self.fe_blocks.append(
                         MoEBlock(
                             expert_fn=lambda: MLP(
@@ -541,6 +547,7 @@ class ForecastingEngine(torch.nn.Module):
                                 self.cf.ae_global_dim_embed,
                                 with_residual=False,  # MoEBlock handles residual
                                 dropout_rate=self.cf.fe_dropout_rate,
+                                hidden_factor=expert_hidden_factor,  # Use expert-specific hidden factor
                                 norm_type=self.cf.norm_type,
                                 dim_aux=1,  # Timestep conditioning
                                 norm_eps=self.cf.mlp_norm_eps,
