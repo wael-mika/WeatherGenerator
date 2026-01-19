@@ -191,61 +191,6 @@ training_config:
       policy: "fixed"
 
 
-# =======================================
-# CONE DISTANCE OVERLAP CONTROL EXAMPLE
-# =======================================
-# Geometric overlap via angular separation between teacher and student geodesic disks.
-# Use this when you want geometric control where both teacher and student are clean
-# geodesic disks (circular regions) separated by a specific angle.
-#
-# Example cone distance configuration:
-# training_config:
-#   training_mode: ["masking"]
-#
-#   losses: {
-#     "physical": {
-#       type: LossPhysical,
-#       loss_fcts: { "mse": { }, "mae": { }, },
-#     },
-#   }
-#
-#   target_input: {
-#     "teacher_cone": {
-#       masking_strategy: "cropping_healpix",
-#       num_samples: 1,
-#       masking_strategy_config: {
-#         hl_mask: 3,
-#         rate: 0.6,                      # Teacher cone: 60% of sphere (~108° radius)
-#         method: "geodesic_disk",        # Must be geodesic_disk for cone distance
-#       },
-#     },
-#   }
-#
-#   model_input: {
-#     "student_cone": {
-#       masking_strategy: "cropping_healpix",
-#       num_samples: 1,
-#       masking_strategy_config: {
-#         hl_mask: 3,                     # Can be different from teacher
-#         rate: 0.4,                      # Student cone: 40% of sphere (~72° radius)
-#         method: "geodesic_disk",        # Must be geodesic_disk
-#         center_distance_degrees: 180,   # Student center is 180° from teacher (antipodal)
-#         center_azimuth_degrees: 90,     # OPTIONAL: Direction (0-360°, default=random)
-#       },                                # 0=north, 90=east, 180=south, 270=west
-#       relationship: "cone_distance",    # Geometric overlap via cone separation
-#     },
-#   }
-#
-# How cone distance works:
-#   - Both teacher and student are geodesic disks (spatially contiguous circles)
-#   - Overlap is geometrically determined by radii and center separation
-#   - Example: Teacher radius ~108° (rate=0.6), Student radius ~72° (rate=0.4)
-#     * center_distance_degrees=0°   → 100% overlap (concentric)
-#     * center_distance_degrees=45°  → Large overlap (108°+72° > 45°)
-#     * center_distance_degrees=90°  → Moderate overlap
-#     * center_distance_degrees=180° → 0% overlap (antipodal, opposite sides)
-
-
 # validation config; full validation config is merge of training and validation config
 validation_config: 
 
