@@ -30,6 +30,20 @@ from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
 
+# Module-level helper functions for gradient checkpointing with MoE blocks
+# Defined at module level to avoid closure issues when used inside loops
+def _moe_forward_wrapper_no_aux(block, x):
+    """Wrapper for MoE forward that discards aux_loss (for checkpointing)."""
+    output, _ = block(x)
+    return output
+
+
+def _moe_forward_wrapper_with_aux(block, x, aux):
+    """Wrapper for MoE forward with auxiliary input that discards aux_loss (for checkpointing)."""
+    output, _ = block(x, aux)
+    return output
+
+
 class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
 
@@ -396,11 +410,8 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 # MoEBlock returns (output, aux_loss)
                 # We need to handle checkpointing differently for MoE
                 if use_reentrant:
-                    # For checkpointed forward, we need a wrapper that only returns output
-                    def moe_forward_wrapper(block, x):
-                        output, _ = block(x)
-                        return output
-                    tokens = checkpoint(moe_forward_wrapper, block, tokens, use_reentrant=use_reentrant)
+                    # Use module-level wrapper to avoid closure issues
+                    tokens = checkpoint(_moe_forward_wrapper_no_aux, block, tokens, use_reentrant=use_reentrant)
                     aux_loss = block.get_aux_loss()
                 else:
                     tokens, aux_loss = block(tokens)
@@ -612,7 +623,7 @@ class ForecastingEngine(torch.nn.Module):
         shape_logger = get_shape_logger()
         should_log = shape_logger.should_log()
 
-        aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
+        aux_info = torch.tensor([fstep], dtype=torch.float32, device=tokens.device)
         mlp_idx = 0
 
         for i, block in enumerate(self.fe_blocks):
@@ -623,11 +634,8 @@ class ForecastingEngine(torch.nn.Module):
             # Process block
             if isinstance(block, MoEBlock):
                 # MoEBlock returns (output, aux_loss)
-                # For checkpointed forward, we need a wrapper that only returns output
-                def moe_forward_wrapper(block, x, aux):
-                    output, _ = block(x, aux)
-                    return output
-                tokens = checkpoint(moe_forward_wrapper, block, tokens, aux_info, use_reentrant=False)
+                # Use module-level wrapper to avoid closure issues
+                tokens = checkpoint(_moe_forward_wrapper_with_aux, block, tokens, aux_info, use_reentrant=False)
                 aux_loss = block.get_aux_loss()
 
                 # Log MoE block
