@@ -113,6 +113,8 @@ class Trainer(TrainerBase):
         else:
             model = Model(cf, sources_size, targets_num_channels, targets_coords_size).create()
             model = model.to("cuda")
+            # Initialize spatial routers after model is on cuda (non-FSDP path)
+            model.initialize_spatial_routers()
 
         # freeze request model part
         for name, module in model.named_modules():
@@ -211,6 +213,8 @@ class Trainer(TrainerBase):
                 model.to_empty(device="cuda")
                 if cf.with_fsdp:
                     model.reset_parameters()
+                # Initialize spatial routers after model is on cuda (FSDP path)
+                model.initialize_spatial_routers()
         else:
             if is_root():
                 logger.info(

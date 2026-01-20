@@ -329,25 +329,10 @@ class Model(torch.nn.Module):
 
         self.forecast_engine = ForecastingEngine(cf, self.num_healpix_cells)
 
-        # Initialize spatial routers with HEALPix coordinates if using spatial routing
-        if getattr(cf, "ae_global_moe_use_spatial_routing", False) or getattr(cf, "fe_moe_use_spatial_routing", False):
-            # Compute HEALPix coordinates for all cells (use numpy array, not torch tensor)
-            theta, phi = healpy.pix2ang(
-                nside=2**self.healpix_level,
-                ipix=np.arange(self.num_healpix_cells),
-                nest=True  # Use nested ordering (same as model)
-            )
-            # Convert to torch tensors
-            theta_tensor = torch.from_numpy(np.array(theta)).float()
-            phi_tensor = torch.from_numpy(np.array(phi)).float()
-
-            # Initialize global assimilation engine spatial routers
-            if getattr(cf, "ae_global_moe_use_spatial_routing", False):
-                self.ae_global_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
-
-            # Initialize forecasting engine spatial routers
-            if getattr(cf, "fe_moe_use_spatial_routing", False):
-                self.forecast_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+        # NOTE: Spatial router initialization is deferred to initialize_spatial_routers()
+        # This must be called AFTER the model is on the correct device (cuda).
+        # With FSDP, the model is created on meta device, so we cannot initialize here.
+        # For non-FSDP mode, initialize_spatial_routers() should be called after .to("cuda")
 
         ###############
         # embed coordinates yielding one query token for each target token
@@ -486,6 +471,38 @@ class Model(torch.nn.Module):
                 pass
 
         self.apply(_reset_params)
+
+    def initialize_spatial_routers(self):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+
+        This method must be called AFTER the model is on the correct device (cuda).
+        With FSDP, call this after to_empty(device="cuda") and reset_parameters().
+        For non-FSDP mode, call this after model.to("cuda").
+        """
+        cf = self.cf
+
+        if not (getattr(cf, "ae_global_moe_use_spatial_routing", False) or
+                getattr(cf, "fe_moe_use_spatial_routing", False)):
+            return  # No spatial routing enabled
+
+        # Compute HEALPix coordinates for all cells (use numpy array, not torch tensor)
+        theta, phi = healpy.pix2ang(
+            nside=2**self.healpix_level,
+            ipix=np.arange(self.num_healpix_cells),
+            nest=True  # Use nested ordering (same as model)
+        )
+        # Convert to torch tensors
+        theta_tensor = torch.from_numpy(np.array(theta)).float()
+        phi_tensor = torch.from_numpy(np.array(phi)).float()
+
+        # Initialize global assimilation engine spatial routers
+        if getattr(cf, "ae_global_moe_use_spatial_routing", False):
+            self.ae_global_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+
+        # Initialize forecasting engine spatial routers
+        if getattr(cf, "fe_moe_use_spatial_routing", False):
+            self.forecast_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
 
     #########################################
     def print_num_parameters(self) -> None:
