@@ -1,0 +1,163 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Downscaling Configuration: ERA5 -> CERRA (Europe)
+#
+# This configuration trains a model to downscale from:
+# - ERA5 (~1 degree, global) meteorological fields as input
+# To:
+# - CERRA (5.5 km, Europe) meteorological fields as output
+#
+# Memory optimization strategies applied:
+# - CERRA already covers Europe only (no bbox filtering needed)
+# - Large token sizes for high-resolution CERRA data
+# - Reduced model dimensions compared to full pretraining
+# - Small batch size due to high-resolution output grid
+
+streams_directory: "./config/streams/downscaling_era5_to_cerra"
+
+# Embedding configuration
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_droput_rate: 0.1
+
+target_cell_local_prediction: True
+
+# Local autoencoder - aggressively reduced for memory efficiency
+# Note: dim_embed / num_heads must be a power of 2 for flex_attention
+ae_local_dim_embed: 64
+ae_local_num_blocks: 1
+ae_local_num_heads: 4
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 2
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 8
+ae_adapter_embed: 64
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+# Global autoencoder - reduced for memory efficiency
+# Note: dim_embed / num_heads must be a power of 2 for flex_attention
+ae_global_dim_embed: 128
+ae_global_num_blocks: 2
+ae_global_num_heads: 4
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 0.2
+ae_global_block_factor: 32
+ae_global_mlp_hidden_factor: 2
+
+# Decoder configuration
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# Forecasting parameters
+# For downscaling, predict next timestep (offset=1)
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_freeze_model: False
+forecast_att_dense_rate: 0.25
+fe_num_blocks: 2
+fe_num_heads: 8
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+
+# HEALPix level for spatial tokenization
+healpix_level: 5
+
+# Computation settings
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+# Loss functions
+loss_fcts:
+  -
+    - "mse"
+    - 1.0
+loss_fcts_val:
+  -
+    - "mse"
+    - 1.0
+
+# Batch size - keep very small for memory efficiency with high-res CERRA
+batch_size: 1
+batch_size_validation: 1
+
+# Training mode
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+# Training schedule - reduced for initial experiments
+num_epochs: 16
+samples_per_epoch: 512
+samples_per_validation: 128
+shuffle: True
+
+# Learning rate schedule
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 1e-5  # Lower max LR for stability with high-res targets
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 128
+lr_steps_cooldown: 128
+lr_policy_warmup: "cosine"
+lr_policy_decay: "linear"
+lr_policy_cooldown: "linear"
+
+# Optimizer settings
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "torch"  # Changed from "te" to avoid GradScaler issues
+
+# Time window configuration
+# Overlap period: CERRA 1985-2023, ERA5 1979-2023
+# Using 1990-2019 for training to ensure good data quality
+# Note: CERRA 6h aggregation from 3h native
+start_date: 201010100000
+end_date: 201912310000
+start_date_val: 202001010000
+end_date_val: 202212310000
+len_hrs: 6  # 6-hour input window (matches ERA5 native resolution)
+step_hrs: 6  # 6-hour steps
+input_window_steps: 1
+
+# Validation settings
+val_initial: False
+
+# Data loading - reduced for memory efficiency
+loader_num_workers: 2
+
+# Logging
+log_validation: 0
+train_log:
+  log_interval: 20
+
+# Run settings
+istep: 0
+run_history: []
+desc: "Downscaling: ERA5 (1 deg) -> CERRA (5.5km) over Europe"
+data_loader_rng_seed: ???
+run_id: ???

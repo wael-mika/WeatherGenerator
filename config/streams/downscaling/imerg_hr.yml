@@ -1,0 +1,62 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# IMERG High Resolution stream configured as OUTPUT ONLY for downscaling
+# Uses native 0.1 degree resolution over Europe as the prediction target
+# This is the "high resolution" precipitation that we want to downscale to
+
+IMERG_HR:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+
+  # Source configuration - empty list = no source (output-only stream)
+  source: []
+
+  # Target configuration - precipitation is the prediction target
+  target: ['precipitation']
+  target_exclude: []
+
+  # NOTE: Using native 30-minute resolution. The training time windowing handles sampling.
+  # frequency: "06:00:00"  # Disabled - causes index mismatch with zarr data
+
+  # Spatial filtering for Europe region
+  # This reduces memory significantly (~95% reduction)
+  # Format: [lat_min, lat_max, lon_min, lon_max]
+  spatial_bbox: [35.0, 70.0, -10.0, 40.0]  # Europe region
+
+  # Spatial stride for memory optimization (increased due to native temporal resolution)
+  # stride=4 gives ~0.4 degree resolution (still 2.5x finer than ERA5's 1 degree)
+  spatial_stride: 4
+
+  loss_weight: 1.0  # Full loss weight on prediction target
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+
+  # Token size for memory management
+  # Larger tokens = fewer tokens = less memory but coarser granularity
+  token_size: 512  # Balanced for memory and resolution
+  tokenize_spacetime: True
+  max_num_targets: -1  # Use all targets
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1

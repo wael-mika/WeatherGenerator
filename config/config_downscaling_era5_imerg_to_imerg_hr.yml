@@ -1,0 +1,161 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Downscaling Configuration: ERA5 + IMERG (low-res) -> IMERG HR (high-res)
+#
+# This configuration trains a model to downscale from:
+# - ERA5 (~1 degree) meteorological fields as input
+# - IMERG (N320 grid, ~0.3 degree) precipitation as input
+# To:
+# - IMERG HR (0.1 degree) precipitation over Europe as output
+#
+# Memory optimization strategies applied:
+# - Europe bounding box reduces IMERG HR from 6.48M to ~325K points
+# - Token sizes optimized per stream
+# - Reduced model dimensions compared to full pretraining
+
+streams_directory: "./config/streams/downscaling"
+
+# Embedding configuration
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_droput_rate: 0.1
+
+target_cell_local_prediction: True
+
+# Local autoencoder - reduced for memory efficiency
+ae_local_dim_embed: 512
+ae_local_num_blocks: 2
+ae_local_num_heads: 8
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 2
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 8
+ae_adapter_embed: 64
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+# Global autoencoder - reduced for memory efficiency
+ae_global_dim_embed: 256
+ae_global_num_blocks: 4
+ae_global_num_heads: 8
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 0.2
+ae_global_block_factor: 32
+ae_global_mlp_hidden_factor: 2
+
+# Decoder configuration
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# Forecasting parameters
+# For downscaling, we typically want same-time prediction (offset=0)
+# or short-term forecast (offset=1)
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_freeze_model: False
+forecast_att_dense_rate: 0.25
+fe_num_blocks: 2
+fe_num_heads: 8
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+
+# HEALPix level for spatial tokenization
+healpix_level: 5
+
+# Computation settings
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: True
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+# Loss functions
+loss_fcts:
+  -
+    - "mse"
+    - 1.0
+loss_fcts_val:
+  -
+    - "mse"
+    - 1.0
+
+# Batch size - keep small for memory efficiency
+batch_size: 1
+batch_size_validation: 1
+
+# Training mode
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+# Training schedule - reduced for initial experiments
+num_epochs: 16
+samples_per_epoch: 1024
+samples_per_validation: 256
+shuffle: True
+
+# Learning rate schedule
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 2e-5  # Lower max LR for stability
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 256
+lr_steps_cooldown: 256
+lr_policy_warmup: "cosine"
+lr_policy_decay: "linear"
+lr_policy_cooldown: "linear"
+
+# Optimizer settings
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "te"
+
+# Time window configuration
+# Overlap period: IMERG starts 1998, ERA5 goes to 2023
+# Using 2000-2020 for training to ensure good data quality
+start_date: 201801010000
+end_date: 201912310000
+start_date_val: 202001010000
+end_date_val: 202012310000
+len_hrs: 6  # 6-hour input window
+step_hrs: 6  # 6-hour steps
+input_window_steps: 1
+
+# Validation settings
+val_initial: False
+
+# Data loading
+loader_num_workers: 4  # Reduced for memory efficiency
+
+# Logging
+log_validation: 0
+train_log:
+  log_interval: 20
+
+# Run settings
+istep: 0
+run_history: []
+desc: "Downscaling: ERA5+IMERG -> IMERG_HR over Europe"
+data_loader_rng_seed: ???
+run_id: ???
