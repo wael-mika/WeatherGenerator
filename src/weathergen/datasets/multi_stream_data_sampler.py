@@ -15,6 +15,7 @@ import torch
 
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi_transform import DataReaderAnemoiTransform
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     TimeWindowHandler,
@@ -22,7 +23,9 @@ from weathergen.datasets.data_reader_base import (
     str_to_datetime64,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_radklim import DataReaderRadklim
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_forecast import TokenizerForecast
@@ -142,9 +145,20 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "anemoi":
                         dataset = DataReaderAnemoi
                         datapath = cf.data_path_anemoi
+                    case "anemoi_transform":
+                        # Unified reader with configurable transform_type in stream_info
+                        # Supports: "arcsinh", "log10", "log_eps", "none"
+                        dataset = DataReaderAnemoiTransform
+                        datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
                         datapath = cf.data_path_fesom
+                    case "imerg":
+                        dataset = DataReaderImerg
+                        datapath = cf.data_path_imerg
+                    case "radklim":
+                        dataset = DataReaderRadklim
+                        datapath = cf.data_path_radklim
                     case type_name:
                         reader_entry = get_extra_reader(type_name, cf)
                         if reader_entry is not None:
@@ -158,7 +172,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 datapath = pathlib.Path(datapath)
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                # Handle empty filename: use datapath directly
+                if str(fname) in ('', '.'):
+                    filename = datapath
+                elif fname.exists():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
