@@ -32,7 +32,7 @@ IMERG_HR:
 
   # Spatial stride for memory optimization (increased due to native temporal resolution)
   # stride=4 gives ~0.4 degree resolution (still 2.5x finer than ERA5's 1 degree)
-  spatial_stride: 4
+  spatial_stride: 1
 
   loss_weight: 1.0  # Full loss weight on prediction target
   masking_rate: 0.6

@@ -69,7 +69,7 @@ forecast_steps: 1
 forecast_policy: "fixed"
 forecast_freeze_model: False
 forecast_att_dense_rate: 0.25
-fe_num_blocks: 2
+fe_num_blocks: 0
 fe_num_heads: 8
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -101,14 +101,14 @@ batch_size: 1
 batch_size_validation: 1
 
 # Training mode
-training_mode: "forecast"
+training_mode: "masking"
 masking_rate: 0.6
 masking_rate_sampling: True
 sampling_rate_target: 1.0
 masking_strategy: "random"
 
 # Training schedule - reduced for initial experiments
-num_epochs: 16
+num_epochs: 48
 samples_per_epoch: 1024
 samples_per_validation: 256
 shuffle: True
@@ -130,11 +130,13 @@ grad_clip: 1.0
 weight_decay: 0.1
 norm_type: "LayerNorm"
 nn_module: "te"
+streams_output: ["imerg"]
+
 
 # Time window configuration
 # Overlap period: IMERG starts 1998, ERA5 goes to 2023
 # Using 2000-2020 for training to ensure good data quality
-start_date: 201801010000
+start_date: 201001010000
 end_date: 201912310000
 start_date_val: 202001010000
 end_date_val: 202012310000
