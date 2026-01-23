@@ -587,6 +587,9 @@ class Trainer(TrainerBase):
         self.model.train()
         # torch.autograd.set_detect_anomaly(True)
 
+        # DEBUG: Confirm updated trainer code is being used (2025-01-23 fix)
+        logger.info("Using updated trainer with GradScaler fix (2025-01-23)")
+
         dataset_iter = iter(self.data_loader)
 
         self.optimizer.zero_grad()
@@ -619,26 +622,42 @@ class Trainer(TrainerBase):
 
             # backward pass
             self.optimizer.zero_grad()
-            self.grad_scaler.scale(loss_values.loss).backward()
-            # loss_values.loss.backward()
 
-            # gradient clipping
-            self.grad_scaler.unscale_(self.optimizer)
-            total_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=cf.grad_clip
+            # Check if loss has gradient connections (not a leaf tensor)
+            # If loss is a leaf tensor (no grad_fn), skip backward/step to avoid GradScaler error
+            loss_has_grad = loss_values.loss.grad_fn is not None
+            loss_is_finite = torch.isfinite(loss_values.loss).item()
+            logger.debug(
+                f"Batch {bidx}: loss={loss_values.loss.item():.6f}, "
+                f"grad_fn={loss_values.loss.grad_fn}, is_finite={loss_is_finite}"
             )
+            if not loss_has_grad or not loss_is_finite:
+                logger.warning(
+                    f"Batch {bidx}: Skipping backward/step. "
+                    f"grad_fn={loss_values.loss.grad_fn}, is_finite={loss_is_finite}"
+                )
+                total_norm = torch.tensor(0.0)
+            else:
+                self.grad_scaler.scale(loss_values.loss).backward()
+                # loss_values.loss.backward()
 
-            # log gradient norms
-            if self.log_grad_norms:
-                if bidx % self.train_log_freq.terminal == 0:
-                    self.last_grad_norm = self._get_tensor_item(total_norm)
-                if bidx % self.train_log_freq.metrics == 0:
-                    self._log_instant_grad_norms(TRAIN)
+                # gradient clipping
+                self.grad_scaler.unscale_(self.optimizer)
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=cf.grad_clip
+                )
 
-            # optimizer step
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
-            # self.optimizer.step()
+                # log gradient norms
+                if self.log_grad_norms:
+                    if bidx % self.train_log_freq.terminal == 0:
+                        self.last_grad_norm = self._get_tensor_item(total_norm)
+                    if bidx % self.train_log_freq.metrics == 0:
+                        self._log_instant_grad_norms(TRAIN)
+
+                # optimizer step
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
+                # self.optimizer.step()
 
             # update learning rate
             self.lr_scheduler.step()

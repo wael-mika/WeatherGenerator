@@ -244,11 +244,18 @@ class LossCalculator:
             loss_fsteps = torch.tensor(0.0, device=self.device, requires_grad=True)
             ctr_fsteps = 0
 
-            stream_is_spoof = streams_data[i_batch][i_stream_info].is_spoof()
-            if stream_is_spoof:
+            # For loss calculation, only target spoofing matters (not source spoofing).
+            # An output-only stream with spoofed source but real targets should still contribute.
+            target_is_spoof = streams_data[i_batch][i_stream_info].target_is_spoof
+            if target_is_spoof:
                 spoof_weight = torch.tensor(0.0, device=self.device, requires_grad=False)
             else:
                 spoof_weight = torch.tensor(1.0, device=self.device, requires_grad=False)
+
+            _logger.debug(
+                f"Stream {stream_info.name}: target_is_spoof={target_is_spoof}, "
+                f"num_targets={len(targets)}, targets_shapes={[t.shape for t in targets]}"
+            )
 
             for fstep, (target, fstep_weight) in enumerate(
                 zip(targets, fstep_loss_weights, strict=False)
@@ -256,6 +263,9 @@ class LossCalculator:
                 # skip if either target or prediction has no data points
                 pred = preds[fstep][i_stream_info]
                 if not (target.shape[0] > 0 and pred.shape[0] > 0):
+                    _logger.debug(
+                        f"  Skipping fstep {fstep}: target.shape={target.shape}, pred.shape={pred.shape}"
+                    )
                     continue
 
                 # reshape prediction tensor to match target's dimensions: extract data/coords and
@@ -298,11 +308,16 @@ class LossCalculator:
                     )
                     ctr_loss_fcts += 1 if loss_lfct > 0.0 else 0
 
-                loss_fsteps = loss_fsteps + (loss_fstep / ctr_loss_fcts if ctr_loss_fcts > 0 else 0)
-                ctr_fsteps += 1 if ctr_loss_fcts > 0 else 0
+                if ctr_loss_fcts > 0:
+                    loss_fsteps = loss_fsteps + (loss_fstep / ctr_loss_fcts)
+                    ctr_fsteps += 1
 
             loss = loss + ((spoof_weight * loss_fsteps) / (ctr_fsteps if ctr_fsteps > 0 else 1.0))
-            ctr_streams += 1 if ctr_fsteps > 0 and not stream_is_spoof else 0
+            stream_contributes = ctr_fsteps > 0 and not target_is_spoof
+            ctr_streams += 1 if stream_contributes else 0
+            _logger.debug(
+                f"  Stream {stream_info.name}: ctr_fsteps={ctr_fsteps}, contributes={stream_contributes}"
+            )
 
             # normalize by forecast step
             losses_all[stream_info.name] /= ctr_fsteps if ctr_fsteps > 0 else 1.0
@@ -314,7 +329,11 @@ class LossCalculator:
 
         # normalize by all targets and forecast steps that were non-empty
         # (with each having an expected loss of 1 for an uninitalized neural net)
-        loss = loss / ctr_streams
+        if ctr_streams > 0:
+            loss = loss / ctr_streams
+        else:
+            # No valid targets in batch - return zero loss that maintains gradient chain
+            _logger.warning("No valid target streams in batch - returning zero loss")
 
         # Return all computed loss components encapsulated in a ModelLoss dataclass
         return LossValues(loss=loss, losses_all=losses_all, stddev_all=stddev_all)
