@@ -67,6 +67,10 @@ class TokenizerMasking(Tokenizer):
             source_tokens_cells = [torch.tensor([])]
             source_tokens_lens = torch.zeros([self.num_healpix_cells_source], dtype=torch.int32)
             source_centroids = [torch.tensor([])]
+            # Initialize perm_sel to None for diagnostic streams (handled in batchify_target)
+            # This signals that all target tokens should be selected
+            if is_diagnostic:
+                self.masker.perm_sel = None  # Signal diagnostic mode
             return (source_tokens_cells, source_tokens_lens, source_centroids)
 
         # tokenize all data first
@@ -105,12 +109,13 @@ class TokenizerMasking(Tokenizer):
         token_size = stream_info["token_size"]
         tokenize_spacetime = stream_info.get("tokenize_spacetime", False)
         max_num_targets = stream_info.get("max_num_targets", -1)
+        is_diagnostic = stream_info.get("diagnostic", False)
 
         target_tokens, target_coords = torch.tensor([]), torch.tensor([])
         target_tokens_lens = torch.zeros([self.num_healpix_cells_target], dtype=torch.int32)
 
-        # target is empty
-        if len(self.masker.perm_sel) == 0:
+        # target is empty (but NOT for diagnostic streams - they select ALL tokens)
+        if not is_diagnostic and (self.masker.perm_sel is None or len(self.masker.perm_sel) == 0):
             return (target_tokens, target_coords, torch.tensor([]), torch.tensor([]))
 
         # identity function
@@ -138,6 +143,12 @@ class TokenizerMasking(Tokenizer):
             rdata.data,
             rdata.datetimes,
         )
+
+        # For diagnostic streams, select ALL tokens as targets (no masking from source)
+        if is_diagnostic:
+            # Create all-True masks to select all tokens
+            self.masker.perm_sel = [np.ones(len(cell), dtype=bool) for cell in target_tokens_cells]
+            self.masker.current_strategy = "random"  # Use random strategy for target selection
 
         target_tokens = self.masker.mask_target(
             target_tokens_cells, rdata.coords, rdata.geoinfos, rdata.data
