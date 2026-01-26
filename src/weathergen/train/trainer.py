@@ -587,9 +587,6 @@ class Trainer(TrainerBase):
         self.model.train()
         # torch.autograd.set_detect_anomaly(True)
 
-        # DEBUG: Confirm updated trainer code is being used (2025-01-23 fix)
-        logger.info("Using updated trainer with GradScaler fix (2025-01-23)")
-
         dataset_iter = iter(self.data_loader)
 
         self.optimizer.zero_grad()

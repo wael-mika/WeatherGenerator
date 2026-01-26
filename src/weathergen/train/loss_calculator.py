@@ -252,20 +252,12 @@ class LossCalculator:
             else:
                 spoof_weight = torch.tensor(1.0, device=self.device, requires_grad=False)
 
-            _logger.warning(
-                f"Stream {stream_info.name}: target_is_spoof={target_is_spoof}, "
-                f"num_targets={len(targets)}, targets_shapes={[t.shape for t in targets]}"
-            )
-
             for fstep, (target, fstep_weight) in enumerate(
                 zip(targets, fstep_loss_weights, strict=False)
             ):
                 # skip if either target or prediction has no data points
                 pred = preds[fstep][i_stream_info]
                 if not (target.shape[0] > 0 and pred.shape[0] > 0):
-                    _logger.warning(
-                        f"  {stream_info.name} Skipping fstep {fstep}: target.shape={target.shape}, pred.shape={pred.shape}"
-                    )
                     continue
 
                 # reshape prediction tensor to match target's dimensions: extract data/coords and
@@ -315,9 +307,6 @@ class LossCalculator:
             loss = loss + ((spoof_weight * loss_fsteps) / (ctr_fsteps if ctr_fsteps > 0 else 1.0))
             stream_contributes = ctr_fsteps > 0 and not target_is_spoof
             ctr_streams += 1 if stream_contributes else 0
-            _logger.warning(
-                f"  Stream {stream_info.name}: ctr_fsteps={ctr_fsteps}, contributes={stream_contributes}"
-            )
 
             # normalize by forecast step
             losses_all[stream_info.name] /= ctr_fsteps if ctr_fsteps > 0 else 1.0
