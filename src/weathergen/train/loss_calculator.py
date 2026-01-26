@@ -252,7 +252,7 @@ class LossCalculator:
             else:
                 spoof_weight = torch.tensor(1.0, device=self.device, requires_grad=False)
 
-            _logger.debug(
+            _logger.warning(
                 f"Stream {stream_info.name}: target_is_spoof={target_is_spoof}, "
                 f"num_targets={len(targets)}, targets_shapes={[t.shape for t in targets]}"
             )
@@ -263,8 +263,8 @@ class LossCalculator:
                 # skip if either target or prediction has no data points
                 pred = preds[fstep][i_stream_info]
                 if not (target.shape[0] > 0 and pred.shape[0] > 0):
-                    _logger.debug(
-                        f"  Skipping fstep {fstep}: target.shape={target.shape}, pred.shape={pred.shape}"
+                    _logger.warning(
+                        f"  {stream_info.name} Skipping fstep {fstep}: target.shape={target.shape}, pred.shape={pred.shape}"
                     )
                     continue
 
@@ -315,7 +315,7 @@ class LossCalculator:
             loss = loss + ((spoof_weight * loss_fsteps) / (ctr_fsteps if ctr_fsteps > 0 else 1.0))
             stream_contributes = ctr_fsteps > 0 and not target_is_spoof
             ctr_streams += 1 if stream_contributes else 0
-            _logger.debug(
+            _logger.warning(
                 f"  Stream {stream_info.name}: ctr_fsteps={ctr_fsteps}, contributes={stream_contributes}"
             )
 
@@ -332,8 +332,10 @@ class LossCalculator:
         if ctr_streams > 0:
             loss = loss / ctr_streams
         else:
-            # No valid targets in batch - return zero loss that maintains gradient chain
-            _logger.warning("No valid target streams in batch - returning zero loss")
+            # No valid targets in batch - return detached zero to signal trainer to skip backward
+            # Using a tensor without grad_fn so trainer knows this batch should be skipped
+            _logger.warning("No valid target streams in batch - returning zero loss (no grad)")
+            loss = torch.tensor(0.0, device=self.device, requires_grad=False)
 
         # Return all computed loss components encapsulated in a ModelLoss dataclass
         return LossValues(loss=loss, losses_all=losses_all, stddev_all=stddev_all)
