@@ -36,6 +36,10 @@ class DataReaderImerg(DataReaderTimestep):
 
     IMERG (Integrated Multi-satellitE Retrievals for GPM) provides global precipitation
     estimates at 0.1° spatial resolution and 30-minute temporal resolution.
+
+    This implementation uses LAZY TIME LOADING - timestamps are computed mathematically
+    on-demand rather than loaded from the zarr file, dramatically reducing initialization
+    time for large datasets (480K+ timesteps).
     """
 
     def __init__(
@@ -71,77 +75,60 @@ class DataReaderImerg(DataReaderTimestep):
         self.longitudes = self.z["longitude"][:].astype(np.float32)
         _logger.info(f"Loaded coordinates: {len(self.latitudes)} lats × {len(self.longitudes)} lons")
 
-        # Parse time coordinate - OPTIMIZED to only load needed time range
+        # Parse time coordinate - LAZY LOADING: only read metadata, not actual times
         time_attrs = dict(self.z["time"].attrs)
-        time_shape = self.z["time"].shape
+        self.total_timesteps = self.z["time"].shape[0]
 
         # Parse time units (e.g., "minutes since 1998-01-01 00:00:00")
         units_str = time_attrs.get("units", "")
-        base_datetime, time_unit = self._parse_time_units(units_str)
+        self.base_datetime, self.time_unit = self._parse_time_units(units_str)
 
-        # OPTIMIZATION: Sample first, last, and middle points to estimate time range
-        # This avoids loading all 480K+ timesteps when we only need a subset
-        sample_indices = [0, min(100, time_shape[0] - 1), time_shape[0] - 1]
-        sample_times = self.z["time"].oindex[sample_indices]
-        sample_datetimes = self._convert_time_to_datetime64(sample_times, base_datetime, time_unit)
+        # Store base datetime as numpy datetime64 for efficient computation
+        self.base_datetime_np = np.datetime64(self.base_datetime)
 
-        data_start_approx = sample_datetimes[0]
-        data_end_approx = sample_datetimes[-1]
+        # Sample only first and last points to determine time range (2 values, not 480K+)
+        sample_times = self.z["time"].oindex[[0, self.total_timesteps - 1]]
+        sample_datetimes = self._convert_time_to_datetime64(
+            sample_times, self.base_datetime, self.time_unit
+        )
+
+        data_start_time = sample_datetimes[0]
+        data_end_time = sample_datetimes[-1]
+
+        # Calculate period from total range (more accurate than 2-point difference)
+        period = (data_end_time - data_start_time) / (self.total_timesteps - 1)
+        self.period_ns = period.astype("timedelta64[ns]").astype(np.int64)
+
         _logger.info(
-            f"Dataset has {time_shape[0]:,} timesteps covering {data_start_approx} to {data_end_approx}"
+            f"Dataset has {self.total_timesteps:,} timesteps covering "
+            f"{data_start_time} to {data_end_time} (period: {period})"
         )
 
         # Check if training window overlaps with dataset
-        if tw_handler.t_end <= data_start_approx or tw_handler.t_start >= data_end_approx:
+        if tw_handler.t_end <= data_start_time or tw_handler.t_start >= data_end_time:
             _logger.warning(
                 f"Training window [{tw_handler.t_start}, {tw_handler.t_end}) does not overlap "
-                f"with dataset [{data_start_approx}, {data_end_approx}]. Initializing empty dataset."
+                f"with dataset [{data_start_time}, {data_end_time}]. Initializing empty dataset."
             )
-            # We still need some metadata, so load first timestep only
-            time_raw = self.z["time"].oindex[[0]]
-            self.time_index_offset = 0
+            self.len = 0
         else:
-            # Estimate time step interval
-            if len(sample_datetimes) > 1:
-                time_step = (sample_datetimes[-1] - sample_datetimes[0]) / (sample_indices[-1] - sample_indices[0])
-            else:
-                time_step = np.timedelta64(30, "m")  # Default for IMERG
-
-            # Calculate approximate index range for training window
-            # Add buffer to ensure we don't miss edge cases
-            buffer = int(np.timedelta64(7, "D") / time_step)  # 7-day buffer
-            start_idx_approx = max(
-                0, int((tw_handler.t_start - data_start_approx) / time_step) - buffer
+            # Calculate index range for training window (no loading, just math)
+            start_idx = max(
+                0, int((tw_handler.t_start - data_start_time) / period)
             )
-            end_idx_approx = min(
-                time_shape[0], int((tw_handler.t_end - data_start_approx) / time_step) + buffer
+            end_idx = min(
+                self.total_timesteps,
+                int((tw_handler.t_end - data_start_time) / period) + 1
             )
+            self.len = end_idx - start_idx
 
-            n_timesteps_to_load = end_idx_approx - start_idx_approx
             _logger.info(
-                f"Loading time subset: {n_timesteps_to_load:,} timesteps "
-                f"({n_timesteps_to_load/time_shape[0]*100:.1f}% of total)"
+                f"Training window maps to indices [{start_idx}, {end_idx}) "
+                f"= {self.len:,} timesteps ({self.len/self.total_timesteps*100:.1f}% of total)"
             )
-
-            # Load only the needed time range
-            time_raw = self.z["time"][start_idx_approx:end_idx_approx]
-
-            # Store the time index offset for data loading
-            self.time_index_offset = start_idx_approx
-
-        # Convert time to numpy datetime64
-        self.datetimes = self._convert_time_to_datetime64(time_raw, base_datetime, time_unit)
 
         # Store reference to precipitation array (lazy loading)
         self.precip = self.z["precipitation"]
-
-        # Determine data period
-        data_start_time = self.datetimes[0]
-        data_end_time = self.datetimes[-1]
-
-        # Parse frequency from metadata or infer from time coordinate
-        frequency_str = self.z.attrs.get("frequency", "30min")
-        period = self._parse_frequency(frequency_str, self.datetimes)
 
         # Initialize parent class
         super().__init__(
@@ -159,11 +146,10 @@ class DataReaderImerg(DataReaderTimestep):
             self.init_empty()
             return
 
-        self.len = len(self.datetimes)
-
         # Load statistics for normalization
         self.mean = np.array([self.z["mean"][()]], dtype=np.float32)
         self.stdev = np.array([self.z["stdev"][()]], dtype=np.float32)
+        _logger.info(f"Normalization stats: mean={self.mean[0]:.4f}, stdev={self.stdev[0]:.4f}")
 
         # Apply spatial filtering (bounding box + subsampling)
         self._apply_spatial_filters(stream_info)
@@ -357,53 +343,25 @@ class DataReaderImerg(DataReaderTimestep):
 
         return datetimes
 
-    def _parse_frequency(self, frequency_str: str, datetimes: NDArray[NPDT64]) -> NPTDel64:
+    def _compute_datetimes_for_range(self, start_idx: int, end_idx: int) -> NDArray[NPDT64]:
         """
-        Parse frequency string or infer from datetime array
+        Compute datetimes for a range of zarr indices (lazy - no disk read).
 
         Parameters
         ----------
-        frequency_str :
-            frequency string from metadata (e.g., "30min")
-        datetimes :
-            datetime array
+        start_idx :
+            Start index (inclusive)
+        end_idx :
+            End index (exclusive)
 
         Returns
         -------
-        period :
-            numpy timedelta64 representing the frequency
+        datetimes :
+            Array of datetime64 values
         """
-        # Try to parse frequency string
-        if frequency_str:
-            # Handle common formats: "30min", "1h", "1hour", etc.
-            freq_map = {
-                "min": "m",
-                "minute": "m",
-                "h": "h",
-                "hour": "h",
-                "d": "D",
-                "day": "D",
-            }
-
-            pattern = r"(\d+)\s*(\w+)"
-            match = re.match(pattern, frequency_str)
-            if match:
-                value = int(match.group(1))
-                unit_str = match.group(2).lower()
-
-                for key, np_unit in freq_map.items():
-                    if key in unit_str:
-                        return np.timedelta64(value, np_unit)
-
-        # Infer from datetime array
-        if len(datetimes) > 1:
-            period = datetimes[1] - datetimes[0]
-            _logger.info(f"Inferred period from datetimes: {period}")
-            return period
-
-        # Default fallback
-        _logger.warning("Could not determine frequency, using default 30 minutes")
-        return np.timedelta64(30, "m")
+        indices = np.arange(start_idx, end_idx)
+        deltas = (indices * self.period_ns).astype("timedelta64[ns]")
+        return self.base_datetime_np + deltas
 
     @override
     def init_empty(self) -> None:
@@ -427,7 +385,7 @@ class DataReaderImerg(DataReaderTimestep):
         colnames :
             available channel names
         cols_select :
-            list of patterns to include (None = all)
+            list of patterns to include (None = all, [] = none)
         cols_exclude :
             list of patterns to exclude
 
@@ -436,6 +394,11 @@ class DataReaderImerg(DataReaderTimestep):
         selected_colnames :
             filtered list of channel names
         """
+        # Handle empty list explicitly: [] means include NONE
+        # None means no filter (include all)
+        if cols_select is not None and len(cols_select) == 0:
+            return []
+
         selected_colnames = [
             c
             for c in colnames
@@ -484,10 +447,11 @@ class DataReaderImerg(DataReaderTimestep):
         # Extract precipitation data for time range (with spatial filtering)
         # Shape: (n_times, n_lats, n_lons) -> only load filtered region
         try:
-            # Account for time index offset when loading from zarr
-            # (because we only loaded a subset of the time coordinate)
-            zarr_start = didx_start + self.time_index_offset
-            zarr_end = didx_end + self.time_index_offset
+            # didx_start and didx_end from _get_dataset_idxs are already the correct
+            # zarr indices (computed relative to data_start_time, which is the first
+            # timestamp in the zarr array). No offset adjustment is needed here.
+            zarr_start = didx_start
+            zarr_end = didx_end
 
             # Use advanced indexing to load only the filtered spatial region
             # This dramatically reduces memory usage for large datasets like IMERG
@@ -512,15 +476,25 @@ class DataReaderImerg(DataReaderTimestep):
         # Shape: (n_times * n_grid_points, 2)
         coords = np.vstack([self.coords_template] * n_times)
 
-        # Create datetime array matching data points
+        # Compute datetimes on-demand (lazy loading - no stored datetime array)
         # Repeat each datetime n_grid_points times
-        datetimes = np.repeat(self.datetimes[didx_start:didx_end], self.n_grid_points)
+        window_datetimes = self._compute_datetimes_for_range(zarr_start, zarr_end)
+        datetimes = np.repeat(window_datetimes, self.n_grid_points)
 
         # Empty geoinfos for now
         geoinfos = np.zeros((len(data), 0), dtype=np.float32)
 
         # Apply time mask to ensure [t_start, t_end) convention
         t_mask = np.logical_and(datetimes >= dtr.start, datetimes < dtr.end)
+
+        # Debug: warn if time mask filters everything
+        if t_mask.sum() == 0 and len(datetimes) > 0:
+            _logger.warning(
+                f"IMERG _get: Time mask filtered ALL data! "
+                f"zarr_idx=[{zarr_start},{zarr_end}), n_times={n_times}, "
+                f"computed_dt=[{window_datetimes[0]}, {window_datetimes[-1]}], "
+                f"expected_dt=[{dtr.start}, {dtr.end})"
+            )
 
         rd = ReaderData(
             coords=coords[t_mask],
