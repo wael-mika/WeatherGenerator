@@ -64,13 +64,13 @@ pred_mlp_adaln: True
 
 # Forecasting parameters
 # For downscaling, predict next timestep (offset=1)
-forecast_offset: 1
+forecast_offset: 0
 forecast_delta_hrs: 0
-forecast_steps: 1
+forecast_steps: 0
 forecast_policy: "fixed"
 forecast_freeze_model: False
 forecast_att_dense_rate: 0.25
-fe_num_blocks: 2
+fe_num_blocks: 0
 fe_num_heads: 8
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -102,7 +102,7 @@ batch_size: 1
 batch_size_validation: 1
 
 # Training mode
-training_mode: "forecast"
+training_mode: "masking"
 masking_rate: 0.6
 masking_rate_sampling: True
 sampling_rate_target: 1.0
