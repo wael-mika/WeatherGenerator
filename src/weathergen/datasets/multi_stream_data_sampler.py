@@ -430,6 +430,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         if rdata.is_empty():
                             # work around for https://github.com/pytorch/pytorch/issues/158719
                             # create non-empty mean data instead of empty tensor
+                            _logger.warning(
+                                f"Stream {stream_info.name} fstep {fstep}: "
+                                f"target data is EMPTY, spoofing. time_win={time_win_target}"
+                            )
                             rdata = spoof(
                                 self.healpix_level,
                                 time_win_target.start,

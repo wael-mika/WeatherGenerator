@@ -32,8 +32,9 @@ from weathergen.model.engines import (
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
 )
-from weathergen.model.layers import MLP, NamedLinear
+from weathergen.model.layers import MLP, MoEBlock, NamedLinear
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
+from weathergen.model.shape_logger import get_shape_logger
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
@@ -253,6 +254,12 @@ class Model(torch.nn.Module):
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
 
+        # Shape logger for debugging data flow
+        self.shape_logger = get_shape_logger(
+            enabled=getattr(cf, "enable_shape_logging", False),
+            step_interval=getattr(cf, "shape_logging_interval", 1)
+        )
+
     #########################################
     def create(self) -> "Model":
         """Create each individual module of the model"""
@@ -321,6 +328,11 @@ class Model(torch.nn.Module):
             )
 
         self.forecast_engine = ForecastingEngine(cf, self.num_healpix_cells)
+
+        # NOTE: Spatial router initialization is deferred to initialize_spatial_routers()
+        # This must be called AFTER the model is on the correct device (cuda).
+        # With FSDP, the model is created on meta device, so we cannot initialize here.
+        # For non-FSDP mode, initialize_spatial_routers() should be called after .to("cuda")
 
         ###############
         # embed coordinates yielding one query token for each target token
@@ -460,6 +472,38 @@ class Model(torch.nn.Module):
 
         self.apply(_reset_params)
 
+    def initialize_spatial_routers(self):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+
+        This method must be called AFTER the model is on the correct device (cuda).
+        With FSDP, call this after to_empty(device="cuda") and reset_parameters().
+        For non-FSDP mode, call this after model.to("cuda").
+        """
+        cf = self.cf
+
+        if not (getattr(cf, "ae_global_moe_use_spatial_routing", False) or
+                getattr(cf, "fe_moe_use_spatial_routing", False)):
+            return  # No spatial routing enabled
+
+        # Compute HEALPix coordinates for all cells (use numpy array, not torch tensor)
+        theta, phi = healpy.pix2ang(
+            nside=2**self.healpix_level,
+            ipix=np.arange(self.num_healpix_cells),
+            nest=True  # Use nested ordering (same as model)
+        )
+        # Convert to torch tensors
+        theta_tensor = torch.from_numpy(np.array(theta)).float()
+        phi_tensor = torch.from_numpy(np.array(phi)).float()
+
+        # Initialize global assimilation engine spatial routers
+        if getattr(cf, "ae_global_moe_use_spatial_routing", False):
+            self.ae_global_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+
+        # Initialize forecasting engine spatial routers
+        if getattr(cf, "fe_moe_use_spatial_routing", False):
+            self.forecast_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+
     #########################################
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
@@ -568,6 +612,13 @@ class Model(torch.nn.Module):
 
         (streams_data, source_cell_lens, target_coords_idxs) = batch
 
+        # Increment shape logger step counter
+        self.shape_logger.increment_step()
+
+        # Log input data shapes
+        batch_size = self.cf.batch_size_per_gpu if self.training else self.cf.batch_size_validation_per_gpu
+        self.shape_logger.log_embedding_input(streams_data, batch_size, len(self.cf.streams))
+
         # embed
         tokens = self.embed_cells(model_params, streams_data)
 
@@ -624,6 +675,13 @@ class Model(torch.nn.Module):
         device = next(self.parameters()).device
         tokens_all = self.embed_engine(streams_data, model_params.pe_embed, self.dtype, device)
 
+        # Log embedding output
+        self.shape_logger.log_embedding_output(
+            tokens_all,
+            self.num_healpix_cells,
+            tuple(model_params.pe_embed.shape)
+        )
+
         return tokens_all
 
     #########################################
@@ -657,6 +715,16 @@ class Model(torch.nn.Module):
         q_cells_lens = torch.cat(
             [model_params.q_cells_lens[0].unsqueeze(0)]
             + [model_params.q_cells_lens[1:] for _ in range(batch_size)]
+        )
+
+        # Log local assimilation input
+        self.shape_logger.log_local_assimilation_input(
+            tokens,
+            cell_lens,
+            tuple(self.q_cells.shape),
+            tuple(model_params.pe_global.shape),
+            batch_size,
+            self.num_healpix_cells
         )
 
         # local assimilation model
@@ -729,6 +797,15 @@ class Model(torch.nn.Module):
             + model_params.pe_global
         ).flatten(1, 2)
 
+        # Log local assimilation output (ready for global)
+        self.shape_logger.log_local_assimilation_output(
+            tokens_global,
+            batch_size,
+            self.num_healpix_cells,
+            s[-2],  # num_queries
+            s[-1]   # dim_embed
+        )
+
         return tokens_global, posteriors
 
     #########################################
@@ -741,8 +818,14 @@ class Model(torch.nn.Module):
             Latent representation of the model
         """
 
+        # Log global assimilation input
+        self.shape_logger.log_global_assimilation_input(tokens)
+
         # global assimilation engine and adapter
         tokens = self.ae_global_engine(tokens, use_reentrant=False)
+
+        # Log global assimilation output
+        self.shape_logger.log_global_assimilation_output(tokens)
 
         return tokens
 
@@ -760,7 +843,13 @@ class Model(torch.nn.Module):
             ValueError: For unexpected arguments in checkpoint method
         """
 
+        # Log forecast input
+        self.shape_logger.log_forecast_input(tokens, fstep)
+
         tokens = self.forecast_engine(tokens, fstep)
+
+        # Log forecast output
+        self.shape_logger.log_forecast_output(tokens, fstep)
 
         return tokens
 

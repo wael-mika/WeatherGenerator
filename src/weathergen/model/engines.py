@@ -24,25 +24,39 @@ from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
 )
-from weathergen.model.layers import MLP
+from weathergen.model.layers import MLP, MoEBlock
+from weathergen.model.shape_logger import get_shape_logger
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
 
-class EmbeddingEngine(torch.nn.Module):
-    """Embedding engine for the model."""
+# Module-level helper functions for gradient checkpointing with MoE blocks
+# Defined at module level to avoid closure issues when used inside loops
+def _moe_forward_wrapper_no_aux(block, x):
+    """Wrapper for MoE forward that discards aux_loss (for checkpointing)."""
+    output, _ = block(x)
+    return output
 
+
+def _moe_forward_wrapper_with_aux(block, x, aux):
+    """Wrapper for MoE forward with auxiliary input that discards aux_loss (for checkpointing)."""
+    output, _ = block(x, aux)
+    return output
+
+
+class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
 
     def __init__(self, cf: Config, sources_size) -> None:
-        """Initialize the EmbeddingEngine with the configuration.
+        """
+        Initialize the EmbeddingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
-        :param sources_size: Tensor of number of channels for each stream
+        :param sources_size: List of source sizes for each stream.
         """
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
-        self.sources_size = sources_size
+        self.sources_size = sources_size  # KCT:iss130, what is this?
         self.embeds = torch.nn.ModuleList()
 
         for i, si in enumerate(self.cf.streams):
@@ -82,15 +96,6 @@ class EmbeddingEngine(torch.nn.Module):
                 raise ValueError("Unsupported embedding network type")
 
     def forward(self, streams_data, pe_embed, dtype, device):
-        """Forward pass of the embedding engine.
-
-        :param streams_data: Tensor of streams data.
-        :param pe_embed: Positional encoding embeddings.
-        :param dtype: Data type for the embeddings.
-        :param device: Device to run the embeddings on.
-
-        :return tokens_all: Embedded tokens.
-        """
         source_tokens_lens = torch.stack(
             [
                 torch.stack(
@@ -136,20 +141,11 @@ class EmbeddingEngine(torch.nn.Module):
 
 
 class LocalAssimilationEngine(torch.nn.Module):
-    """Local assimilation engine for the model.
-    
-    The LocalAssimilationEngine is responsible for fusing information from different input
-    streams (e.g., satellite, station data) within each HEALPix cell. It operates locally,
-    meaning attention is computed only among tokens belonging to the same cell. This step 
-    aggregates high-resolution, heterogeneous input data into a unified cell-level 
-    representation before global interaction takes place. It uses a sequence of self-attention 
-    blocks and MLPs.
-    """
-
     name: "LocalAssimilationEngine"
 
     def __init__(self, cf: Config) -> None:
-        """Initialize the LocalAssimilationEngine with the configuration.
+        """
+        Initialize the LocalAssimilationEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         """
@@ -182,26 +178,17 @@ class LocalAssimilationEngine(torch.nn.Module):
             )
 
     def forward(self, tokens_c, cell_lens_c, use_reentrant):
-        """Forward pass of the local assimilation engine.
-
-        :param tokens_c: Tokens to be assimilated.
-        :param cell_lens_c: Cell lengths for the tokens.
-        :param use_reentrant: Whether to use reentrant mode.
-
-        :return tokens_c: Assimilated tokens.
-        """
         for block in self.ae_local_blocks:
             tokens_c = checkpoint(block, tokens_c, cell_lens_c, use_reentrant=use_reentrant)
         return tokens_c
 
 
 class Local2GlobalAssimilationEngine(torch.nn.Module):
-    """Local2GlobalAssimilationEngine for the model."""
-
     name: "Local2GlobalAssimilationEngine"
 
     def __init__(self, cf: Config) -> None:
-        """Initialize the Local2GlobalAssimilationEngine with the configuration.
+        """
+        Initialize the Local2GlobalAssimilationEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         """
@@ -253,16 +240,6 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         )
 
     def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c, use_reentrant):
-        """Forward pass of the local to global assimilation engine.
-
-        :param tokens_c: Tokens to be assimilated.
-        :param tokens_global_c: Global tokens to be assimilated.
-        :param q_cells_lens_c: Query cell lengths for the tokens.
-        :param cell_lens_c: Cell lengths for the tokens.
-        :param use_reentrant: Whether to use reentrant mode.
-
-        :return tokens_global_c: Assimilated tokens.
-        """
         for block in self.ae_adapter:
             tokens_global_c = checkpoint(
                 block,
@@ -276,20 +253,11 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
 
 
 class GlobalAssimilationEngine(torch.nn.Module):
-    """Global assimilation engine for the model.
-    
-    The GlobalAssimilationEngine processes the unified cell-level representations generated by
-    the LocalAssimilationEngine. Its primary role is to model long-range dependencies and
-    physical interactions across the entire globe. It alternates between local attention 
-    (focusing on neighboring cells) and global attention (fully connected or sparse global 
-    patterns) to efficiently propagate information. This engine transforms the local latents 
-    into a globally consistent state representation.
-    """
-
     name: "GlobalAssimilationEngine"
 
     def __init__(self, cf: Config, num_healpix_cells: int) -> None:
-        """Initialize the GlobalAssimilationEngine with the configuration.
+        """
+        Initialize the GlobalAssimilationEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param num_healpix_cells: Number of healpix cells used for local queries.
@@ -334,38 +302,176 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     )
                 )
             # MLP block
-            self.ae_global_blocks.append(
-                MLP(
-                    self.cf.ae_global_dim_embed,
-                    self.cf.ae_global_dim_embed,
-                    with_residual=True,
-                    dropout_rate=self.cf.ae_global_dropout_rate,
-                    hidden_factor=self.cf.ae_global_mlp_hidden_factor,
-                    norm_type=self.cf.norm_type,
-                    norm_eps=self.cf.mlp_norm_eps,
+            # ORIGINAL MLP VERSION (commented out for MoE integration)
+            # self.ae_global_blocks.append(
+            #     MLP(
+            #         self.cf.ae_global_dim_embed,
+            #         self.cf.ae_global_dim_embed,
+            #         with_residual=True,
+            #         dropout_rate=self.cf.ae_global_dropout_rate,
+            #         hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+            #         norm_type=self.cf.norm_type,
+            #         norm_eps=self.cf.mlp_norm_eps,
+            #     )
+            # )
+
+            # NEW MoE VERSION WITH SELECTIVE BLOCK SUPPORT
+            # Check if MoE is enabled in config (defaults to False for backward compatibility)
+            use_moe = getattr(self.cf, "ae_global_use_moe", False)
+
+            # Check if this specific block should use MoE
+            moe_blocks = getattr(self.cf, "ae_global_moe_blocks", "all")
+            should_use_moe = use_moe and (moe_blocks == "all" or i in moe_blocks)
+
+            if should_use_moe:
+                # MoE block with multiple expert MLPs
+                moe_num_experts = getattr(self.cf, "ae_global_moe_num_experts", 8)
+                moe_top_k = getattr(self.cf, "ae_global_moe_top_k", 2)
+                moe_load_balance_weight = getattr(self.cf, "ae_global_moe_load_balance_weight", 0.01)
+                moe_jitter_noise = getattr(self.cf, "ae_global_moe_jitter_noise", 0.0)
+
+                # NEW: Spatial routing parameters
+                use_spatial_routing = getattr(self.cf, "ae_global_moe_use_spatial_routing", False)
+                position_embed_dim = getattr(self.cf, "ae_global_moe_position_embed_dim", 128)
+
+                # NEW: Expert size control
+                expert_hidden_factor = getattr(self.cf, "ae_global_moe_expert_hidden_factor", self.cf.ae_global_mlp_hidden_factor)
+
+                self.ae_global_blocks.append(
+                    MoEBlock(
+                        expert_fn=lambda: MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=False,  # MoEBlock handles residual
+                            dropout_rate=self.cf.ae_global_dropout_rate,
+                            hidden_factor=expert_hidden_factor,  # Use expert-specific hidden factor
+                            norm_type=self.cf.norm_type,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        ),
+                        dim_in=self.cf.ae_global_dim_embed,
+                        num_experts=moe_num_experts,
+                        top_k=moe_top_k,
+                        load_balance_weight=moe_load_balance_weight,
+                        jitter_noise=moe_jitter_noise,
+                        with_residual=True,  # MoEBlock manages residual connection
+                        # NEW: Spatial routing support
+                        use_spatial_router=use_spatial_routing,
+                        num_positions=self.num_healpix_cells,
+                        position_embed_dim=position_embed_dim,
+                    )
                 )
-            )
+            else:
+                # Standard MLP block (backward compatible)
+                self.ae_global_blocks.append(
+                    MLP(
+                        self.cf.ae_global_dim_embed,
+                        self.cf.ae_global_dim_embed,
+                        with_residual=True,
+                        dropout_rate=self.cf.ae_global_dropout_rate,
+                        hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.mlp_norm_eps,
+                    )
+                )
 
-    def forward(self, tokens, use_reentrant):
-        """Forward pass of the global assimilation engine.
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+        Called from Model after coordinates are computed.
 
-        :param tokens: Tokens to be assimilated.
-        :param use_reentrant: Whether to use reentrant mode.
-
-        :return tokens: Assimilated tokens.
+        Args:
+            theta: Colatitude angles [num_healpix_cells] in radians
+            phi: Azimuthal angles [num_healpix_cells] in radians
         """
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+            if isinstance(block, MoEBlock) and hasattr(block, 'use_spatial_router') and block.use_spatial_router:
+                block.router.initialize_from_coordinates(theta, phi)
+
+    def forward(self, tokens, use_reentrant):
+        # ORIGINAL VERSION (commented out for MoE integration)
+        # for block in self.ae_global_blocks:
+        #     tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+        # return tokens
+
+        # NEW VERSION: Handle both MLP and MoE blocks with shape logging
+        shape_logger = get_shape_logger()
+        should_log = shape_logger.should_log()
+
+        # Track block indices (attention and MLP alternate)
+        mlp_idx = 0
+
+        for i, block in enumerate(self.ae_global_blocks):
+            # Store input for logging
+            if should_log:
+                tokens_before = tokens
+
+            # Process block
+            if isinstance(block, MoEBlock):
+                # MoEBlock returns (output, aux_loss)
+                # We need to handle checkpointing differently for MoE
+                if use_reentrant:
+                    # Use module-level wrapper to avoid closure issues
+                    tokens = checkpoint(_moe_forward_wrapper_no_aux, block, tokens, use_reentrant=use_reentrant)
+                    aux_loss = block.get_aux_loss()
+                else:
+                    tokens, aux_loss = block(tokens)
+
+                # Log MoE block
+                if should_log:
+                    shape_logger.log_global_assimilation_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        aux_loss=aux_loss.item() if aux_loss is not None else None,
+                        is_moe=True
+                    )
+                mlp_idx += 1
+
+            elif isinstance(block, MLP):
+                # Standard MLP block
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+
+                # Log MLP block
+                if should_log:
+                    shape_logger.log_global_assimilation_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        aux_loss=None,
+                        is_moe=False
+                    )
+                mlp_idx += 1
+
+            else:
+                # Attention block (don't log to reduce verbosity)
+                tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+
         return tokens
+
+    def get_moe_aux_losses(self):
+        """
+        Collect auxiliary losses from all MoE blocks in this engine.
+
+        Returns:
+            List of auxiliary losses from MoE blocks (empty list if no MoE blocks)
+        """
+        aux_losses = []
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
 
 
 class ForecastingEngine(torch.nn.Module):
-    """Forecasting engine for the model."""
-
     name: "ForecastingEngine"
 
     def __init__(self, cf: Config, num_healpix_cells: int) -> None:
-        """Initialize the ForecastingEngine with the configuration.
+        """
+        Initialize the ForecastingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param num_healpix_cells: Number of healpix cells used for local queries.
@@ -410,20 +516,94 @@ class ForecastingEngine(torch.nn.Module):
                         )
                     )
                 # Add MLP block
-                self.fe_blocks.append(
-                    MLP(
-                        self.cf.ae_global_dim_embed,
-                        self.cf.ae_global_dim_embed,
-                        with_residual=True,
-                        dropout_rate=self.cf.fe_dropout_rate,
-                        norm_type=self.cf.norm_type,
-                        dim_aux=1,
-                        norm_eps=self.cf.mlp_norm_eps,
+                # ORIGINAL MLP VERSION (commented out for MoE integration)
+                # self.fe_blocks.append(
+                #     MLP(
+                #         self.cf.ae_global_dim_embed,
+                #         self.cf.ae_global_dim_embed,
+                #         with_residual=True,
+                #         dropout_rate=self.cf.fe_dropout_rate,
+                #         norm_type=self.cf.norm_type,
+                #         dim_aux=1,
+                #         norm_eps=self.cf.mlp_norm_eps,
+                #     )
+                # )
+
+                # NEW MoE VERSION WITH SELECTIVE BLOCK SUPPORT
+                # Check if MoE is enabled in config (defaults to False for backward compatibility)
+                use_moe = getattr(self.cf, "fe_use_moe", False)
+
+                # Check if this specific block should use MoE
+                moe_blocks = getattr(self.cf, "fe_moe_blocks", "all")
+                should_use_moe = use_moe and (moe_blocks == "all" or i in moe_blocks)
+
+                if should_use_moe:
+                    # MoE block with multiple expert MLPs
+                    moe_num_experts = getattr(self.cf, "fe_moe_num_experts", 8)
+                    moe_top_k = getattr(self.cf, "fe_moe_top_k", 2)
+                    moe_load_balance_weight = getattr(self.cf, "fe_moe_load_balance_weight", 0.01)
+                    moe_jitter_noise = getattr(self.cf, "fe_moe_jitter_noise", 0.0)
+
+                    # NEW: Spatial routing parameters
+                    use_spatial_routing = getattr(self.cf, "fe_moe_use_spatial_routing", False)
+                    position_embed_dim = getattr(self.cf, "fe_moe_position_embed_dim", 128)
+
+                    # NEW: Expert size control
+                    expert_hidden_factor = getattr(self.cf, "fe_moe_expert_hidden_factor", 2.0)  # Default to 2.0 if not specified
+
+                    self.fe_blocks.append(
+                        MoEBlock(
+                            expert_fn=lambda: MLP(
+                                self.cf.ae_global_dim_embed,
+                                self.cf.ae_global_dim_embed,
+                                with_residual=False,  # MoEBlock handles residual
+                                dropout_rate=self.cf.fe_dropout_rate,
+                                hidden_factor=expert_hidden_factor,  # Use expert-specific hidden factor
+                                norm_type=self.cf.norm_type,
+                                dim_aux=1,  # Timestep conditioning
+                                norm_eps=self.cf.mlp_norm_eps,
+                            ),
+                            dim_in=self.cf.ae_global_dim_embed,
+                            num_experts=moe_num_experts,
+                            top_k=moe_top_k,
+                            load_balance_weight=moe_load_balance_weight,
+                            jitter_noise=moe_jitter_noise,
+                            with_residual=True,  # MoEBlock manages residual connection
+                            # NEW: Spatial routing support
+                            use_spatial_router=use_spatial_routing,
+                            num_positions=self.num_healpix_cells,
+                            position_embed_dim=position_embed_dim,
+                        )
                     )
-                )
+                else:
+                    # Standard MLP block (backward compatible)
+                    self.fe_blocks.append(
+                        MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=True,
+                            dropout_rate=self.cf.fe_dropout_rate,
+                            norm_type=self.cf.norm_type,
+                            dim_aux=1,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        )
+                    )
+
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """
+        Initialize spatial routers with HEALPix coordinates.
+        Called from Model after coordinates are computed.
+
+        Args:
+            theta: Colatitude angles [num_healpix_cells] in radians
+            phi: Azimuthal angles [num_healpix_cells] in radians
+        """
+        if self.cf.forecast_policy is not None:
+            for block in self.fe_blocks:
+                if isinstance(block, MoEBlock) and hasattr(block, 'use_spatial_router') and block.use_spatial_router:
+                    block.router.initialize_from_coordinates(theta, phi)
 
         def init_weights_final(m):
-            """Initialize the weights of the forecasting engine."""
             if isinstance(m, torch.nn.Linear):
                 torch.nn.init.normal_(m.weight, mean=0, std=0.001)
                 if m.bias is not None:
@@ -433,23 +613,84 @@ class ForecastingEngine(torch.nn.Module):
             block.apply(init_weights_final)
 
     def forward(self, tokens, fstep):
-        """Forward pass of the forecasting engine.
+        # ORIGINAL VERSION (commented out for MoE integration)
+        # aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
+        # for block in self.fe_blocks:
+        #     tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+        # return tokens
 
-        :param tokens: Tokens to be forecasted.
-        :param fstep: Forecast step.
+        # NEW VERSION: Handle both MLP and MoE blocks with shape logging
+        shape_logger = get_shape_logger()
+        should_log = shape_logger.should_log()
 
-        :return tokens: Forecasted tokens.
-        """
-        aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
-        for block in self.fe_blocks:
-            tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+        aux_info = torch.tensor([fstep], dtype=torch.float32, device=tokens.device)
+        mlp_idx = 0
+
+        for i, block in enumerate(self.fe_blocks):
+            # Store input for logging
+            if should_log:
+                tokens_before = tokens
+
+            # Process block
+            if isinstance(block, MoEBlock):
+                # MoEBlock returns (output, aux_loss)
+                # Use module-level wrapper to avoid closure issues
+                tokens = checkpoint(_moe_forward_wrapper_with_aux, block, tokens, aux_info, use_reentrant=False)
+                aux_loss = block.get_aux_loss()
+
+                # Log MoE block
+                if should_log:
+                    shape_logger.log_forecast_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        fstep,
+                        aux_loss=aux_loss.item() if aux_loss is not None else None,
+                        is_moe=True
+                    )
+                mlp_idx += 1
+
+            elif isinstance(block, MLP):
+                # Standard MLP block
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+
+                # Log MLP block
+                if should_log:
+                    shape_logger.log_forecast_block(
+                        mlp_idx,
+                        "MLP",
+                        tokens_before,
+                        tokens,
+                        fstep,
+                        aux_loss=None,
+                        is_moe=False
+                    )
+                mlp_idx += 1
+
+            else:
+                # Attention block (don't log to reduce verbosity)
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
 
         return tokens
 
+    def get_moe_aux_losses(self):
+        """
+        Collect auxiliary losses from all MoE blocks in this engine.
+
+        Returns:
+            List of auxiliary losses from MoE blocks (empty list if no MoE blocks)
+        """
+        aux_losses = []
+        for block in self.fe_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
+
 
 class EnsPredictionHead(torch.nn.Module):
-    """Ensemble prediction head for the model."""
-
     def __init__(
         self,
         dim_embed,
@@ -461,17 +702,7 @@ class EnsPredictionHead(torch.nn.Module):
         hidden_factor=2,
         final_activation: None | str = None,
     ):
-        """Initialize the EnsPredictionHead with the configuration.
-
-        :param dim_embed: Dimension of the embedding.
-        :param dim_out: Dimension of the output.
-        :param ens_num_layers: Number of layers in the ensemble.
-        :param ens_size: Size of the ensemble.
-        :param stream_name: Name of the stream.
-        :param norm_type: Type of normalization.
-        :param hidden_factor: Hidden factor to create an internal dimension.
-        :param final_activation: Optional final activation function.
-        """
+        """Constructor"""
 
         super(EnsPredictionHead, self).__init__()
 
@@ -503,12 +734,6 @@ class EnsPredictionHead(torch.nn.Module):
 
     #########################################
     def forward(self, toks):
-        """Forward pass of the EnsPredictionHead.
-
-        :param toks: Tokens to be predicted.
-
-        :return preds: Ensemble predictions.
-        """
         preds = []
         for pred_head in self.pred_heads:
             cpred = toks
@@ -521,16 +746,6 @@ class EnsPredictionHead(torch.nn.Module):
 
 
 class TargetPredictionEngineClassic(nn.Module):
-    """Target prediction engine for the model.
-    
-    The TargetPredictionEngineClassic is a specialized decoding module that projects the global
-    latent states back to specific target coordinates (e.g., station locations). It typically 
-    employs a PerceiverIO-style architecture where target coordinate embeddings query the 
-    latent state via cross-attention. This engine is "Classic" in the sense that it strictly 
-    follows the original design with coordinate conditioning and optional self-attention, 
-    without the flexible decoder types found in the newer `TargetPredictionEngine`.
-    """
-
     def __init__(
         self,
         cf,
@@ -542,10 +757,11 @@ class TargetPredictionEngineClassic(nn.Module):
         tro_type,
         stream_name: str,
     ):
-        """Initialize the TargetPredictionEngine with the configuration.
+        """
+        Initialize the TargetPredictionEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
-        :param dims_embed: Tensor of embedding dimensions for each layer.
+        :param dims_embed: List of embedding dimensions for each layer.
         :param dim_coord_in: Input dimension for coordinates.
         :param tr_dim_head_proj: Dimension for head projection.
         :param tr_mlp_hidden_factor: Hidden factor for the MLP layers.
@@ -615,16 +831,6 @@ class TargetPredictionEngineClassic(nn.Module):
             )
 
     def forward(self, latent, output, latent_lens, output_lens, coordinates):
-        """Forward pass of the TargetPredictionEngineClassic.
-
-        :param latent: Latent tokens.
-        :param output: Output tokens.
-        :param latent_lens: Lengths of the latent tokens.
-        :param output_lens: Lengths of the output tokens.
-        :param coordinates: Target coordinates for auxiliary information.
-
-        :returns tc_tokens: Output tokens.
-        """
         tc_tokens = output
         tcs_lens = output_lens
         tokens_stream = latent
@@ -648,17 +854,6 @@ class TargetPredictionEngineClassic(nn.Module):
 
 
 class TargetPredictionEngine(nn.Module):
-    """TargetPredictionEngine for the model.
-    
-    The TargetPredictionEngine handles the decoding of the latent representation into the target
-    observational space. Unlike the Classic version which solely relies on a fixed
-    PerceiverIO-like structure with coordinate conditioning, this engine is configurable via
-    `decoder_type`. It supports various conditioning mechanisms, allowing for experimentation
-    with how the latent state and auxiliary information (like coordinates) are fused to generate
-    predictions. It includes normalization, optional positional embeddings and a flexible 
-    sequence of decoding blocks.
-    """
-
     def __init__(
         self,
         cf,
@@ -670,10 +865,11 @@ class TargetPredictionEngine(nn.Module):
         tro_type,
         stream_name: str,
     ):
-        """Initialize the TargetPredictionEngine with the configuration.
+        """
+        Initialize the TargetPredictionEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
-        :param dims_embed: Tensor of embedding dimensions for each layer.
+        :param dims_embed: List of embedding dimensions for each layer.
         :param dim_coord_in: Input dimension for coordinates.
         :param tr_dim_head_proj: Dimension for head projection.
         :param tr_mlp_hidden_factor: Hidden factor for the MLP layers.
@@ -802,16 +998,6 @@ class TargetPredictionEngine(nn.Module):
                 )
 
     def forward(self, latent, output, latent_lens, output_lens, coordinates):
-        """Forward pass of the TargetPredictionEngine.
-
-        :param latent: Latent tokens.
-        :param output: Output tokens.
-        :param latent_lens: Lengths of the latent tokens.
-        :param output_lens: Lengths of the output tokens.
-        :param coordinates: Target coordinates for auxiliary information.
-
-        :return output: Output tokens.
-        """
         latent = (
             self.dropout(self.latent_in_norm(latent + self.pos_embed))
             if self.cf.decoder_type != "PerceiverIOCoordConditioning"

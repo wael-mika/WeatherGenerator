@@ -34,6 +34,22 @@ ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 
+# Mixture of Experts (MoE) Configuration for Global Assimilation Engine
+# Enable MoE to replace MLP blocks with mixture of expert networks
+ae_global_use_moe: False                    # Enable/disable MoE (default: False for backward compatibility)
+ae_global_moe_blocks: [0, 3]                # Which blocks to use MoE: "all" or list of block indices [0, 2, 4, 6] (default: "all")
+ae_global_moe_num_experts: 4                # Number of expert networks in the mixture (default: 8)
+ae_global_moe_top_k: 2                      # Number of experts each token is routed to (default: 2) - Changed from 1 for better balance
+ae_global_moe_load_balance_weight: 0      # Weight for load balancing loss to prevent expert collapse (default: 0.01) - INCREASED from 0.01 to fix high router loss
+ae_global_moe_jitter_noise: 0.01            # Noise added to router for exploration during training (default: 0.0) - Added to help exploration
+ae_global_moe_expert_hidden_factor: 1.0     # Hidden layer size multiplier for each expert (default: 1.0, use 0.5 for smaller experts)
+                                            # Baseline MLP uses ae_global_mlp_hidden_factor=2, so 1.0 makes experts 50% of baseline size
+
+# Spatial Routing Configuration (NEW - to improve spatial coherence)
+# Spatially-aware router provides geographic context to MoE routing decisions
+ae_global_moe_use_spatial_routing: False    # Enable spatial-aware router (default: False) - Set to True to fix poor spatial coherence
+ae_global_moe_position_embed_dim: 128       # Dimension of position embeddings for each HEALPix cell (default: 128)
+
 decoder_type: PerceiverIOCoordConditioning # CrossAttentionAdaNormConditioning
 pred_adapter_kv: False
 pred_self_attention: True
@@ -42,16 +58,30 @@ pred_mlp_adaln: True
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-forecast_offset : 0
+forecast_offset : 1
 forecast_delta_hrs: 0
-forecast_steps: 0
-forecast_policy: null
+forecast_steps: 2
+forecast_policy: "fixed" 
 forecast_att_dense_rate: 1.0
-fe_num_blocks: 0
+fe_num_blocks: 8
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 impute_latent_noise_std: 0.0  # 1e-4
+
+# Mixture of Experts (MoE) Configuration for Forecasting Engine
+# Enable MoE to replace MLP blocks with mixture of expert networks
+fe_use_moe: True                           # Enable/disable MoE (default: False for backward compatibility)
+fe_moe_blocks: [0, 3]                        # Which blocks to use MoE: "all" or list of block indices [0, 1, 2] (default: "all")
+fe_moe_num_experts: 8                       # Number of expert networks in the mixture (default: 8)
+fe_moe_top_k: 2                             # Number of experts each token is routed to (default: 2)
+fe_moe_load_balance_weight: 0.0005            # Weight for load balancing loss to prevent expert collapse (default: 0.01)
+fe_moe_jitter_noise: 0.0                    # Noise added to router for exploration during training (default: 0.0)
+fe_moe_expert_hidden_factor: 1.0            # Hidden layer size multiplier for each expert (default: 1.0, use 0.5 for smaller experts)
+
+# Spatial Routing Configuration (NEW - to improve spatial coherence)
+fe_moe_use_spatial_routing: True           # Enable spatial-aware router (default: False) - Set to True to fix poor spatial coherence
+fe_moe_position_embed_dim: 128              # Dimension of position embeddings for each HEALPix cell (default: 128)
 
 healpix_level: 5
 
@@ -62,6 +92,10 @@ with_fsdp: True
 attention_dtype: bf16
 mlp_norm_eps: 1e-5
 norm_eps: 1e-4
+
+# Shape Logging Configuration (for debugging data flow)
+enable_shape_logging: False               # Enable detailed shape logging to understand data flow
+shape_logging_interval: 10               # Log shapes every N training steps (1 = every step, 10 = every 10 steps)
 
 latent_noise_kl_weight: 0.0 # 1e-5
 latent_noise_gamma: 2.0
@@ -93,7 +127,7 @@ ema_halflife_in_thousands: 1e-3
 
 # training mode: "forecast" or "masking" (masked token modeling)
 # for "masking" to train with auto-encoder mode, forecast_offset should be 0
-training_mode: "masking"
+training_mode: "forecast"
 # masking rate when training mode is "masking"; ignored in foreacast mode
 masking_rate: 0.6
 # sample the masking rate (with normal distribution centered at masking_rate)
@@ -113,7 +147,7 @@ masking_strategy_config: {"strategies": ["random", "healpix", "channel"],
                           "same_strategy_per_batch": false
                           }
 
-num_mini_epochs: 32
+num_mini_epochs: 64
 samples_per_mini_epoch: 4096
 samples_per_validation: 512
 shuffle: True

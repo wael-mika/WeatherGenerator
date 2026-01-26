@@ -33,6 +33,18 @@ ae_global_att_dense_rate: 0.2
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 
+# Mixture of Experts (MoE) Configuration for Global Assimilation Engine
+ae_global_use_moe: False                    # Enable/disable MoE
+ae_global_moe_blocks: [0, 3]                # Which blocks to use MoE: "all" or list of block indices
+ae_global_moe_num_experts: 4                # Number of expert networks
+ae_global_moe_top_k: 2                      # Number of experts each token is routed to
+ae_global_moe_load_balance_weight: 0.0      # Weight for load balancing loss
+ae_global_moe_jitter_noise: 0.01            # Noise added to router for exploration
+ae_global_moe_expert_hidden_factor: 1.0     # Hidden layer size multiplier for each expert
+# Spatial Routing Configuration for AE Global
+ae_global_moe_use_spatial_routing: False    # Enable spatial-aware router
+ae_global_moe_position_embed_dim: 128       # Dimension of position embeddings
+
 decoder_type: PerceiverIOCoordConditioning # CrossAttentionAdaNormConditioning
 pred_adapter_kv: False
 pred_self_attention: True
@@ -133,11 +145,15 @@ train_log:
   # The period to log metrics (in number of batch steps)
   log_interval: 20
 
-# Forecast MLP type: "dense" (default) or "moe"
-fe_mlp_type: "dense"    # set to "moe" to enable MoE
-
-# MoE-only params (ignored when fe_mlp_type != "moe")
-fe_moe_num_experts: 4
-fe_moe_top_k: 2
-fe_moe_hidden_factor: 0.5   # = HF_dense / 4
+# Mixture of Experts (MoE) Configuration for Forecasting Engine
+fe_use_moe: True                            # Enable/disable MoE
+fe_moe_blocks: [0, 3]                       # Which blocks to use MoE: "all" or list of block indices
+fe_moe_num_experts: 8                       # Number of expert networks
+fe_moe_top_k: 2                             # Number of experts each token is routed to
+fe_moe_load_balance_weight: 0.0005          # Weight for load balancing loss
+fe_moe_jitter_noise: 0.0                    # Noise added to router for exploration
+fe_moe_expert_hidden_factor: 1.0            # Hidden layer size multiplier for each expert
+# Spatial Routing Configuration for Forecasting Engine
+fe_moe_use_spatial_routing: True            # Enable spatial-aware router
+fe_moe_position_embed_dim: 128              # Dimension of position embeddings
 

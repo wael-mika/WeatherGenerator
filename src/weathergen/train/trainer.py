@@ -43,7 +43,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.ema import EMAModel
-from weathergen.model.layers import MLP
+from weathergen.model.layers import MLP, MoEBlock
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import freeze_weights
 from weathergen.train.loss_calculator import LossCalculator
@@ -113,6 +113,8 @@ class Trainer(TrainerBase):
         else:
             model = Model(cf, sources_size, targets_num_channels, targets_coords_size).create()
             model = model.to("cuda")
+            # Initialize spatial routers after model is on cuda (non-FSDP path)
+            model.initialize_spatial_routers()
 
         # freeze request model part
         for name, module in model.named_modules():
@@ -147,6 +149,7 @@ class Trainer(TrainerBase):
             }
             modules_to_shard = (
                 MLP,
+                MoEBlock,  # Added for MoE support
                 MultiSelfAttentionHeadLocal,
                 MultiSelfAttentionHead,
                 MultiCrossAttentionHeadVarlen,
@@ -210,6 +213,8 @@ class Trainer(TrainerBase):
                 model.to_empty(device="cuda")
                 if cf.with_fsdp:
                     model.reset_parameters()
+                # Initialize spatial routers after model is on cuda (FSDP path)
+                model.initialize_spatial_routers()
         else:
             if is_root():
                 logger.info(
@@ -594,6 +599,16 @@ class Trainer(TrainerBase):
         # Unweighted loss, real weighted loss, std for losses that need it
         self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
 
+        # MoE auxiliary loss tracking
+        self.moe_aux_loss_hist = []
+
+        # Log MoE parameters once at the start of first mini_epoch
+        if mini_epoch == 0 and cf.istep == 0:
+            self._log_moe_parameters()
+
+        # Store sample batch for MoE routing stats (will be set on first batch)
+        self.moe_sample_batch = None
+
         # training loop
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):
@@ -609,6 +624,12 @@ class Trainer(TrainerBase):
                 preds, posteriors = self.model(
                     self.model_params, batch, cf.forecast_offset, forecast_steps
                 )
+
+            # Save first batch data for MoE routing statistics (only once)
+            if self.moe_sample_batch is None and bidx == 0:
+                # Store batch for routing stats - we'll extract tokens during logging
+                self.moe_sample_batch = batch
+
             loss_values = self.loss_calculator.compute_loss(
                 preds=preds,
                 streams_data=batch[0],
@@ -616,6 +637,17 @@ class Trainer(TrainerBase):
             if cf.latent_noise_kl_weight > 0.0:
                 kl = torch.cat([posterior.kl() for posterior in posteriors])
                 loss_values.loss += cf.latent_noise_kl_weight * kl.mean()
+
+            # MoE AUXILIARY LOSS INTEGRATION
+            # Collect and add MoE router auxiliary losses (load balancing)
+            moe_aux_loss = self._collect_moe_aux_losses()
+            if moe_aux_loss is not None:
+                loss_values.loss += moe_aux_loss
+                # Track MoE loss for logging
+                self.moe_aux_loss_hist.append(moe_aux_loss.item())
+            else:
+                # No MoE blocks or not training mode
+                self.moe_aux_loss_hist.append(0.0)
 
             # backward pass
             self.optimizer.zero_grad()
@@ -668,6 +700,10 @@ class Trainer(TrainerBase):
 
             self.cf.istep += 1
 
+            # Log MoE routing statistics every 500 steps
+            if bidx % 500 == 0 and bidx > 0:
+                self._log_moe_routing_stats()
+
         self.dataset.advance()
 
     def validate(self, mini_epoch):
@@ -709,6 +745,13 @@ class Trainer(TrainerBase):
                             streams_data=streams_data,
                         )
 
+                        # MoE AUXILIARY LOSS INTEGRATION (VALIDATION)
+                        # Note: During validation (eval mode), MoE aux_loss will be None
+                        # This is here for consistency and potential future monitoring
+                        moe_aux_loss = self._collect_moe_aux_losses()
+                        if moe_aux_loss is not None:
+                            loss_values.loss += moe_aux_loss
+
                         # TODO: Move _prepare_logging into write_validation by passing streams_data
                         (
                             preds_all,
@@ -743,6 +786,12 @@ class Trainer(TrainerBase):
                             preds=preds,
                             streams_data=streams_data,
                         )
+
+                        # MoE AUXILIARY LOSS INTEGRATION (VALIDATION)
+                        # Note: During validation (eval mode), MoE aux_loss will be None
+                        moe_aux_loss = self._collect_moe_aux_losses()
+                        if moe_aux_loss is not None:
+                            loss_values.loss += moe_aux_loss
 
                     self.loss_unweighted_hist += [loss_values.losses_all]
                     self.loss_model_hist += [loss_values.loss.item()]
@@ -979,7 +1028,17 @@ class Trainer(TrainerBase):
                     self.perf_mem,
                 )
 
+                # Log MoE auxiliary loss to metrics if present
+                if hasattr(self, 'moe_aux_loss_hist') and self.moe_aux_loss_hist:
+                    avg_moe_loss = sum(self.moe_aux_loss_hist) / len(self.moe_aux_loss_hist)
+                    if avg_moe_loss > 0:
+                        self.train_logger.log_metrics(stage, {'moe_router_loss': avg_moe_loss})
+
         self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
+
+        # Clear MoE loss history
+        if hasattr(self, 'moe_aux_loss_hist'):
+            self.moe_aux_loss_hist = []
 
     def _get_tensor_item(self, tensor):
         """
@@ -1000,6 +1059,168 @@ class Trainer(TrainerBase):
 
         if is_root():
             self.train_logger.log_metrics(stage, grad_norms)
+
+    def _log_moe_parameters(self):
+        """
+        Log MoE parameter counts and statistics (called once at start of training).
+        """
+        if not is_root():
+            return
+
+        moe_blocks = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, MoEBlock):
+                moe_blocks.append((name, module))
+
+        if not moe_blocks:
+            logger.info("No MoE blocks found in model.")
+            return
+
+        logger.info("\n" + "=" * 80)
+        logger.info("MoE Configuration Summary")
+        logger.info("=" * 80)
+
+        total_moe_params = 0
+        total_router_params = 0
+
+        for name, module in moe_blocks:
+            # Count expert parameters
+            expert_params = sum(p.numel() for p in module.experts.parameters())
+            # Count router parameters
+            router_params = sum(p.numel() for p in module.router.parameters())
+
+            total_moe_params += expert_params + router_params
+            total_router_params += router_params
+
+            logger.info(f"\n{name}:")
+            logger.info(f"  Number of experts: {module.num_experts}")
+            logger.info(f"  Top-k routing: {module.top_k}")
+            logger.info(f"  Expert parameters: {expert_params:,}")
+            logger.info(f"  Router parameters: {router_params:,}")
+            logger.info(f"  Total MoE params: {expert_params + router_params:,}")
+            logger.info(f"  Load balance weight: {module.load_balance_loss.weight}")
+
+        # Count total model parameters
+        total_model_params = sum(p.numel() for p in self.model.parameters())
+
+        logger.info("\n" + "-" * 80)
+        logger.info("Overall Statistics:")
+        logger.info(f"  Total MoE blocks: {len(moe_blocks)}")
+        logger.info(f"  Total MoE parameters: {total_moe_params:,}")
+        logger.info(f"  Total router parameters: {total_router_params:,}")
+        logger.info(f"  Total model parameters: {total_model_params:,}")
+        logger.info(f"  MoE parameters / Total: {100 * total_moe_params / total_model_params:.2f}%")
+        logger.info("=" * 80 + "\n")
+
+    def _log_moe_routing_stats(self):
+        """
+        Log expert utilization and routing statistics from all MoE blocks.
+        This helps diagnose expert collapse and routing issues.
+        Also logs spatial coherence for geographic data.
+        """
+        if not is_root():
+            return
+
+        if self.moe_sample_batch is None:
+            return
+
+        # Get tokens from the model by running a forward pass on sample batch
+        # We need to do this to get the intermediate representations for routing stats
+        try:
+            with torch.no_grad():
+                # Import spatial diagnostics
+                from weathergen.model.moe_diagnostics import analyze_routing_spatial_coherence, log_expert_assignments
+                from weathergen.model.router_diagnostics import analyze_router_internals, analyze_loss_components
+
+                # We'll check routing stats by inspecting the model's MoE blocks
+                moe_blocks = []
+                for name, module in self.model.named_modules():
+                    if isinstance(module, MoEBlock):
+                        moe_blocks.append((name, module))
+
+                if not moe_blocks:
+                    return
+
+                logger.info("\n" + "=" * 80)
+                logger.info("MoE Routing Statistics (Step %d)" % self.cf.istep)
+                logger.info("=" * 80)
+
+                # Get dimension from first MoE block
+                first_moe = moe_blocks[0][1]
+                dim_embed = first_moe.dim_in
+                sample_input = torch.randn(1, 12288, dim_embed, device=self.device)
+
+                for name, module in moe_blocks:
+                    stats = module.get_routing_stats(sample_input)
+
+                    # Get routing decisions
+                    router_probs, expert_indices, expert_weights = module.router(sample_input)
+                    hp_nbours = self.model_params.hp_nbours.cpu() if hasattr(self.model_params, 'hp_nbours') else None
+                    coherence_metrics = analyze_routing_spatial_coherence(
+                        expert_indices, neighbor_structure=hp_nbours, log_details=False
+                    )
+
+                    # Router diagnostics (compact)
+                    router_metrics = analyze_router_internals(module, sample_input, log_details=False)
+                    loss_metrics = analyze_loss_components(module, sample_input, log_details=False)
+
+                    # Compact single-line summary
+                    max_util = stats['expert_utilization'].max()
+                    min_util = stats['expert_utilization'].min()
+                    neighbor_agreement = coherence_metrics.get('neighbor_agreement_rate', 0.0)
+
+                    # Determine status emoji
+                    if neighbor_agreement > 0.35:
+                        status = "⚡"
+                    elif neighbor_agreement > 0.25:
+                        status = "⚠️"
+                    else:
+                        status = "❌"
+
+                    # Single compact line per block
+                    logger.info(f"\n{name}:")
+                    logger.info(f"  Experts: [{', '.join([f'{u:.1%}' for u in stats['expert_utilization']])}] | "
+                               f"Neighbor: {status} {neighbor_agreement:.1%} | "
+                               f"Confidence: {router_metrics.get('routing_confidence', 0):.1%} | "
+                               f"LB Loss: {loss_metrics.get('load_balance_loss_weighted', 0):.4f}")
+
+                    # Warnings only
+                    if max_util > 0.6:
+                        logger.warning(f"  ⚠️  Potential collapse: max={max_util:.1%}")
+                    if neighbor_agreement < 0.25:
+                        logger.warning(f"  ⚠️  Spatial coherence is random (baseline ~25%)")
+
+                    # Position embedding usage (if spatial router)
+                    if 'position_contribution_kl' in router_metrics:
+                        pos_kl = router_metrics['position_contribution_kl']
+                        pos_ratio = router_metrics['position_to_feature_ratio']
+                        if pos_kl < 0.01 or pos_ratio < 0.1:
+                            logger.warning(f"  ⚠️  Position embeddings weak: KL={pos_kl:.3f}, Ratio={pos_ratio:.3f}")
+
+                logger.info("=" * 80 + "\n")
+
+        except Exception as e:
+            logger.warning(f"Failed to compute MoE routing stats: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
+
+    def _collect_moe_aux_losses(self):
+        """
+        Collect auxiliary losses from all MoE blocks in the model.
+
+        Returns:
+            torch.Tensor or None: Sum of all MoE auxiliary losses, or None if no MoE blocks found
+        """
+        moe_losses = []
+        for module in self.model.modules():
+            if isinstance(module, MoEBlock):
+                aux_loss = module.get_aux_loss()
+                if aux_loss is not None:
+                    moe_losses.append(aux_loss)
+
+        if moe_losses:
+            return sum(moe_losses)
+        return None
 
     def _log_terminal(self, bidx: int, mini_epoch: int, stage: Stage):
         print_freq = self.train_log_freq.terminal
@@ -1033,6 +1254,13 @@ class Trainer(TrainerBase):
                         pstr += f"gradient norm={self.last_grad_norm:.3f}, "
                     pstr += f"s/sec={(print_freq * self.cf.batch_size_per_gpu) / dt:.3f})"
                     logger.info(pstr)
+
+                    # Log MoE auxiliary loss if present
+                    if hasattr(self, 'moe_aux_loss_hist') and self.moe_aux_loss_hist:
+                        avg_moe_loss = sum(self.moe_aux_loss_hist) / len(self.moe_aux_loss_hist)
+                        if avg_moe_loss > 0:
+                            logger.info(f"\tMoE router loss = {avg_moe_loss:.6f}")
+
                     logger.info("\t")
                     for _, st in enumerate(self.cf.streams):
                         logger.info(
