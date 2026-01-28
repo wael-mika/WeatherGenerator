@@ -52,7 +52,7 @@ from weathergen.train.trainer_base import TrainerBase
 from weathergen.utils.distributed import all_gather_vlen, ddp_average, is_root
 from weathergen.utils.train_logger import TRAIN, VAL, Stage, TrainLogger
 from weathergen.utils.utils import get_dtype
-from weathergen.utils.validation_io import write_output
+from weathergen.utils.validation_io import save_routing_data, write_output
 
 logger = logging.getLogger(__name__)
 
@@ -781,6 +781,14 @@ class Trainer(TrainerBase):
                             sample_idxs,
                         )
 
+                        # Save MoE routing data if available
+                        routing_data = self._collect_moe_routing_data()
+                        if routing_data is not None:
+                            save_routing_data(
+                                self.cf, mini_epoch, bidx,
+                                sample_idxs, routing_data,
+                            )
+
                     else:
                         loss_values = self.loss_calculator_val.compute_loss(
                             preds=preds,
@@ -1221,6 +1229,23 @@ class Trainer(TrainerBase):
         if moe_losses:
             return sum(moe_losses)
         return None
+
+    def _collect_moe_routing_data(self):
+        """
+        Collect routing assignments from all MoE blocks in the model.
+
+        Returns:
+            dict or None: Mapping from block name to {expert_indices, expert_weights}
+                          numpy arrays, or None if no MoE blocks found.
+        """
+        routing = {}
+        for name, module in self.model.named_modules():
+            if isinstance(module, MoEBlock) and hasattr(module, "last_expert_indices"):
+                routing[name] = {
+                    "expert_indices": module.last_expert_indices.cpu().numpy(),
+                    "expert_weights": module.last_expert_weights.cpu().numpy(),
+                }
+        return routing if routing else None
 
     def _log_terminal(self, bidx: int, mini_epoch: int, stage: Stage):
         print_freq = self.train_log_freq.terminal

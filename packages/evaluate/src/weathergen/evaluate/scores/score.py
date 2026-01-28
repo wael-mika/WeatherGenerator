@@ -438,7 +438,7 @@ class Scores:
         """
 
         a = self._sum((p >= thresh) & (gt >= thresh))
-        b = self._sum((p >= thresh) & (gt >= thresh))
+        b = self._sum((p >= thresh) & (gt < thresh))
         c = self._sum((p < thresh) & (gt >= thresh))
         d = self._sum((p < thresh) & (gt < thresh))
 

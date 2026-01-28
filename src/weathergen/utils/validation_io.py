@@ -8,6 +8,9 @@
 # nor does it submit to any jurisdiction.
 
 import logging
+from pathlib import Path
+
+import numpy as np
 
 import weathergen.common.config as config
 import weathergen.common.io as io
@@ -84,3 +87,39 @@ def write_output(
     with io.ZarrIO(config.get_path_output(cf, mini_epoch)) as writer:
         for subset in data.items():
             writer.write_zarr(subset)
+
+
+def save_routing_data(cf, mini_epoch, batch_idx, sample_idxs, routing_data):
+    """Save MoE routing assignments as .npz files alongside Zarr output.
+
+    Parameters
+    ----------
+    cf : config
+        Configuration object with output path info.
+    mini_epoch : int
+        Current mini-epoch index.
+    batch_idx : int
+        Current batch index within the validation loop.
+    sample_idxs : list[int]
+        Sample indices for this batch.
+    routing_data : dict
+        Mapping from MoE block name to dict with 'expert_indices' and
+        'expert_weights' numpy arrays.
+    """
+    output_dir = Path(config.get_path_output(cf, mini_epoch)) / "routing"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Flatten block data into a single dict with prefixed keys
+    flat = {}
+    for block_name, block_data in routing_data.items():
+        for key, val in block_data.items():
+            flat[f"{block_name}_{key}"] = val
+
+    for sample_idx in sample_idxs:
+        fname = output_dir / f"routing_sample_{sample_idx}_batch_{batch_idx}.npz"
+        np.savez_compressed(fname, **flat)
+
+    _logger.debug(
+        f"Saved routing data for {len(sample_idxs)} samples (batch {batch_idx}) "
+        f"to {output_dir}"
+    )
