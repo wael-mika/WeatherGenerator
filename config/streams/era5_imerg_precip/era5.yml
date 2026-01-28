@@ -51,7 +51,7 @@ ERA5:
 
   # Channel weights for source variables (emphasize precipitation predictors)
   # Order matches source list above
-  source_channel_weights:
+  channel_weights:
     - 1.0   # 2t      - surface temperature (moderate importance)
     - 1.5   # msl     - pressure patterns drive fronts/cyclones
     - 0.8   # u10     - surface winds (supporting)
