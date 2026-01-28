@@ -672,13 +672,36 @@ class Masker:
                 # Spatial selection method
                 method = masking_strategy_config.get("method", "geodesic_disk")
 
+                # Compute anchored center cell if configured (for regional dataset focus)
+                anchor_center_cell = None
+                anchor_lat = masking_strategy_config.get("anchor_latitude")
+                anchor_lon = masking_strategy_config.get("anchor_longitude")
+
+                if anchor_lat is not None and anchor_lon is not None:
+                    anchor_lat_rad = np.radians(anchor_lat)
+                    anchor_lon_rad = np.radians(anchor_lon)
+
+                    # Apply jitter around anchor if configured
+                    jitter_deg = masking_strategy_config.get("anchor_jitter_degrees", 0.0)
+                    if jitter_deg > 0:
+                        jitter_distance = self.rng.uniform(0, np.radians(jitter_deg))
+                        jitter_azimuth = self.rng.uniform(0, 2 * np.pi)
+                        anchor_lon_rad, anchor_lat_rad = self._get_destination_latlon(
+                            anchor_lon_rad, anchor_lat_rad, jitter_distance, jitter_azimuth
+                        )
+
+                    hp_obj = self._get_hp_obj(hl_mask)
+                    anchor_center_cell = int(hp_obj.lonlat_to_healpix(
+                        anchor_lon_rad * u.rad, anchor_lat_rad * u.rad
+                    ))
+
                 # Use standard spatial selection - returns (mask, center_cell) tuple
                 mask, center_cell = self._select_spatially_contiguous_cells(
                     healpix_level=hl_mask,
                     num_cells=num_cells,
                     num_cells_to_select=num_parents_to_keep,
                     num_children_per_parent=num_children_per_parent,
-                    center_cell=None,
+                    center_cell=anchor_center_cell,
                     method=method,
                 )
 
