@@ -334,6 +334,10 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 use_spatial_routing = getattr(self.cf, "ae_global_moe_use_spatial_routing", False)
                 position_embed_dim = getattr(self.cf, "ae_global_moe_position_embed_dim", 128)
 
+                # NEW: Router feature parameters (extreme-aware routing)
+                router_feature_type = getattr(self.cf, "ae_global_moe_router_feature", "none")
+                router_feature_dim = getattr(self.cf, "ae_global_moe_router_feature_dim", 0)
+
                 # NEW: Expert size control
                 expert_hidden_factor = getattr(self.cf, "ae_global_moe_expert_hidden_factor", self.cf.ae_global_mlp_hidden_factor)
 
@@ -358,6 +362,9 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         use_spatial_router=use_spatial_routing,
                         num_positions=self.num_healpix_cells,
                         position_embed_dim=position_embed_dim,
+                        # NEW: Extreme-aware router features
+                        router_feature_type=router_feature_type,
+                        router_feature_dim=router_feature_dim,
                     )
                 )
             else:
@@ -548,6 +555,10 @@ class ForecastingEngine(torch.nn.Module):
                     use_spatial_routing = getattr(self.cf, "fe_moe_use_spatial_routing", False)
                     position_embed_dim = getattr(self.cf, "fe_moe_position_embed_dim", 128)
 
+                    # NEW: Router feature parameters (extreme-aware routing)
+                    router_feature_type = getattr(self.cf, "fe_moe_router_feature", "none")
+                    router_feature_dim = getattr(self.cf, "fe_moe_router_feature_dim", 0)
+
                     # NEW: Expert size control
                     expert_hidden_factor = getattr(self.cf, "fe_moe_expert_hidden_factor", 2.0)  # Default to 2.0 if not specified
 
@@ -573,6 +584,9 @@ class ForecastingEngine(torch.nn.Module):
                             use_spatial_router=use_spatial_routing,
                             num_positions=self.num_healpix_cells,
                             position_embed_dim=position_embed_dim,
+                            # NEW: Extreme-aware router features
+                            router_feature_type=router_feature_type,
+                            router_feature_dim=router_feature_dim,
                         )
                     )
                 else:
