@@ -19,7 +19,6 @@
 #   - Architecture: 4-2-8 blocks (from config_physical_jepa.yml)
 #   - rate: 0.4 (40% of cells for student/source), 0.6 (60% for teacher/target)
 #   - num_samples: 1
-#   - loss weights: physical=0.5, latent=0.5
 #   - streams: era5_nppatms_synop
 
 embed_orientation: "channels"
@@ -178,12 +177,9 @@ training_config:
       weight: 0.5,
       loss_fcts: {
         "JEPA": {
-          weight: 1.0,
-          loss_extra_args: {},
-          out_dim: 2048,
-          head: mlp,                       # Simplified head (alternatives: transformer, identity)
-          # subset: student view is subset of teacher view
-          # Probabilistic overlap via random subset selection
+            'weight': 8, "loss_extra_args": {}, "out_dim": 2048, "head": transformer,
+            "num_blocks": 6, "num_heads": 12, "with_qk_lnorm": True, "intermediate_dim": 768, 
+            "dropout_rate": 0.1,
           target_source_correspondence: { 1 : { 1 : "subset"} },
         },
       },
