@@ -51,10 +51,6 @@ ae_global_moe_expert_hidden_factor: 1.0    # Expert hidden size factor
 ae_global_moe_use_spatial_routing: True
 ae_global_moe_position_embed_dim: 128
 
-# Extreme-aware router features
-ae_global_moe_router_feature: "token_log1p_l2norm"
-ae_global_moe_router_feature_dim: 0
-
 decoder_type: PerceiverIOCoordConditioning
 pred_adapter_kv: False
 pred_self_attention: True
@@ -85,10 +81,6 @@ fe_moe_expert_hidden_factor: 1.0            # Expert hidden size factor
 # Spatial Routing - ENABLED (recommended for spatial coherence)
 fe_moe_use_spatial_routing: True
 fe_moe_position_embed_dim: 128
-
-# Extreme-aware router features
-fe_moe_router_feature: "token_log1p_l2norm"
-fe_moe_router_feature_dim: 0
 
 healpix_level: 5
 

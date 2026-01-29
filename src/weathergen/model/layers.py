@@ -162,7 +162,6 @@ class MoERouter(torch.nn.Module):
         top_k: int = 2,
         jitter_noise: float = 0.0,
         router_bias: bool = False,
-        extra_dim: int = 0,
     ):
         """
         Args:
@@ -171,48 +170,32 @@ class MoERouter(torch.nn.Module):
             top_k: Number of experts to route each token to (default: 2)
             jitter_noise: Standard deviation of noise added during training (default: 0.0)
             router_bias: Whether to use bias in router linear layer (default: False)
-            extra_dim: Optional extra feature dimension concatenated to router inputs (default: 0)
         """
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
         self.jitter_noise = jitter_noise
-        self.extra_dim = extra_dim
 
         # Router learns to map input to expert scores
-        self.router_weights = nn.Linear(dim_in + extra_dim, num_experts, bias=router_bias)
+        self.router_weights = nn.Linear(dim_in, num_experts, bias=router_bias)
 
     def forward(
         self,
         x: torch.Tensor,
-        router_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route tokens to experts.
 
         Args:
             x: Input tensor [batch_size, seq_len, dim_in]
-            router_features: Optional extra features [batch_size, seq_len, extra_dim]
 
         Returns:
             router_probs: Softmax probabilities over all experts [batch_size, seq_len, num_experts]
             expert_indices: Indices of selected experts [batch_size, seq_len, top_k]
             expert_weights: Normalized weights for selected experts [batch_size, seq_len, top_k]
         """
-        if self.extra_dim > 0:
-            if router_features is None:
-                raise ValueError("router_features must be provided when extra_dim > 0")
-            if router_features.shape[-1] != self.extra_dim:
-                raise ValueError(
-                    f"router_features has last dim {router_features.shape[-1]}, "
-                    f"expected {self.extra_dim}"
-                )
-            router_input = torch.cat([x, router_features], dim=-1)
-        else:
-            router_input = x
-
         # Compute router logits
-        router_logits = self.router_weights(router_input)  # [batch_size, seq_len, num_experts]
+        router_logits = self.router_weights(x)  # [batch_size, seq_len, num_experts]
 
         # Add jitter noise during training for exploration
         if self.training and self.jitter_noise > 0:
@@ -250,7 +233,6 @@ class SpatialMoERouter(torch.nn.Module):
         jitter_noise: float = 0.0,
         router_bias: bool = False,
         position_embed_dim: int = 128,
-        extra_dim: int = 0,
     ):
         """
         Args:
@@ -261,14 +243,12 @@ class SpatialMoERouter(torch.nn.Module):
             jitter_noise: Standard deviation of noise added during training (default: 0.0)
             router_bias: Whether to use bias in router linear layer (default: False)
             position_embed_dim: Dimension of position embeddings (default: 128)
-            extra_dim: Optional extra feature dimension concatenated to router inputs (default: 0)
         """
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
         self.jitter_noise = jitter_noise
         self.position_embed_dim = position_embed_dim
-        self.extra_dim = extra_dim
 
         # Learn position embeddings for each spatial position
         # This allows router to learn "polar cells should use similar experts"
@@ -279,7 +259,7 @@ class SpatialMoERouter(torch.nn.Module):
 
         # Router sees both features AND position
         self.router_weights = nn.Linear(
-            dim_in + position_embed_dim + extra_dim, num_experts, bias=router_bias
+            dim_in + position_embed_dim, num_experts, bias=router_bias
         )
 
     def initialize_from_coordinates(self, theta: torch.Tensor, phi: torch.Tensor):
@@ -333,7 +313,6 @@ class SpatialMoERouter(torch.nn.Module):
         self,
         x: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
-        router_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route tokens to experts with spatial awareness.
@@ -342,7 +321,6 @@ class SpatialMoERouter(torch.nn.Module):
             x: Input tensor [batch_size, seq_len, dim_in]
             position_ids: Position indices [seq_len] or [batch_size, seq_len]
                          If None, falls back to sequential indices [0, 1, 2, ..., seq_len-1]
-            router_features: Optional extra features [batch_size, seq_len, extra_dim]
 
         Returns:
             router_probs: Softmax probabilities over all experts [batch_size, seq_len, num_experts]
@@ -365,18 +343,8 @@ class SpatialMoERouter(torch.nn.Module):
             # [batch_size, seq_len]
             pos_embed = self.position_embed(position_ids)  # [batch_size, seq_len, position_embed_dim]
 
-        # Concatenate features + optional extra router features + position embeddings
-        if self.extra_dim > 0:
-            if router_features is None:
-                raise ValueError("router_features must be provided when extra_dim > 0")
-            if router_features.shape[-1] != self.extra_dim:
-                raise ValueError(
-                    f"router_features has last dim {router_features.shape[-1]}, "
-                    f"expected {self.extra_dim}"
-                )
-            x_with_pos = torch.cat([x, router_features, pos_embed], dim=-1)
-        else:
-            x_with_pos = torch.cat([x, pos_embed], dim=-1)
+        # Concatenate features + position embeddings
+        x_with_pos = torch.cat([x, pos_embed], dim=-1)
 
         # Compute router logits with spatial context
         router_logits = self.router_weights(x_with_pos)  # [batch_size, seq_len, num_experts]
@@ -439,13 +407,10 @@ class MoEBlock(torch.nn.Module):
         load_balance_weight: float = 0.01,
         with_residual: bool = True,
         name: str | None = None,
-        # NEW: Spatial routing parameters
+        # Spatial routing parameters
         use_spatial_router: bool = False,
         num_positions: int = None,
         position_embed_dim: int = 128,
-        # NEW: Extreme-aware router feature parameters
-        router_feature_type: str = "none",
-        router_feature_dim: int = 0,
     ):
         """
         Args:
@@ -464,9 +429,6 @@ class MoEBlock(torch.nn.Module):
             use_spatial_router: Whether to use spatially-aware routing (default: False)
             num_positions: Number of spatial positions (required if use_spatial_router=True)
             position_embed_dim: Dimension of position embeddings (default: 128)
-            router_feature_type: Extra router feature type ("none", "token_l2norm",
-                                 "token_log1p_l2norm", "token_absmean", "linear")
-            router_feature_dim: Feature dimension for "linear" router features
         """
         super().__init__()
 
@@ -479,35 +441,11 @@ class MoEBlock(torch.nn.Module):
         self.capacity_factor = capacity_factor
         self.with_residual = with_residual
         self.use_spatial_router = use_spatial_router
-        self.router_feature_type = router_feature_type
 
         # Create experts using the factory function
         self.experts = nn.ModuleList([expert_fn() for _ in range(num_experts)])
 
-        self.router_feature_dim = 0
-        self.router_feature_proj = None
-        if router_feature_type == "none":
-            self.router_feature_dim = 0
-        elif router_feature_type in ("token_l2norm", "token_log1p_l2norm", "token_absmean"):
-            self.router_feature_dim = 1
-        elif router_feature_type == "linear":
-            if router_feature_dim <= 0:
-                raise ValueError("router_feature_dim must be > 0 when router_feature_type='linear'")
-            self.router_feature_dim = router_feature_dim
-            self.router_feature_proj = nn.Linear(dim_in, router_feature_dim, bias=False)
-        else:
-            raise ValueError(f"Unknown router_feature_type: {router_feature_type}")
-
-        # ORIGINAL ROUTER (commented out - now conditional below)
-        # self.router = MoERouter(
-        #     dim_in=dim_in,
-        #     num_experts=num_experts,
-        #     top_k=top_k,
-        #     jitter_noise=jitter_noise,
-        #     router_bias=router_bias,
-        # )
-
-        # NEW: Router for expert selection (spatial-aware or basic)
+        # Router for expert selection (spatial-aware or basic)
         if use_spatial_router:
             if num_positions is None:
                 raise ValueError("num_positions must be specified when use_spatial_router=True")
@@ -520,7 +458,6 @@ class MoEBlock(torch.nn.Module):
                 jitter_noise=jitter_noise,
                 router_bias=router_bias,
                 position_embed_dim=position_embed_dim,
-                extra_dim=self.router_feature_dim,
             )
         else:
             # Standard router (backward compatible)
@@ -530,7 +467,6 @@ class MoEBlock(torch.nn.Module):
                 top_k=top_k,
                 jitter_noise=jitter_noise,
                 router_bias=router_bias,
-                extra_dim=self.router_feature_dim,
             )
 
         # Load balancing loss
@@ -563,23 +499,8 @@ class MoEBlock(torch.nn.Module):
         # Flatten batch and sequence dimensions for routing
         x_flat = x.view(-1, dim)  # [batch_size * seq_len, dim]
 
-        router_features = None
-        if self.router_feature_type == "token_l2norm":
-            router_features = torch.norm(x, p=2, dim=-1, keepdim=True)
-        elif self.router_feature_type == "token_log1p_l2norm":
-            router_features = torch.log1p(torch.norm(x, p=2, dim=-1, keepdim=True))
-        elif self.router_feature_type == "token_absmean":
-            router_features = torch.mean(torch.abs(x), dim=-1, keepdim=True)
-        elif self.router_feature_type == "linear":
-            router_features = self.router_feature_proj(x)
-
-        if router_features is not None and router_features.dtype != x.dtype:
-            router_features = router_features.to(dtype=x.dtype)
-
         # Route tokens to experts
-        router_probs, expert_indices, expert_weights = self.router(
-            x, router_features=router_features
-        )
+        router_probs, expert_indices, expert_weights = self.router(x)
         # router_probs: [batch_size, seq_len, num_experts]
         # expert_indices: [batch_size, seq_len, top_k]
         # expert_weights: [batch_size, seq_len, top_k]
