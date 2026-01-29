@@ -13,7 +13,7 @@
 
 IMERG_ANEMOI:
   type: anemoi_transform
-  filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
+  filenames: ['nasa-imerg-grib-n320-1998-2024-6h-v1.zarr']
 
   # Source configuration - use precipitation as input
   source: ['tp']  # Total precipitation
