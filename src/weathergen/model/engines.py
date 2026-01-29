@@ -297,6 +297,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
         super(GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
+        compile_flex_attention = self.cf.get("compile_flex_attention", self.cf.compile_model)
 
         self.ae_global_blocks = torch.nn.ModuleList()
 
@@ -331,6 +332,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        compile_flex_attention=compile_flex_attention,
                     )
                 )
             # MLP block
@@ -374,6 +376,7 @@ class ForecastingEngine(torch.nn.Module):
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
         self.fe_blocks = torch.nn.ModuleList()
+        compile_flex_attention = self.cf.get("compile_flex_attention", self.cf.compile_model)
 
         global_rate = int(1 / self.cf.forecast_att_dense_rate)
         if self.cf.forecast_policy is not None:
@@ -407,6 +410,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=1,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            compile_flex_attention=compile_flex_attention,
                         )
                     )
                 # Add MLP block

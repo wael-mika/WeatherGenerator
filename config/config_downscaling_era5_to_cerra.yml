@@ -30,8 +30,8 @@ target_cell_local_prediction: True
 
 # Local autoencoder - aggressively reduced for memory efficiency
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
-ae_local_dim_embed: 384
-ae_local_num_blocks: 3
+ae_local_dim_embed: 256
+ae_local_num_blocks: 2
 ae_local_num_heads: 8
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
@@ -46,8 +46,8 @@ ae_adapter_dropout_rate: 0.1
 
 # Global autoencoder - reduced for memory efficiency
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
-ae_global_dim_embed: 768
-ae_global_num_blocks: 6
+ae_global_dim_embed: 512
+ae_global_num_blocks: 4
 ae_global_num_heads: 8
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
