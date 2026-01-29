@@ -181,6 +181,7 @@ training_config:
           weight: 1.0,
           loss_extra_args: {},
           out_dim: 2048,
+          head: mlp,                       # Simplified head (alternatives: transformer, identity)
           # cone_distance: geometric overlap control via angular separation
           target_source_correspondence: { 1 : { 1 : "cone_distance"} },
         },
