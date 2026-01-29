@@ -10,8 +10,89 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 stat_loss_fcts = ["stats", "kernel_crps"]  # Names of loss functions that need std computed
+
+LOSS_CONFIG: dict = {}
+
+
+def set_loss_config(cfg: dict | None) -> None:
+    global LOSS_CONFIG
+    LOSS_CONFIG = cfg or {}
+
+
+def _get_loss_cfg(name: str) -> dict:
+    cfg = LOSS_CONFIG.get(name, {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _get_thresholds_tensor(target: torch.Tensor, cfg: dict) -> torch.Tensor:
+    thresholds = cfg.get("thresholds", None)
+    thresholds_mm = cfg.get("thresholds_mm", None)
+    if thresholds is None and thresholds_mm is None:
+        thresholds = [10.0]
+    if thresholds_mm is not None:
+        x = torch.tensor(thresholds_mm, device=target.device, dtype=target.dtype)
+        transform_type = cfg.get("transform_type", "none")
+        alpha = float(cfg.get("transform_alpha", 0.15))
+        eps = float(cfg.get("transform_eps", 2.39e-7))
+        offset = float(cfg.get("transform_offset", 1.0))
+        mu = cfg.get("transform_mu", None)
+        sigma = cfg.get("transform_sigma", None)
+
+        if transform_type == "arcsinh":
+            y = torch.asinh(x / alpha)
+        elif transform_type == "log10":
+            y = torch.log10(x + offset)
+        elif transform_type == "log_eps":
+            y = torch.log((x + eps) / eps)
+        elif transform_type == "none":
+            y = x
+        else:
+            y = x
+
+        if mu is not None and sigma is not None and float(sigma) > 0:
+            y = (y - float(mu)) / float(sigma)
+
+        return y
+
+    return torch.tensor(thresholds, device=target.device, dtype=target.dtype)
+
+
+def _intensity_weights_from_target(
+    target: torch.Tensor,
+    cfg: dict,
+) -> torch.Tensor:
+    mode = cfg.get("mode", "log1p")
+    alpha = float(cfg.get("alpha", 1.0))
+    power = float(cfg.get("power", 1.0))
+    scale = float(cfg.get("scale", 1.0))
+    min_weight = float(cfg.get("min_weight", 1.0))
+    max_weight = cfg.get("max_weight", None)
+
+    vals = torch.abs(target)
+    vals = vals.mean(dim=-1)  # [num_points]
+    vals = vals * scale
+
+    if mode == "log1p":
+        w = torch.log1p(vals)
+        if power != 1.0:
+            w = w**power
+    elif mode == "power":
+        w = vals**power
+    elif mode == "linear":
+        w = vals
+    else:
+        w = vals
+
+    w = 1.0 + alpha * w
+    if max_weight is not None:
+        w = torch.clamp(w, min=min_weight, max=float(max_weight))
+    else:
+        w = torch.clamp(w, min=min_weight)
+
+    return w
 
 
 def gaussian(x, mu=0.0, std_dev=1.0):
@@ -184,6 +265,145 @@ def mse_channel_location_weighted(
     loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
 
     return loss, loss_chs
+
+
+def mse_intensity_weighted(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Compute intensity-weighted MSE loss for one window or step.
+
+    Weights are computed from target intensity (in transformed space) to
+    emphasize extremes. Optional location weights are combined multiplicatively.
+    """
+    cfg = _get_loss_cfg("intensity_weighted_mse")
+
+    mask_nan = ~torch.isnan(target)
+    pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+
+    target_filled = torch.where(mask_nan, target, 0)
+    pred_filled = torch.where(mask_nan, pred, 0)
+
+    weights_intensity = _intensity_weights_from_target(target_filled, cfg)
+    if weights_points is not None:
+        weights_intensity = weights_intensity * weights_points
+
+    diff2 = torch.square(target_filled - pred_filled)
+    diff2 = (diff2.transpose(1, 0) * weights_intensity).transpose(1, 0)
+
+    loss_chs = diff2.mean(0)
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+
+    return loss, loss_chs
+
+
+def soft_exceedance(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Differentiable exceedance loss using logistic smoothing.
+
+    Supports threshold-specific weights via config:
+        threshold_weights: [w1, w2, ...] matching thresholds_mm order
+    Higher thresholds (rare events) can get higher weight to prioritize them.
+    """
+    cfg = _get_loss_cfg("soft_exceedance")
+    temperature = float(cfg.get("temperature", 1.0))
+    thresholds = _get_thresholds_tensor(target, cfg)
+
+    # Threshold-specific weights (optional)
+    threshold_weights_list = cfg.get("threshold_weights", None)
+    if threshold_weights_list is not None:
+        threshold_weights = torch.tensor(
+            threshold_weights_list, device=target.device, dtype=target.dtype
+        )
+    else:
+        threshold_weights = None
+
+    mask_nan = ~torch.isnan(target)
+    pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+
+    target_filled = torch.where(mask_nan, target, 0)
+    pred_filled = torch.where(mask_nan, pred, 0)
+
+    losses_chs = torch.zeros(target.shape[-1], device=target.device, dtype=target.dtype)
+    total_weight = 0.0
+
+    for i, thr in enumerate(thresholds):
+        w = threshold_weights[i].item() if threshold_weights is not None else 1.0
+        total_weight += w
+
+        labels = (target_filled >= thr).to(dtype=target.dtype)
+        logits = (pred_filled - thr) / temperature
+        bce = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+
+        if weights_points is not None:
+            bce = (bce.transpose(1, 0) * weights_points).transpose(1, 0)
+
+        losses_chs += w * bce.mean(0)
+
+    losses_chs /= total_weight
+    loss = torch.mean(losses_chs * weights_channels if weights_channels is not None else losses_chs)
+
+    return loss, losses_chs
+
+
+def quantile_upper(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Pinball loss for upper quantiles to capture distribution tail.
+
+    Config options (via loss_config.quantile_upper):
+        quantiles: [0.9, 0.95, 0.99] - which quantiles to optimize
+        weights: [1.0, 2.0, 4.0] - weight per quantile (higher = more extreme)
+
+    Pinball loss formula: q * max(y - ŷ, 0) + (1-q) * max(ŷ - y, 0)
+    This asymmetrically penalizes underprediction for high quantiles.
+    """
+    cfg = _get_loss_cfg("quantile_upper")
+    quantiles = cfg.get("quantiles", [0.9, 0.95, 0.99])
+    quantile_weights = cfg.get("weights", [1.0] * len(quantiles))
+
+    mask_nan = ~torch.isnan(target)
+    pred_mean = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+
+    target_filled = torch.where(mask_nan, target, 0)
+    pred_filled = torch.where(mask_nan, pred_mean, 0)
+    mask_float = mask_nan.float()
+
+    # diff > 0 means target > pred (underprediction)
+    diff = target_filled - pred_filled
+
+    total_loss = torch.zeros(target.shape[-1], device=target.device, dtype=target.dtype)
+    total_weight = 0.0
+
+    for q, w in zip(quantiles, quantile_weights):
+        # Pinball: q * ReLU(diff) + (1-q) * ReLU(-diff)
+        pinball = q * torch.clamp(diff, min=0) + (1 - q) * torch.clamp(-diff, min=0)
+
+        if weights_points is not None:
+            pinball = (pinball.transpose(1, 0) * weights_points).transpose(1, 0)
+
+        # Mask invalid points and average
+        pinball = pinball * mask_float
+        denom = mask_float.sum(0).clamp(min=1)
+        total_loss += w * (pinball.sum(0) / denom)
+        total_weight += w
+
+    total_loss /= total_weight
+    loss = torch.mean(total_loss * weights_channels if weights_channels is not None else total_loss)
+
+    return loss, total_loss
 
 
 def cosine_latitude(stream_data, forecast_offset, fstep, min_value=1e-3, max_value=1.0):

@@ -81,6 +81,7 @@ class LossCalculator:
             [getattr(losses, name if name != "mse" else "mse_channel_location_weighted"), w]
             for name, w in loss_fcts
         ]
+        losses.set_loss_config(self.cf.get("loss_config", None))
 
     def _get_weights(self, stream_info):
         """

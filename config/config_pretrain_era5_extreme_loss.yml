@@ -1,0 +1,154 @@
+# Configuration for ERA5 pretraining with extreme loss functions
+# Uses intensity-weighted MSE and quantile upper losses to emphasize extreme events
+
+streams_directory: "./config/streams/era5_1deg"
+
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+target_cell_local_prediction: True
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 2
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 512
+ae_global_num_blocks: 8
+ae_global_num_heads: 16
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 0.2
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# Forecast configuration
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_freeze_model: False
+forecast_att_dense_rate: 0.25
+fe_num_blocks: 2
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: True
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+# Extreme Loss Configuration
+# Combines intensity-weighted MSE (emphasizes high values) and quantile upper loss (captures tails)
+loss_fcts:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "quantile_upper"
+    - 0.2
+
+loss_fcts_val:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "quantile_upper"
+    - 0.2
+
+# Loss configuration parameters for extreme loss functions
+loss_config:
+  intensity_weighted_mse:
+    mode: "log1p"        # "log1p", "power", "linear" - how to weight by intensity
+    alpha: 2.0           # Strength of intensity weighting
+    power: 1.0           # Exponent for "power" or "log1p" mode
+    scale: 1.0           # Scales target intensity before weighting
+    min_weight: 1.0      # Minimum per-point weight
+    max_weight: 10.0     # Maximum weight cap (null for no cap)
+  quantile_upper:
+    quantiles: [0.9, 0.95, 0.99]  # Upper quantiles to optimize
+    weights: [1.0, 2.0, 4.0]      # Higher weight for more extreme quantiles
+
+batch_size: 1
+batch_size_validation: 1
+
+# Training mode
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+num_epochs: 32
+samples_per_epoch: 2096
+samples_per_validation: 512
+shuffle: True
+
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 5e-5
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 512
+lr_steps_cooldown: 512
+lr_policy_warmup: "cosine"
+lr_policy_decay: "linear"
+lr_policy_cooldown: "linear"
+
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "te"
+
+start_date: 199801010000
+end_date: 202012310000
+start_date_val: 202101010000
+end_date_val: 202101310000
+len_hrs: 6
+step_hrs: 6
+input_window_steps: 1
+
+val_initial: False
+
+loader_num_workers: 8
+log_validation: 0
+
+istep: 0
+run_history: []
+
+desc: "ERA5 pretraining with extreme loss functions (intensity-weighted MSE + quantile upper)"
+data_loader_rng_seed: ???
+run_id: ???
+
+# Parameters for logging/printing in the training loop
+train_log:
+  # The period to log metrics (in number of batch steps)
+  log_interval: 20
+
+# Standard dense MLP (no MoE)
+fe_mlp_type: "dense"
