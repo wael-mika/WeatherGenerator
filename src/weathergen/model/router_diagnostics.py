@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 def analyze_router_internals(
     moe_block,
     sample_input: torch.Tensor,
-    log_details: bool = True
+    log_details: bool = True,
+    input_intensity: torch.Tensor = None
 ) -> dict:
     """
     Analyze internal router behavior to diagnose stagnation.
@@ -27,6 +28,8 @@ def analyze_router_internals(
         moe_block: The MoEBlock to analyze
         sample_input: Sample input [batch, seq_len, dim_in]
         log_details: Whether to log detailed analysis
+        input_intensity: Optional input intensity tensor for intensity-aware routing
+                        [batch, seq_len, 1]. Required when router_feature_type='input_intensity'.
 
     Returns:
         Dictionary with diagnostic metrics
@@ -44,7 +47,7 @@ def analyze_router_internals(
 
         router_features = None
         if hasattr(moe_block, "_compute_router_features"):
-            router_features = moe_block._compute_router_features(sample_input)
+            router_features = moe_block._compute_router_features(sample_input, input_intensity=input_intensity)
 
         if is_spatial:
             # === Spatial Router Diagnostics ===
@@ -250,7 +253,8 @@ def analyze_router_internals(
 def analyze_loss_components(
     moe_block,
     sample_input: torch.Tensor,
-    log_details: bool = True
+    log_details: bool = True,
+    input_intensity: torch.Tensor = None
 ) -> dict:
     """
     Analyze different loss components to see what's dominating.
@@ -259,6 +263,8 @@ def analyze_loss_components(
         moe_block: The MoEBlock to analyze
         sample_input: Sample input [batch, seq_len, dim_in]
         log_details: Whether to log detailed analysis
+        input_intensity: Optional input intensity tensor for intensity-aware routing
+                        [batch, seq_len, 1]. Required when router_feature_type='input_intensity'.
 
     Returns:
         Dictionary with loss component metrics
@@ -270,7 +276,7 @@ def analyze_loss_components(
         router = moe_block.router
         router_features = None
         if hasattr(moe_block, "_compute_router_features"):
-            router_features = moe_block._compute_router_features(sample_input)
+            router_features = moe_block._compute_router_features(sample_input, input_intensity=input_intensity)
         router_probs, expert_indices, expert_weights = router(
             sample_input, router_features=router_features
         )

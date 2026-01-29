@@ -1,0 +1,249 @@
+# Configuration for ERA5 + IMERG precipitation prediction with MoE
+# - ERA5: source only (precipitation-relevant variables)
+# - IMERG: source and target (precipitation)
+# - MoE enabled in Forecasting Engine only
+# - 1 forecast step, spatial routing enabled
+
+streams_directory: "./config/streams/era5_imerg_precip_ablate"
+
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+target_cell_local_prediction: True
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 1024
+ae_global_num_blocks: 8
+ae_global_num_heads: 16
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+
+# MoE Configuration for Global Assimilation Engine - ENABLED (extreme-aware routing)
+ae_global_use_moe: False
+ae_global_moe_blocks: [0, 3]                # Use MoE in all AE global blocks
+ae_global_moe_num_experts: 4               # Number of experts (AE global is smaller)
+ae_global_moe_top_k: 2                     # Top-k routing
+ae_global_moe_load_balance_weight: 0.001   # Load balancing loss weight
+ae_global_moe_jitter_noise: 0.0            # No jitter noise
+ae_global_moe_expert_hidden_factor: 1.0    # Expert hidden size factor
+
+# Spatial Routing - ENABLED (recommended for spatial coherence)
+ae_global_moe_use_spatial_routing: False
+ae_global_moe_position_embed_dim: 128
+
+# Extreme-aware router features
+ae_global_moe_router_feature: "none"  # "none", "token_l2norm", "token_log1p_l2norm", "token_absmean", "linear"
+
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# Forecast configuration - 1 step only
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_att_dense_rate: 1.0
+fe_num_blocks: 4
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+impute_latent_noise_std: 0.0
+
+# MoE Configuration for Forecasting Engine - ENABLED
+fe_use_moe: False
+fe_moe_blocks: "all"
+fe_moe_num_experts: 8                       # Number of experts
+fe_moe_top_k: 2                             # Top-k routing
+fe_moe_load_balance_weight: 0.001           # Load balancing loss weight
+fe_moe_jitter_noise: 0.0                    # No jitter noise
+fe_moe_expert_hidden_factor: 2.0
+
+# Spatial Routing - ENABLED (recommended for spatial coherence)
+fe_moe_use_spatial_routing: False
+fe_moe_position_embed_dim: 128
+
+# Extreme-aware router features
+fe_moe_router_feature: "none"
+fe_moe_router_feature_dim: 0                       # Used only if router_feature=="linear"
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+# Shape logging disabled
+enable_shape_logging: False
+shape_logging_interval: 10
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+loss_fcts:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
+  -
+    - "mse"
+    - 0.2
+loss_fcts_val:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
+  -
+    - "mse"
+    - 0.2
+loss_config:
+  intensity_weighted_mse:
+    mode: "log1p"        # "log1p", "power", "linear"
+    alpha: 2.0           # Strength of intensity weighting
+    power: 1.0           # Exponent for "power" or "log1p" mode
+    scale: 1.0           # Scales target intensity before weighting
+    min_weight: 1.0      # Minimum per-point weight
+    max_weight: 10.0     # Optional max weight (set null for no cap)
+  soft_exceedance:
+    thresholds_mm: [1.0, 5.0, 10.0, 20.0]  # Event thresholds (in mm)
+    threshold_weights: [0.5, 1.0, 2.0, 4.0]  # Weight per threshold (higher for rarer events)
+    temperature: 1.0      # Smoothing for logistic exceedance
+    transform_type: "none"  # "none", "arcsinh", "log10", "log_eps"
+    transform_alpha: 0.15   # Used when transform_type="arcsinh"
+    transform_eps: 2.39e-7  # Used when transform_type="log_eps"
+    transform_offset: 1.0   # Used when transform_type="log10"
+    transform_mu: null      # Optional z-score mean
+    transform_sigma: null   # Optional z-score std
+  quantile_upper:
+    quantiles: [0.9, 0.95, 0.99]  # Upper quantiles to optimize
+    weights: [1.0, 2.0, 4.0]      # Higher weight for more extreme quantiles
+
+batch_size_per_gpu: 1
+batch_size_validation_per_gpu: 1
+
+freeze_modules: ""
+
+validate_with_ema: True
+ema_ramp_up_ratio: 0.09
+ema_halflife_in_thousands: 1e-3
+
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+# Extreme sampling configuration
+extreme_sampling:
+  enabled: true                 # Enable extreme sampling
+  mode: "weight"                # "weight" (importance weighting) or "reject" (discard non-extremes)
+  stream_name: "IMERG_ANEMOI"   # Stream to test extremes on
+  threshold_mm: 10.0            # Extreme threshold (in mm)
+  # For weight mode: sample weights applied to loss
+  extreme_weight: 3.0           # Loss weight for extreme samples
+  non_extreme_weight: 1.0       # Loss weight for non-extreme samples
+  # For reject mode (fallback): keep probability and safety cap
+  non_extreme_keep_prob: 0.2    # Keep probability for non-extreme samples
+  max_tries: 50                 # Safety cap; force-accept after N skips
+  # Transform settings (to interpret threshold in model's data space)
+  transform_type: "none"        # "none", "arcsinh", "log10", "log_eps"
+  transform_alpha: 0.15         # Used when transform_type="arcsinh"
+  transform_eps: 2.39e-7        # Used when transform_type="log_eps"
+  transform_offset: 1.0         # Used when transform_type="log10"
+  transform_mu: null            # Optional z-score mean
+  transform_sigma: null         # Optional z-score std
+
+# Reduced for quick interactive testing
+num_mini_epochs: 48
+samples_per_mini_epoch: 4096
+samples_per_validation: 512
+shuffle: True
+
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 5e-5
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 512
+lr_steps_cooldown: 512
+lr_policy_warmup: "cosine"
+lr_policy_decay: "constant"
+lr_policy_cooldown: "linear"
+
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "te"
+log_grad_norms: False
+
+# Date range - IMERG available from 1998
+start_date: 199801010000
+end_date: 202012310000
+start_date_val: 202101010000
+end_date_val: 202201010000
+len_hrs: 6
+step_hrs: 6
+input_window_steps: 1
+
+val_initial: False
+
+loader_num_workers: 8
+log_validation: 0
+streams_output: ["IMERG_ANEMOI"]
+
+istep: 0
+run_history: []
+
+desc: "Extreme focus baseline + ERA5 aux + MSE"
+data_loader_rng_seed: ???
+run_id: ???
+
+train_log_freq:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+wgtags:
+  org: None
+  exp: "era5_imerg_precip_moe"
+  grid: None

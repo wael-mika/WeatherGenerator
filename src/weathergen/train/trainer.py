@@ -1158,11 +1158,15 @@ class Trainer(TrainerBase):
                 dim_embed = first_moe.dim_in
                 sample_input = torch.randn(1, 12288, dim_embed, device=self.device)
 
+                # Compute input_intensity (L2 norm of input tokens) for intensity-aware routing
+                # This is needed when router_feature_type='input_intensity'
+                input_intensity = torch.norm(sample_input, p=2, dim=-1, keepdim=True)
+
                 for name, module in moe_blocks:
-                    stats = module.get_routing_stats(sample_input)
+                    stats = module.get_routing_stats(sample_input, input_intensity=input_intensity)
 
                     # Get routing decisions (use helper to include router features)
-                    router_features = module._compute_router_features(sample_input)
+                    router_features = module._compute_router_features(sample_input, input_intensity=input_intensity)
                     router_probs, expert_indices, expert_weights = module.router(
                         sample_input, router_features=router_features
                     )
@@ -1172,8 +1176,8 @@ class Trainer(TrainerBase):
                     )
 
                     # Router diagnostics (compact)
-                    router_metrics = analyze_router_internals(module, sample_input, log_details=False)
-                    loss_metrics = analyze_loss_components(module, sample_input, log_details=False)
+                    router_metrics = analyze_router_internals(module, sample_input, log_details=False, input_intensity=input_intensity)
+                    loss_metrics = analyze_loss_components(module, sample_input, log_details=False, input_intensity=input_intensity)
 
                     # Compact single-line summary
                     max_util = stats['expert_utilization'].max()

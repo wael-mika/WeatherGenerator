@@ -1,0 +1,240 @@
+# Experiment C: Combined Approach (Best of Both)
+# Goal: Simultaneous false alarm reduction + spatial improvement
+# Changes vs baseline (kkeromx9):
+#   - extreme_weight: 3.0 -> 2.0 (from Exp A)
+#   - intensity_weighted_mse alpha: 2.0 -> 1.5 (from Exp A)
+#   - intensity_weighted_mse max_weight: 10.0 -> 5.0 (from Exp A)
+#   - soft_exceedance thresholds: removed 1.0mm (from Exp A)
+#   - fe_moe_position_embed_dim: 128 -> 256 (from Exp B)
+#   - fe_moe_load_balance_weight: 0.001 -> 0.005 (from Exp B)
+# Expected: FBI ~1.3-1.5, Centroid shift <4000km, ETS >0.38
+
+streams_directory: "./config/streams/era5_imerg_precip"
+
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+target_cell_local_prediction: True
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 1024
+ae_global_num_blocks: 8
+ae_global_num_heads: 16
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+
+# MoE Configuration for Global Assimilation Engine - DISABLED
+ae_global_use_moe: False
+ae_global_moe_blocks: [0, 3]
+ae_global_moe_num_experts: 4
+ae_global_moe_top_k: 2
+ae_global_moe_load_balance_weight: 0.001
+ae_global_moe_jitter_noise: 0.0
+ae_global_moe_expert_hidden_factor: 1.0
+ae_global_moe_use_spatial_routing: False
+ae_global_moe_position_embed_dim: 128
+ae_global_moe_router_feature: "none"
+
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# Forecast configuration - 1 step only
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_att_dense_rate: 1.0
+fe_num_blocks: 4
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+impute_latent_noise_std: 0.0
+
+# MoE Configuration for Forecasting Engine - ENABLED with ALL ENHANCEMENTS
+fe_use_moe: True
+fe_moe_blocks: [0, 3, 7]
+fe_moe_num_experts: 8
+fe_moe_top_k: 2
+fe_moe_load_balance_weight: 0.005           # CHANGED: Increased from 0.001 (from Exp B)
+fe_moe_jitter_noise: 0.0
+fe_moe_expert_hidden_factor: 1.0
+
+# Spatial Routing - ENHANCED (from Exp B)
+fe_moe_use_spatial_routing: True
+fe_moe_position_embed_dim: 256              # CHANGED: Increased from 128 (from Exp B)
+
+# Extreme-aware router features (unchanged)
+fe_moe_router_feature: "input_intensity"
+fe_moe_router_feature_dim: 0
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+enable_shape_logging: False
+shape_logging_interval: 10
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+loss_fcts:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
+loss_fcts_val:
+  -
+    - "mse_intensity_weighted"
+    - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
+
+# Loss config with REDUCED EXTREME WEIGHTING (from Exp A)
+loss_config:
+  intensity_weighted_mse:
+    mode: "log1p"
+    alpha: 1.5           # CHANGED: Reduced from 2.0 (from Exp A)
+    power: 1.0
+    scale: 1.0
+    min_weight: 1.0
+    max_weight: 5.0      # CHANGED: Reduced from 10.0 (from Exp A)
+  soft_exceedance:
+    thresholds_mm: [5.0, 10.0, 20.0]       # CHANGED: Removed 1.0mm (from Exp A)
+    threshold_weights: [0.5, 1.0, 2.0]      # CHANGED: Adjusted weights (from Exp A)
+    temperature: 1.0
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+  quantile_upper:
+    quantiles: [0.9, 0.95, 0.99]
+    weights: [1.0, 2.0, 4.0]
+
+batch_size_per_gpu: 1
+batch_size_validation_per_gpu: 1
+
+freeze_modules: ""
+
+validate_with_ema: True
+ema_ramp_up_ratio: 0.09
+ema_halflife_in_thousands: 1e-3
+
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+# Extreme sampling configuration - REDUCED WEIGHTING (from Exp A)
+extreme_sampling:
+  enabled: true
+  mode: "weight"
+  stream_name: "IMERG_ANEMOI"
+  threshold_mm: 10.0
+  extreme_weight: 2.0           # CHANGED: Reduced from 3.0 (from Exp A)
+  non_extreme_weight: 1.0
+  non_extreme_keep_prob: 0.2
+  max_tries: 50
+  transform_type: "none"
+  transform_alpha: 0.15
+  transform_eps: 2.39e-7
+  transform_offset: 1.0
+  transform_mu: null
+  transform_sigma: null
+
+num_mini_epochs: 48
+samples_per_mini_epoch: 4096
+samples_per_validation: 512
+shuffle: True
+
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 5e-5
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 512
+lr_steps_cooldown: 512
+lr_policy_warmup: "cosine"
+lr_policy_decay: "constant"
+lr_policy_cooldown: "linear"
+
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "te"
+log_grad_norms: False
+
+start_date: 199801010000
+end_date: 202012310000
+start_date_val: 202101010000
+end_date_val: 202201010000
+len_hrs: 6
+step_hrs: 6
+input_window_steps: 1
+
+val_initial: False
+
+loader_num_workers: 8
+log_validation: 0
+streams_output: ["IMERG_ANEMOI"]
+
+istep: 0
+run_history: []
+
+desc: "Exp C: Combined - reduced false alarms + enhanced spatial"
+data_loader_rng_seed: ???
+run_id: ???
+
+train_log_freq:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+wgtags:
+  org: None
+  exp: "exp_c_combined"
+  grid: None
