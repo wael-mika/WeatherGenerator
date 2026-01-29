@@ -257,6 +257,133 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.mini_epoch = 0
 
+        # Extreme sampling (optional)
+        self.extreme_sampling_enabled = False
+        self.extreme_sampling_stream_idx = None
+        self.extreme_sampling_threshold = None
+        self.extreme_sampling_mode = "reject"  # "reject" or "weight"
+        self.extreme_sampling_non_extreme_keep_prob = 1.0
+        self.extreme_sampling_max_tries = 0
+        self.extreme_sampling_extreme_weight = 1.0
+        self.extreme_sampling_non_extreme_weight = 1.0
+        self._init_extreme_sampling(cf)
+
+    def _init_extreme_sampling(self, cf) -> None:
+        extreme_cfg = cf.get("extreme_sampling", None)
+        if not extreme_cfg or not extreme_cfg.get("enabled", False):
+            return
+
+        stream_name = extreme_cfg.get("stream_name", None)
+        if stream_name is None:
+            logger.warning("extreme_sampling enabled but no stream_name provided; disabling.")
+            return
+
+        stream_idx = None
+        for i, st in enumerate(self.streams):
+            if st.name == stream_name:
+                stream_idx = i
+                break
+        if stream_idx is None:
+            logger.warning(
+                f"extreme_sampling stream_name '{stream_name}' not found; disabling."
+            )
+            return
+
+        threshold_mm = float(extreme_cfg.get("threshold_mm", 10.0))
+        stream_info = self.streams[stream_idx]
+        threshold = self._transform_threshold_mm(threshold_mm, stream_info, extreme_cfg)
+
+        self.extreme_sampling_enabled = True
+        self.extreme_sampling_stream_idx = stream_idx
+        self.extreme_sampling_threshold = float(threshold)
+
+        # Mode: "reject" (discard non-extremes) or "weight" (importance weighting)
+        self.extreme_sampling_mode = extreme_cfg.get("mode", "reject")
+
+        # For reject mode
+        self.extreme_sampling_non_extreme_keep_prob = float(
+            extreme_cfg.get("non_extreme_keep_prob", 0.2)
+        )
+        self.extreme_sampling_max_tries = int(extreme_cfg.get("max_tries", 50))
+
+        # For weight mode
+        self.extreme_sampling_extreme_weight = float(
+            extreme_cfg.get("extreme_weight", 3.0)
+        )
+        self.extreme_sampling_non_extreme_weight = float(
+            extreme_cfg.get("non_extreme_weight", 1.0)
+        )
+
+        logger.info(
+            "Extreme sampling enabled: stream=%s threshold=%.4f mode=%s",
+            stream_name,
+            self.extreme_sampling_threshold,
+            self.extreme_sampling_mode,
+        )
+        if self.extreme_sampling_mode == "reject":
+            logger.info(
+                "  Reject mode: keep_prob=%.3f max_tries=%d",
+                self.extreme_sampling_non_extreme_keep_prob,
+                self.extreme_sampling_max_tries,
+            )
+        else:
+            logger.info(
+                "  Weight mode: extreme_weight=%.2f non_extreme_weight=%.2f",
+                self.extreme_sampling_extreme_weight,
+                self.extreme_sampling_non_extreme_weight,
+            )
+
+    @staticmethod
+    def _transform_threshold_mm(
+        threshold_mm: float,
+        stream_info,
+        extreme_cfg,
+    ) -> float:
+        transform_type = extreme_cfg.get(
+            "transform_type", stream_info.get("transform_type", "none")
+        )
+        alpha = float(extreme_cfg.get(
+            "transform_alpha", stream_info.get("transform_alpha", 0.15)
+        ))
+        eps = float(extreme_cfg.get(
+            "transform_eps", stream_info.get("transform_eps", 2.39e-7)
+        ))
+        offset = float(extreme_cfg.get(
+            "transform_offset", stream_info.get("transform_offset", 1.0)
+        ))
+        mu = extreme_cfg.get("transform_mu", stream_info.get("transform_mu", None))
+        sigma = extreme_cfg.get("transform_sigma", stream_info.get("transform_sigma", None))
+
+        x = torch.tensor([threshold_mm], dtype=torch.float32)
+        if transform_type == "arcsinh":
+            y = torch.asinh(x / alpha)
+        elif transform_type == "log10":
+            y = torch.log10(x + offset)
+        elif transform_type == "log_eps":
+            y = torch.log((x + eps) / eps)
+        elif transform_type == "none":
+            y = x
+        else:
+            y = x
+
+        if mu is not None and sigma is not None and float(sigma) > 0:
+            y = (y - float(mu)) / float(sigma)
+
+        return float(y.item())
+
+    def _is_extreme_sample(self, streams_data: list[StreamData]) -> bool:
+        if not self.extreme_sampling_enabled:
+            return True
+        stream_data = streams_data[self.extreme_sampling_stream_idx]
+        tokens = [t for t in stream_data.target_tokens if t.numel() > 0]
+        if not tokens:
+            return False
+        tgt = torch.cat(tokens, dim=0)
+        if torch.isnan(tgt).any():
+            tgt = torch.where(torch.isnan(tgt), torch.tensor(-float("inf"), device=tgt.device), tgt)
+        max_val = float(tgt.max().item())
+        return max_val >= self.extreme_sampling_threshold
+
     ###################################################
     def advance(self):
         """
@@ -370,7 +497,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             # use while loop due to the scattered nature of the data in time and to
             # ensure batches are not empty
             batch = []
+            attempts = 0
             while len(batch) < self.batch_size:
+                attempts += 1
                 idx: TIndex = self.perms[idx_raw % self.perms.shape[0]]
                 idx_raw += 1
 
@@ -461,7 +590,39 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
                 # skip completely empty batch item or when all targets are empty -> no grad
                 if not (all(s.empty() or s.target_empty() for s in streams_data)):
-                    batch += [streams_data]
+                    accept = True
+                    sample_weight = 1.0
+
+                    if self.extreme_sampling_enabled:
+                        is_extreme = self._is_extreme_sample(streams_data)
+
+                        if self.extreme_sampling_mode == "weight":
+                            # Importance weighting mode: keep all samples, assign weight
+                            sample_weight = (
+                                self.extreme_sampling_extreme_weight
+                                if is_extreme
+                                else self.extreme_sampling_non_extreme_weight
+                            )
+                        else:
+                            # Reject mode (existing behavior)
+                            if not is_extreme:
+                                accept = (
+                                    self.rng.random()
+                                    < self.extreme_sampling_non_extreme_keep_prob
+                                )
+                                if (
+                                    not accept
+                                    and self.extreme_sampling_max_tries > 0
+                                    and attempts >= self.extreme_sampling_max_tries
+                                ):
+                                    accept = True
+
+                    if accept:
+                        # Attach sample weight to each stream_data for loss weighting
+                        for sd in streams_data:
+                            sd.sample_weight = sample_weight
+                        batch += [streams_data]
+                        attempts = 0
 
             # aggregated lens of tokens per cell
             source_cell_lens = compute_source_cell_lens(batch)

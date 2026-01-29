@@ -29,7 +29,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 512
+ae_global_dim_embed: 1024
 ae_global_num_blocks: 8
 ae_global_num_heads: 16
 ae_global_dropout_rate: 0.1
@@ -39,8 +39,8 @@ ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 
 # MoE Configuration for Global Assimilation Engine - ENABLED (extreme-aware routing)
-ae_global_use_moe: True
-ae_global_moe_blocks: "all"                # Use MoE in all AE global blocks
+ae_global_use_moe: False
+ae_global_moe_blocks: [0, 3]                # Use MoE in all AE global blocks
 ae_global_moe_num_experts: 4               # Number of experts (AE global is smaller)
 ae_global_moe_top_k: 2                     # Top-k routing
 ae_global_moe_load_balance_weight: 0.001   # Load balancing loss weight
@@ -48,12 +48,12 @@ ae_global_moe_jitter_noise: 0.0            # No jitter noise
 ae_global_moe_expert_hidden_factor: 1.0    # Expert hidden size factor
 
 # Spatial Routing - ENABLED (recommended for spatial coherence)
-ae_global_moe_use_spatial_routing: True
+ae_global_moe_use_spatial_routing: False
 ae_global_moe_position_embed_dim: 128
 
 # Extreme-aware router features
-ae_global_moe_router_feature: "token_log1p_l2norm"
-ae_global_moe_router_feature_dim: 0
+ae_global_moe_router_feature: "none"  # "none", "token_l2norm", "token_log1p_l2norm", "token_absmean", "linear"
+
 
 decoder_type: PerceiverIOCoordConditioning
 pred_adapter_kv: False
@@ -75,7 +75,7 @@ impute_latent_noise_std: 0.0
 
 # MoE Configuration for Forecasting Engine - ENABLED
 fe_use_moe: True
-fe_moe_blocks: "all"                        # Use MoE in all FE blocks
+fe_moe_blocks: [0, 3, 7]                    # Use MoE in all FE blocks
 fe_moe_num_experts: 8                       # Number of experts
 fe_moe_top_k: 2                             # Top-k routing
 fe_moe_load_balance_weight: 0.001           # Load balancing loss weight
@@ -87,8 +87,8 @@ fe_moe_use_spatial_routing: True
 fe_moe_position_embed_dim: 128
 
 # Extreme-aware router features
-fe_moe_router_feature: "token_log1p_l2norm"
-fe_moe_router_feature_dim: 0
+fe_moe_router_feature: "input_intensity"        # "none", "token_l2norm", "token_log1p_l2norm", "token_absmean", "linear", "input_intensity"
+fe_moe_router_feature_dim: 0                       # Used only if router_feature=="linear"
 
 healpix_level: 5
 
@@ -112,12 +112,46 @@ latent_noise_deterministic_latents: True
 
 loss_fcts:
   -
-    - "mse"
+    - "mse_intensity_weighted"
     - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
 loss_fcts_val:
   -
-    - "mse"
+    - "mse_intensity_weighted"
     - 1.0
+  -
+    - "soft_exceedance"
+    - 0.2
+  -
+    - "quantile_upper"
+    - 0.1
+
+loss_config:
+  intensity_weighted_mse:
+    mode: "log1p"        # "log1p", "power", "linear"
+    alpha: 2.0           # Strength of intensity weighting
+    power: 1.0           # Exponent for "power" or "log1p" mode
+    scale: 1.0           # Scales target intensity before weighting
+    min_weight: 1.0      # Minimum per-point weight
+    max_weight: 10.0     # Optional max weight (set null for no cap)
+  soft_exceedance:
+    thresholds_mm: [1.0, 5.0, 10.0, 20.0]  # Event thresholds (in mm)
+    threshold_weights: [0.5, 1.0, 2.0, 4.0]  # Weight per threshold (higher for rarer events)
+    temperature: 1.0      # Smoothing for logistic exceedance
+    transform_type: "none"  # "none", "arcsinh", "log10", "log_eps"
+    transform_alpha: 0.15   # Used when transform_type="arcsinh"
+    transform_eps: 2.39e-7  # Used when transform_type="log_eps"
+    transform_offset: 1.0   # Used when transform_type="log10"
+    transform_mu: null      # Optional z-score mean
+    transform_sigma: null   # Optional z-score std
+  quantile_upper:
+    quantiles: [0.9, 0.95, 0.99]  # Upper quantiles to optimize
+    weights: [1.0, 2.0, 4.0]      # Higher weight for more extreme quantiles
 
 batch_size_per_gpu: 1
 batch_size_validation_per_gpu: 1
@@ -134,7 +168,28 @@ masking_rate_sampling: True
 sampling_rate_target: 1.0
 masking_strategy: "random"
 
-num_mini_epochs: 64
+# Extreme sampling configuration
+extreme_sampling:
+  enabled: true                 # Enable extreme sampling
+  mode: "weight"                # "weight" (importance weighting) or "reject" (discard non-extremes)
+  stream_name: "IMERG_ANEMOI"   # Stream to test extremes on
+  threshold_mm: 10.0            # Extreme threshold (in mm)
+  # For weight mode: sample weights applied to loss
+  extreme_weight: 3.0           # Loss weight for extreme samples
+  non_extreme_weight: 1.0       # Loss weight for non-extreme samples
+  # For reject mode (fallback): keep probability and safety cap
+  non_extreme_keep_prob: 0.2    # Keep probability for non-extreme samples
+  max_tries: 50                 # Safety cap; force-accept after N skips
+  # Transform settings (to interpret threshold in model's data space)
+  transform_type: "none"        # "none", "arcsinh", "log10", "log_eps"
+  transform_alpha: 0.15         # Used when transform_type="arcsinh"
+  transform_eps: 2.39e-7        # Used when transform_type="log_eps"
+  transform_offset: 1.0         # Used when transform_type="log10"
+  transform_mu: null            # Optional z-score mean
+  transform_sigma: null         # Optional z-score std
+
+# Reduced for quick interactive testing
+num_mini_epochs: 48
 samples_per_mini_epoch: 4096
 samples_per_validation: 512
 shuffle: True

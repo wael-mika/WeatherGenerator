@@ -42,6 +42,10 @@ def analyze_router_internals(
         # Check if spatial router
         is_spatial = hasattr(router, 'position_embed')
 
+        router_features = None
+        if hasattr(moe_block, "_compute_router_features"):
+            router_features = moe_block._compute_router_features(sample_input)
+
         if is_spatial:
             # === Spatial Router Diagnostics ===
 
@@ -51,7 +55,10 @@ def analyze_router_internals(
 
             # Concatenate features + position
             pos_embed_expanded = pos_embed.unsqueeze(0).expand(batch_size, -1, -1)
-            x_with_pos = torch.cat([sample_input, pos_embed_expanded], dim=-1)
+            if router_features is not None:
+                x_with_pos = torch.cat([sample_input, router_features, pos_embed_expanded], dim=-1)
+            else:
+                x_with_pos = torch.cat([sample_input, pos_embed_expanded], dim=-1)
 
             # Get router logits
             router_logits = router.router_weights(x_with_pos)  # [batch, seq_len, num_experts]
@@ -64,12 +71,15 @@ def analyze_router_internals(
             router_probs = router_probs_with_pos  # Assign for common metrics
 
             # Route without position embeddings (features only)
-            features_only = sample_input
-            # Pad to match router input dimension
+            # Features-only: include router_features but zero-out position embeddings
+            if router_features is not None:
+                features_only = torch.cat([sample_input, router_features], dim=-1)
+            else:
+                features_only = sample_input
+
+            pos_dim = router.position_embed.embedding_dim
             padding = torch.zeros(
-                batch_size, seq_len,
-                router.router_weights.in_features - dim_in,
-                device=sample_input.device
+                batch_size, seq_len, pos_dim, device=sample_input.device
             )
             features_padded = torch.cat([features_only, padding], dim=-1)
             router_logits_no_pos = router.router_weights(features_padded)
@@ -105,7 +115,11 @@ def analyze_router_internals(
 
         else:
             # === Basic Router Diagnostics ===
-            router_logits = router.router_weights(sample_input)
+            if router_features is not None:
+                router_input = torch.cat([sample_input, router_features], dim=-1)
+            else:
+                router_input = sample_input
+            router_logits = router.router_weights(router_input)
             router_probs = F.softmax(router_logits, dim=-1)
 
         # === Common Metrics (both router types) ===
@@ -254,7 +268,12 @@ def analyze_loss_components(
     with torch.no_grad():
         # Get router output
         router = moe_block.router
-        router_probs, expert_indices, expert_weights = router(sample_input)
+        router_features = None
+        if hasattr(moe_block, "_compute_router_features"):
+            router_features = moe_block._compute_router_features(sample_input)
+        router_probs, expert_indices, expert_weights = router(
+            sample_input, router_features=router_features
+        )
 
         # Compute load balance loss
         batch_size, seq_len, num_experts = router_probs.shape

@@ -32,15 +32,30 @@ from weathergen.utils.utils import get_dtype
 
 # Module-level helper functions for gradient checkpointing with MoE blocks
 # Defined at module level to avoid closure issues when used inside loops
-def _moe_forward_wrapper_no_aux(block, x):
-    """Wrapper for MoE forward that discards aux_loss (for checkpointing)."""
-    output, _ = block(x)
+def _moe_forward_wrapper_no_aux(block, x, position_ids, input_intensity=None):
+    """Wrapper for MoE forward that discards aux_loss (for checkpointing).
+
+    Args:
+        block: MoEBlock module
+        x: Input tensor
+        position_ids: Cell indices for spatial routing (can be None)
+        input_intensity: Optional input intensity for intensity-aware routing
+    """
+    output, _ = block(x, position_ids=position_ids, input_intensity=input_intensity)
     return output
 
 
-def _moe_forward_wrapper_with_aux(block, x, aux):
-    """Wrapper for MoE forward with auxiliary input that discards aux_loss (for checkpointing)."""
-    output, _ = block(x, aux)
+def _moe_forward_wrapper_with_aux(block, x, aux, position_ids, input_intensity=None):
+    """Wrapper for MoE forward with auxiliary input that discards aux_loss (for checkpointing).
+
+    Args:
+        block: MoEBlock module
+        x: Input tensor
+        aux: Auxiliary conditioning input
+        position_ids: Cell indices for spatial routing (can be None)
+        input_intensity: Optional input intensity for intensity-aware routing
+    """
+    output, _ = block(x, aux, position_ids=position_ids, input_intensity=input_intensity)
     return output
 
 
@@ -268,6 +283,16 @@ class GlobalAssimilationEngine(torch.nn.Module):
 
         self.ae_global_blocks = torch.nn.ModuleList()
 
+        # Precompute cell indices for spatial MoE routing
+        # Shape: [num_healpix_cells * num_queries_per_cell]
+        # Each token at position i corresponds to cell i // num_queries
+        # NOTE: persistent=True is required for EMA model compatibility.
+        # The EMA model uses to_empty() + load_state_dict(), and non-persistent
+        # buffers are not restored, causing uninitialized values and CUDA errors.
+        num_queries = cf.ae_local_num_queries
+        cell_indices = torch.arange(num_healpix_cells).repeat_interleave(num_queries)
+        self.register_buffer("cell_indices", cell_indices, persistent=True)
+
         global_rate = int(1 / self.cf.ae_global_att_dense_rate)
         for i in range(self.cf.ae_global_num_blocks):
             ## Alternate between local and global attention
@@ -394,7 +419,16 @@ class GlobalAssimilationEngine(torch.nn.Module):
             if isinstance(block, MoEBlock) and hasattr(block, 'use_spatial_router') and block.use_spatial_router:
                 block.router.initialize_from_coordinates(theta, phi)
 
-    def forward(self, tokens, use_reentrant):
+    def forward(self, tokens, use_reentrant, input_intensity=None):
+        """
+        Forward pass through global assimilation blocks.
+
+        Args:
+            tokens: Input tokens [batch_size, seq_len, dim]
+            use_reentrant: Whether to use reentrant checkpointing
+            input_intensity: Optional input intensity for MoE routing [batch_size, seq_len, 1]
+                           Used when router_feature_type='input_intensity'
+        """
         # ORIGINAL VERSION (commented out for MoE integration)
         # for block in self.ae_global_blocks:
         #     tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
@@ -416,12 +450,16 @@ class GlobalAssimilationEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 # MoEBlock returns (output, aux_loss)
                 # We need to handle checkpointing differently for MoE
+                # Pass cell_indices for spatial routing
                 if use_reentrant:
                     # Use module-level wrapper to avoid closure issues
-                    tokens = checkpoint(_moe_forward_wrapper_no_aux, block, tokens, use_reentrant=use_reentrant)
+                    tokens = checkpoint(
+                        _moe_forward_wrapper_no_aux, block, tokens, self.cell_indices, input_intensity,
+                        use_reentrant=use_reentrant
+                    )
                     aux_loss = block.get_aux_loss()
                 else:
-                    tokens, aux_loss = block(tokens)
+                    tokens, aux_loss = block(tokens, position_ids=self.cell_indices, input_intensity=input_intensity)
 
                 # Log MoE block
                 if should_log:
@@ -487,6 +525,13 @@ class ForecastingEngine(torch.nn.Module):
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
         self.fe_blocks = torch.nn.ModuleList()
+
+        # Precompute cell indices for spatial MoE routing
+        # Shape: [num_healpix_cells * num_queries_per_cell]
+        # NOTE: persistent=True is required for EMA model compatibility.
+        num_queries = cf.ae_local_num_queries
+        cell_indices = torch.arange(num_healpix_cells).repeat_interleave(num_queries)
+        self.register_buffer("cell_indices", cell_indices, persistent=True)
 
         global_rate = int(1 / self.cf.forecast_att_dense_rate)
         if self.cf.forecast_policy is not None:
@@ -626,7 +671,16 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
-    def forward(self, tokens, fstep):
+    def forward(self, tokens, fstep, input_intensity=None):
+        """
+        Forward pass through forecasting blocks.
+
+        Args:
+            tokens: Input tokens [batch_size, seq_len, dim]
+            fstep: Forecast step index
+            input_intensity: Optional input intensity for MoE routing [batch_size, seq_len, 1]
+                           Used when router_feature_type='input_intensity'
+        """
         # ORIGINAL VERSION (commented out for MoE integration)
         # aux_info = torch.tensor([fstep], dtype=torch.float32, device="cuda")
         # for block in self.fe_blocks:
@@ -649,7 +703,11 @@ class ForecastingEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 # MoEBlock returns (output, aux_loss)
                 # Use module-level wrapper to avoid closure issues
-                tokens = checkpoint(_moe_forward_wrapper_with_aux, block, tokens, aux_info, use_reentrant=False)
+                # Pass cell_indices for spatial routing
+                tokens = checkpoint(
+                    _moe_forward_wrapper_with_aux, block, tokens, aux_info, self.cell_indices, input_intensity,
+                    use_reentrant=False
+                )
                 aux_loss = block.get_aux_loss()
 
                 # Log MoE block

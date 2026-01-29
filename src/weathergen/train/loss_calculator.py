@@ -81,6 +81,7 @@ class LossCalculator:
             [getattr(losses, name if name != "mse" else "mse_channel_location_weighted"), w]
             for name, w in loss_fcts
         ]
+        losses.set_loss_config(self.cf.get("loss_config", None))
 
     def _get_weights(self, stream_info):
         """
@@ -271,6 +272,19 @@ class LossCalculator:
                 weights_locations = self._get_location_weights(
                     stream_info, stream_data, self.cf.forecast_offset, fstep
                 )
+
+                # Apply sample weight from extreme sampling (if available)
+                sample_weight = getattr(stream_data, "sample_weight", 1.0)
+                if sample_weight != 1.0:
+                    if weights_locations is not None:
+                        weights_locations = weights_locations * sample_weight
+                    else:
+                        weights_locations = torch.full(
+                            (target.shape[0],),
+                            sample_weight,
+                            device=self.device,
+                            dtype=torch.float32,
+                        )
 
                 # get masks for sub-time steps
                 substep_masks = self._get_substep_masks(stream_info, fstep, stream_data)

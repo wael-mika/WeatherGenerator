@@ -49,6 +49,8 @@ ae_global_moe_expert_hidden_factor: 1.0     # Hidden layer size multiplier for e
 # Spatially-aware router provides geographic context to MoE routing decisions
 ae_global_moe_use_spatial_routing: False    # Enable spatial-aware router (default: False) - Set to True to fix poor spatial coherence
 ae_global_moe_position_embed_dim: 128       # Dimension of position embeddings for each HEALPix cell (default: 128)
+ae_global_moe_router_feature: "none"        # Extra router features: "none", "token_l2norm", "token_log1p_l2norm", "token_absmean", "linear"
+ae_global_moe_router_feature_dim: 0         # Feature dim for "linear" router features
 
 decoder_type: PerceiverIOCoordConditioning # CrossAttentionAdaNormConditioning
 pred_adapter_kv: False
@@ -82,6 +84,8 @@ fe_moe_expert_hidden_factor: 1.0            # Hidden layer size multiplier for e
 # Spatial Routing Configuration (NEW - to improve spatial coherence)
 fe_moe_use_spatial_routing: True           # Enable spatial-aware router (default: False) - Set to True to fix poor spatial coherence
 fe_moe_position_embed_dim: 128              # Dimension of position embeddings for each HEALPix cell (default: 128)
+fe_moe_router_feature: "none"               # Extra router features: "none", "token_l2norm", "token_log1p_l2norm", "token_absmean", "linear"
+fe_moe_router_feature_dim: 0                # Feature dim for "linear" router features
 
 healpix_level: 5
 

@@ -1161,8 +1161,11 @@ class Trainer(TrainerBase):
                 for name, module in moe_blocks:
                     stats = module.get_routing_stats(sample_input)
 
-                    # Get routing decisions
-                    router_probs, expert_indices, expert_weights = module.router(sample_input)
+                    # Get routing decisions (use helper to include router features)
+                    router_features = module._compute_router_features(sample_input)
+                    router_probs, expert_indices, expert_weights = module.router(
+                        sample_input, router_features=router_features
+                    )
                     hp_nbours = self.model_params.hp_nbours.cpu() if hasattr(self.model_params, 'hp_nbours') else None
                     coherence_metrics = analyze_routing_spatial_coherence(
                         expert_indices, neighbor_structure=hp_nbours, log_details=False

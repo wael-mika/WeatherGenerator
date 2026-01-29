@@ -29,7 +29,7 @@ IMERG_ANEMOI:
     - 1.0   # tp - precipitation (primary target)
 
   # Transform configuration for precipitation
-  transform_type: arcsinh  # Handles skewed precipitation distribution
+  transform_type: none  # Handles skewed precipitation distribution
   transform_scale: 1000.0  # m -> mm conversion
   transform_alpha: 0.15    # arcsinh scale parameter
 

@@ -185,6 +185,7 @@ class MoERouter(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
         router_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -192,6 +193,7 @@ class MoERouter(torch.nn.Module):
 
         Args:
             x: Input tensor [batch_size, seq_len, dim_in]
+            position_ids: Optional position indices (unused in basic router, for API compatibility)
             router_features: Optional extra features [batch_size, seq_len, extra_dim]
 
         Returns:
@@ -199,6 +201,8 @@ class MoERouter(torch.nn.Module):
             expert_indices: Indices of selected experts [batch_size, seq_len, top_k]
             expert_weights: Normalized weights for selected experts [batch_size, seq_len, top_k]
         """
+        # position_ids is unused in basic router (only used by SpatialMoERouter)
+        del position_ids
         if self.extra_dim > 0:
             if router_features is None:
                 raise ValueError("router_features must be provided when extra_dim > 0")
@@ -490,6 +494,10 @@ class MoEBlock(torch.nn.Module):
             self.router_feature_dim = 0
         elif router_feature_type in ("token_l2norm", "token_log1p_l2norm", "token_absmean"):
             self.router_feature_dim = 1
+        elif router_feature_type == "input_intensity":
+            # External intensity feature passed from upstream
+            # Uses 1 dimension for the intensity value
+            self.router_feature_dim = 1
         elif router_feature_type == "linear":
             if router_feature_dim <= 0:
                 raise ValueError("router_feature_dim must be > 0 when router_feature_type='linear'")
@@ -542,7 +550,12 @@ class MoEBlock(torch.nn.Module):
         # Track auxiliary loss for this block
         self.last_aux_loss = None
 
-    def forward(self, *args) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        *args,
+        position_ids: Optional[torch.Tensor] = None,
+        input_intensity: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass with expert routing.
 
@@ -550,6 +563,12 @@ class MoEBlock(torch.nn.Module):
             *args: Variable arguments to support auxiliary inputs.
                    First argument is always the input tensor x.
                    Last argument may be auxiliary conditioning (e.g., for AdaLayerNorm).
+            position_ids: Optional tensor of position indices for spatial routing.
+                         Shape: [seq_len] or [batch_size, seq_len].
+                         For HEALPix grids, these are the cell indices.
+            input_intensity: Optional tensor of original input intensities for
+                           intensity-aware routing. Shape: [batch_size, seq_len, 1]
+                           or [batch_size, seq_len]. Used when router_feature_type='input_intensity'.
 
         Returns:
             output: Processed tensor with same shape as input
@@ -563,22 +582,11 @@ class MoEBlock(torch.nn.Module):
         # Flatten batch and sequence dimensions for routing
         x_flat = x.view(-1, dim)  # [batch_size * seq_len, dim]
 
-        router_features = None
-        if self.router_feature_type == "token_l2norm":
-            router_features = torch.norm(x, p=2, dim=-1, keepdim=True)
-        elif self.router_feature_type == "token_log1p_l2norm":
-            router_features = torch.log1p(torch.norm(x, p=2, dim=-1, keepdim=True))
-        elif self.router_feature_type == "token_absmean":
-            router_features = torch.mean(torch.abs(x), dim=-1, keepdim=True)
-        elif self.router_feature_type == "linear":
-            router_features = self.router_feature_proj(x)
-
-        if router_features is not None and router_features.dtype != x.dtype:
-            router_features = router_features.to(dtype=x.dtype)
+        router_features = self._compute_router_features(x, input_intensity=input_intensity)
 
         # Route tokens to experts
         router_probs, expert_indices, expert_weights = self.router(
-            x, router_features=router_features
+            x, position_ids=position_ids, router_features=router_features
         )
         # router_probs: [batch_size, seq_len, num_experts]
         # expert_indices: [batch_size, seq_len, top_k]
@@ -655,6 +663,50 @@ class MoEBlock(torch.nn.Module):
 
         return output, aux_loss
 
+    def _compute_router_features(
+        self,
+        x: torch.Tensor,
+        input_intensity: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """
+        Compute router features based on configured feature type.
+
+        Args:
+            x: Hidden state tensor [batch_size, seq_len, dim]
+            input_intensity: Optional original input intensity [batch_size, seq_len, 1]
+                           Required when router_feature_type='input_intensity'
+
+        Returns:
+            Router features tensor or None
+        """
+        router_features = None
+        if self.router_feature_type == "token_l2norm":
+            router_features = torch.norm(x, p=2, dim=-1, keepdim=True)
+        elif self.router_feature_type == "token_log1p_l2norm":
+            router_features = torch.log1p(torch.norm(x, p=2, dim=-1, keepdim=True))
+        elif self.router_feature_type == "token_absmean":
+            router_features = torch.mean(torch.abs(x), dim=-1, keepdim=True)
+        elif self.router_feature_type == "input_intensity":
+            # Use externally provided intensity (e.g., original precipitation values)
+            if input_intensity is None:
+                raise ValueError(
+                    "input_intensity must be provided when router_feature_type='input_intensity'"
+                )
+            # Ensure proper shape [batch_size, seq_len, 1]
+            if input_intensity.ndim == 2:
+                router_features = input_intensity.unsqueeze(-1)
+            else:
+                router_features = input_intensity
+            # Apply log1p for better scaling (intensity can have large dynamic range)
+            router_features = torch.log1p(router_features)
+        elif self.router_feature_type == "linear":
+            router_features = self.router_feature_proj(x)
+
+        if router_features is not None and router_features.dtype != x.dtype:
+            router_features = router_features.to(dtype=x.dtype)
+
+        return router_features
+
     def get_aux_loss(self) -> Optional[torch.Tensor]:
         """
         Get the last computed auxiliary loss.
@@ -665,12 +717,13 @@ class MoEBlock(torch.nn.Module):
         """
         return self.last_aux_loss
 
-    def get_routing_stats(self, x: torch.Tensor) -> dict:
+    def get_routing_stats(self, x: torch.Tensor, input_intensity: Optional[torch.Tensor] = None) -> dict:
         """
         Get routing statistics for analysis.
 
         Args:
             x: Input tensor [batch_size, seq_len, dim]
+            input_intensity: Optional input intensity for intensity-aware routing
 
         Returns:
             Dictionary with routing statistics:
@@ -679,7 +732,10 @@ class MoEBlock(torch.nn.Module):
                 - top1_expert_distribution: Distribution of top-1 expert choices
         """
         with torch.no_grad():
-            router_probs, expert_indices, expert_weights = self.router(x)
+            router_features = self._compute_router_features(x, input_intensity=input_intensity)
+            router_probs, expert_indices, expert_weights = self.router(
+                x, router_features=router_features
+            )
 
             # Expert utilization
             expert_mask = torch.zeros(

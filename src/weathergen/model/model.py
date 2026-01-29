@@ -821,8 +821,16 @@ class Model(torch.nn.Module):
         # Log global assimilation input
         self.shape_logger.log_global_assimilation_input(tokens)
 
+        # Compute input intensity for MoE routing if using intensity-aware router
+        input_intensity = None
+        router_feature = getattr(self.cf, "ae_global_moe_router_feature", "none")
+        if router_feature == "input_intensity":
+            # Compute intensity as L2 norm of input tokens
+            # This provides a measure of "signal strength" at each position
+            input_intensity = torch.norm(tokens, p=2, dim=-1, keepdim=True)
+
         # global assimilation engine and adapter
-        tokens = self.ae_global_engine(tokens, use_reentrant=False)
+        tokens = self.ae_global_engine(tokens, use_reentrant=False, input_intensity=input_intensity)
 
         # Log global assimilation output
         self.shape_logger.log_global_assimilation_output(tokens)
@@ -846,7 +854,14 @@ class Model(torch.nn.Module):
         # Log forecast input
         self.shape_logger.log_forecast_input(tokens, fstep)
 
-        tokens = self.forecast_engine(tokens, fstep)
+        # Compute input intensity for MoE routing if using intensity-aware router
+        input_intensity = None
+        router_feature = getattr(self.cf, "fe_moe_router_feature", "none")
+        if router_feature == "input_intensity":
+            # Compute intensity as L2 norm of input tokens
+            input_intensity = torch.norm(tokens, p=2, dim=-1, keepdim=True)
+
+        tokens = self.forecast_engine(tokens, fstep, input_intensity=input_intensity)
 
         # Log forecast output
         self.shape_logger.log_forecast_output(tokens, fstep)
