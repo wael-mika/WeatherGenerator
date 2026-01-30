@@ -17,20 +17,19 @@ IMERG_ANEMOI:
 
   # Source configuration - use precipitation as input
   source: ['tp']  # Total precipitation
-  source_exclude: []
 
   # Target configuration - empty list = no targets (input-only stream)
   target: []
 
   # Transform configuration for precipitation
-  transform_type: arcsinh  # Handles skewed precipitation distribution
+  transform_type: none  # Handles skewed precipitation distribution
   transform_scale: 1000.0  # m -> mm conversion
   transform_alpha: 0.15    # arcsinh scale parameter
 
   loss_weight: 0.0  # No loss on this stream (input only)
   masking_rate: 0.6
   masking_rate_none: 0.05
-  token_size: 16  # Moderate token size for memory efficiency
+  token_size: 128  # Moderate token size for memory efficiency
   tokenize_spacetime: True
   max_num_targets: 0  # No targets from this stream
 
