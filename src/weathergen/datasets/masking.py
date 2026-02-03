@@ -1,3 +1,17 @@
+"""
+Masking module for WeatherGenerator.
+
+Provides Masker class for generating spatial masks. See masking_utils.py for
+validation logic and docs/masking_validation.md for detailed documentation.
+
+Key concepts:
+- Strategy: how to generate mask (random, healpix, cropping_healpix, forecast, causal)
+- Relationship: how source relates to target (complement, identity, subset, disjoint, independent)
+
+IMPORTANT: With 'complement' or 'identity' relationship, source config is IGNORED.
+Default for 'random' is 'complement'. Use 'independent'/'subset'/'disjoint' to use source config.
+"""
+
 import copy
 import logging
 import warnings
@@ -9,6 +23,15 @@ import torch
 from numpy.typing import NDArray
 
 from weathergen.datasets.batch import SampleMetaData
+from weathergen.datasets.masking_utils import (
+    DEFAULT_RELATIONSHIP,
+    INVALID_COMBINATIONS,
+    SOURCE_IGNORED_RELATIONSHIPS,
+    VALID_RELATIONSHIPS,
+    VALID_STRATEGIES,
+    log_masking_summary,
+    validate_masking_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +291,17 @@ class Masker:
         losses = stage_cfg.losses
         corr_dict = self.parse_src_target_correspondence(losses, target_cfgs, source_cfgs)
 
+        # Log effective masking summary (once per initialization)
+        if not getattr(self, "_masking_summary_logged", False):
+            source_cfgs_list = (
+                list(source_cfgs.values()) if hasattr(source_cfgs, "values") else source_cfgs
+            )
+            target_cfgs_list = (
+                list(target_cfgs.values()) if hasattr(target_cfgs, "values") else target_cfgs
+            )
+            log_masking_summary(source_cfgs_list, target_cfgs_list, losses)
+            self._masking_summary_logged = True
+
         target_masks = MaskData()
 
         # iterate over all target samples
@@ -377,34 +411,61 @@ class Masker:
                 )
 
         # handle cases where mask is directly derived from target_mask
+        # NOTE: source strategy and config are IGNORED in these cases
         if relationship == "complement":
             assert target_mask is not None, (
-                "relationship: {relationship} incompatible with target_mask None"
+                f"relationship: {relationship} incompatible with target_mask None"
             )
+            if masking_strategy_config:
+                logger.debug(
+                    f"Masking: relationship='complement' - source strategy='{strategy}' "
+                    f"and config {masking_strategy_config} are IGNORED. "
+                    f"Source mask = ~target_mask (complement of target)."
+                )
             mask = ~target_mask
-            return mask, {}
+            return mask, {"_effective_relationship": "complement", "_source_config_used": False}
         elif relationship == "identity":
             assert target_mask is not None, (
-                "relationship: {relationship} incompatible with target_mask None"
+                f"relationship: {relationship} incompatible with target_mask None"
             )
+            if masking_strategy_config:
+                logger.debug(
+                    f"Masking: relationship='identity' - source strategy='{strategy}' "
+                    f"and config {masking_strategy_config} are IGNORED. "
+                    f"Source mask = target_mask (identical to target)."
+                )
             mask = target_mask
-            return mask, {}
+            return mask, {"_effective_relationship": "identity", "_source_config_used": False}
 
-        # get mask
+        # get mask - source config IS used in these cases
         mask, params = self._generate_cell_mask(num_cells, strategy, masking_strategy_config)
+
+        # Record that source config was used
+        params["_source_config_used"] = True
+        params["_effective_strategy"] = strategy
 
         # handle cases where mask needs to be combined with target_mask
         # without the assert we can fail silently
         if relationship == "subset":
             assert target_mask is not None, (
-                "relationship: {relationship} incompatible with target_mask None"
+                f"relationship: {relationship} incompatible with target_mask None"
             )
             mask = mask & target_mask
+            params["_effective_relationship"] = "subset"
+            logger.debug(
+                f"Masking: relationship='subset' - source_mask = {strategy}_mask & target_mask"
+            )
         elif relationship == "disjoint":
             assert target_mask is not None, (
-                "relationship: {relationship} incompatible with target_mask None"
+                f"relationship: {relationship} incompatible with target_mask None"
             )
             mask = mask & (~target_mask)
+            params["_effective_relationship"] = "disjoint"
+            logger.debug(
+                f"Masking: relationship='disjoint' - source_mask = {strategy}_mask & ~target_mask"
+            )
+        else:
+            params["_effective_relationship"] = "independent"
 
         return (mask, params)
 

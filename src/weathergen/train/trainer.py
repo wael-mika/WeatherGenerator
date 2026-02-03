@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 
 # FSDP2
 from torch.distributed.tensor import DTensor
-
+from weathergen.datasets.masking_utils import validate_masking_config
 import weathergen.common.config as config
 from weathergen.common.config import Config, merge_configs
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
@@ -128,6 +128,9 @@ class Trainer(TrainerBase):
         ):
             config.validate_forecast_policy_and_steps(mode_cfg.get("forecast", {}), mode)
 
+        # Validate masking configurations
+        self._validate_masking_configs()
+
         self.mixed_precision_dtype = get_dtype(cf.mixed_precision_dtype)
 
         self.devices = devices
@@ -145,6 +148,36 @@ class Trainer(TrainerBase):
             config.get_path_model(cf).mkdir(exist_ok=True, parents=True)
 
         self.train_logger = TrainLogger(cf, config.get_path_run(self.cf))
+
+    def _validate_masking_configs(self):
+        """Validate masking strategy/relationship combinations for all modes.
+
+        This checks for invalid or confusing masking configurations and logs
+        warnings when source configs are being ignored due to relationship settings.
+
+        Raises:
+            ValueError: For invalid combinations (e.g., forecast + complement)
+                       or any confusing combination if strict_masking_validation=True
+        """
+
+        # Get strict mode from config (default: False = warnings only)
+        strict = self.cf.get("strict_masking_validation", False)
+
+        for mode_name, mode_cfg in [
+            ("training_config", self.training_cfg),
+            ("validation_config", self.validation_cfg),
+            ("test_config", self.test_cfg),
+        ]:
+            source_cfgs = list(mode_cfg.get("model_input", {}).values())
+            target_cfgs = list(mode_cfg.get("target_input", {}).values())
+            losses = mode_cfg.get("losses", {})
+
+            if source_cfgs:
+                try:
+                    validate_masking_config(source_cfgs, target_cfgs, losses, strict=strict)
+                except ValueError as e:
+                    logger.error(f"[{mode_name}] Masking config validation failed: {e}")
+                    raise
 
     def get_target_aux_calculators(self, mode_cfg):
         """
