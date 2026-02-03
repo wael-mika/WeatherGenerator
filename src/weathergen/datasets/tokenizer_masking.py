@@ -28,8 +28,8 @@ from weathergen.datasets.utils import (
 
 
 class TokenizerMasking(Tokenizer):
-    def __init__(self, healpix_level: int, masker: Masker):
-        super().__init__(healpix_level)
+    def __init__(self, healpix_level: int, masker: Masker, healpix_level_target: int | None = None):
+        super().__init__(healpix_level, healpix_level_target)
         self.masker = masker
 
     def reset_rng(self, rng) -> None:
@@ -123,12 +123,14 @@ class TokenizerMasking(Tokenizer):
             return arg
 
         # set tokenization function, no normalization of coords
+        # FIXED: Use hl_target and hpy_verts_rots_target for target tokenization
+        # (was incorrectly using hl_source and hpy_verts_rots_source)
         tokenize_window = partial(
             tokenize_window_spacetime if tokenize_spacetime else tokenize_window_space,
             time_win=time_win,
             token_size=token_size,
-            hl=self.hl_source,
-            hpy_verts_rots=self.hpy_verts_rots_source[-1],
+            hl=self.hl_target,
+            hpy_verts_rots=self.hpy_verts_rots_target[-1],
             n_coords=id,
             enc_time=encode_times_target,
             pad_tokens=False,

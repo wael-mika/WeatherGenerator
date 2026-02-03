@@ -241,13 +241,16 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         )
 
         self.healpix_level: int = cf.healpix_level
+        # Support separate target HEALPix level (backward compatible: defaults to source level)
+        self.healpix_level_target: int = getattr(cf, "healpix_level_target", None) or cf.healpix_level
         self.num_healpix_cells: int = 12 * 4**self.healpix_level
+        self.num_healpix_cells_target: int = 12 * 4**self.healpix_level_target
 
         if cf.training_mode == "forecast":
-            self.tokenizer = TokenizerForecast(cf.healpix_level)
+            self.tokenizer = TokenizerForecast(cf.healpix_level, self.healpix_level_target)
         elif cf.training_mode == "masking":
-            masker = Masker(cf)
-            self.tokenizer = TokenizerMasking(cf.healpix_level, masker)
+            masker = Masker(cf, self.healpix_level_target)
+            self.tokenizer = TokenizerMasking(cf.healpix_level, masker, self.healpix_level_target)
             assert self.forecast_offset == 0, "masked token modeling requires auto-encoder training"
             msg = "masked token modeling does not support self.input_window_steps > 1; "
             msg += "increase window length"
@@ -385,7 +388,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 # for all streams
                 for stream_info, stream_ds in zip(self.streams, self.streams_datasets, strict=True):
                     stream_data = StreamData(
-                        idx, forecast_dt + self.forecast_offset, self.num_healpix_cells
+                        idx,
+                        forecast_dt + self.forecast_offset,
+                        self.num_healpix_cells,
+                        self.num_healpix_cells_target,
                     )
 
                     # collect all targets for current stream
@@ -434,8 +440,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                                 f"Stream {stream_info.name} fstep {fstep}: "
                                 f"target data is EMPTY, spoofing. time_win={time_win_target}"
                             )
+                            # FIXED: Use target HEALPix level for target spoof
                             rdata = spoof(
-                                self.healpix_level,
+                                self.healpix_level_target,
                                 time_win_target.start,
                                 stream_ds[0].get_geoinfo_size(),
                                 stream_ds[0].mean[stream_ds[0].target_idx],

@@ -39,20 +39,31 @@ class Masker:
                                         specific to the masking strategy. See above.
     """
 
-    def __init__(self, cf: Config):
+    def __init__(self, cf: Config, healpix_level_target: int | None = None):
         self.masking_rate = cf.masking_rate
         self.masking_strategy = cf.masking_strategy
         self.current_strategy = cf.masking_strategy  # Current strategy in use
         self.masking_rate_sampling = cf.masking_rate_sampling
         # masking_strategy_config is a dictionary that can hold any additional parameters
         self.healpix_level_data = cf.healpix_level
+        # Target level for downscaling (may differ from source level)
+        self.healpix_level_target = (
+            healpix_level_target if healpix_level_target is not None else cf.healpix_level
+        )
         self.masking_strategy_config = cf.get("masking_strategy_config", {})
 
         self.mask_value = 0.0
         self.dim_time_enc = 6
 
-        # number of healpix cells
+        # number of healpix cells for source and target
         self.healpix_num_cells = 12 * (4**self.healpix_level_data)
+        self.healpix_num_cells_target = 12 * (4**self.healpix_level_target)
+
+        # Compute children per parent for expanding masks from source to target level
+        if self.healpix_level_target > self.healpix_level_data:
+            self.children_per_parent = 4 ** (self.healpix_level_target - self.healpix_level_data)
+        else:
+            self.children_per_parent = 1
 
         # Initialize the mask, set to None initially,
         # until it is generated in mask_source.
@@ -274,10 +285,29 @@ class Masker:
 
         feature_dim = self.dim_time_enc + coords.shape[-1] + geoinfos.shape[-1] + source.shape[-1]
 
+        # Expand perm_sel from source cells to target cells if levels differ
+        # In nested HEALPix, child cells are contiguous: parent i -> children [i*N, (i+1)*N)
+        if self.children_per_parent > 1:
+            target_cells = len(target_tokenized_data)
+            if len(self.perm_sel) == target_cells:
+                # Already at target resolution (e.g. diagnostic target selection)
+                expanded_perm_sel = self.perm_sel
+            elif len(self.perm_sel) == self.healpix_num_cells:
+                expanded_perm_sel = self._expand_mask_to_target_cells()
+            else:
+                expanded_perm_sel = self._expand_mask_to_target_cells()
+                if len(expanded_perm_sel) > target_cells:
+                    expanded_perm_sel = expanded_perm_sel[:target_cells]
+                elif len(expanded_perm_sel) < target_cells:
+                    pad = [np.array([], dtype=bool)] * (target_cells - len(expanded_perm_sel))
+                    expanded_perm_sel = expanded_perm_sel + pad
+        else:
+            expanded_perm_sel = self.perm_sel
+
         processed_target_tokens = []
 
         # process all tokens used for embedding
-        for cc, pp in zip(target_tokenized_data, self.perm_sel, strict=True):
+        for cc, pp in zip(target_tokenized_data, expanded_perm_sel, strict=True):
             if len(cc) == 0:  # Skip if there's no target data
                 pass
 
@@ -329,6 +359,57 @@ class Masker:
                 )
 
         return processed_target_tokens
+
+    def _expand_mask_to_target_cells(self) -> list[np.typing.NDArray]:
+        """
+        Expand perm_sel from source cells to target cells when using different HEALPix levels.
+
+        In nested HEALPix ordering, child cells of parent i are contiguous at indices
+        [i * children_per_parent, (i+1) * children_per_parent).
+
+        For different masking strategies:
+        - random/block: Use cell-level masking where target cell is masked if parent source
+          cell had ANY masked tokens
+        - healpix: All tokens in a source cell have same mask, propagate to children
+        - channel: Apply same channel mask to all children
+        - causal: Apply same temporal mask to all children
+
+        Returns:
+            list[np.ndarray]: Expanded mask with one entry per target cell
+        """
+        expanded_mask = []
+
+        for parent_idx, parent_mask in enumerate(self.perm_sel):
+            if self.current_strategy in ["random", "block"]:
+                # For token-level masks, convert to cell-level:
+                # Target cell is masked if parent had ANY masked tokens
+                cell_is_masked = len(parent_mask) > 0 and np.any(parent_mask)
+                # Create a single-element mask for each target cell
+                # This will cause all tokens in that cell to be selected (if masked)
+                # or none (if not masked)
+                child_mask = np.array([cell_is_masked])
+                for _ in range(self.children_per_parent):
+                    expanded_mask.append(child_mask)
+
+            elif self.current_strategy == "healpix":
+                # HEALPix masking is already cell-level, propagate to all children
+                # All tokens in the cell share the same mask value
+                cell_is_masked = len(parent_mask) > 0 and parent_mask[0]
+                child_mask = np.array([cell_is_masked])
+                for _ in range(self.children_per_parent):
+                    expanded_mask.append(child_mask)
+
+            elif self.current_strategy in ["channel", "causal"]:
+                # For channel/causal, propagate the full mask pattern to all children
+                for _ in range(self.children_per_parent):
+                    expanded_mask.append(parent_mask)
+
+            else:
+                # Unknown strategy, just propagate
+                for _ in range(self.children_per_parent):
+                    expanded_mask.append(parent_mask)
+
+        return expanded_mask
 
     def _get_sampling_rate(self):
         """

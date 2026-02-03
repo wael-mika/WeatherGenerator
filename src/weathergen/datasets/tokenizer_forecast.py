@@ -27,6 +27,9 @@ from weathergen.datasets.utils import (
 
 
 class TokenizerForecast(Tokenizer):
+    def __init__(self, healpix_level: int, healpix_level_target: int | None = None):
+        super().__init__(healpix_level, healpix_level_target)
+
     def reset_rng(self, rng) -> None:
         """
         Reset rng after mini_epoch to ensure proper randomization

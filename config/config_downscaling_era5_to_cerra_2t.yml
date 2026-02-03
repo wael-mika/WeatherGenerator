@@ -16,7 +16,7 @@
 # - Reduced model dimensions compared to full pretraining
 # - Small batch size due to high-resolution output grid
 
-streams_directory: "./config/streams/downscaling_era5_to_cerra"
+streams_directory: "./config/streams/downscaling_era5_to_cerra_2t"
 
 # Embedding configuration
 embed_orientation: "channels"
@@ -28,9 +28,9 @@ embed_droput_rate: 0.1
 
 target_cell_local_prediction: True
 
-# Local autoencoder - aggressively reduced for memory efficiency
+# Local autoencoder - increased for higher-resolution targets
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
-ae_local_dim_embed: 128
+ae_local_dim_embed: 256
 ae_local_num_blocks: 4
 ae_local_num_heads: 8
 ae_local_dropout_rate: 0.1
@@ -44,7 +44,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-# Global autoencoder - reduced for memory efficiency
+# Global autoencoder - increased for higher-resolution targets
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
 ae_global_dim_embed: 256
 ae_global_num_blocks: 4
@@ -58,7 +58,7 @@ ae_global_mlp_hidden_factor: 2
 # Decoder configuration
 decoder_type: PerceiverIOCoordConditioning
 pred_adapter_kv: False
-pred_self_attention: True
+pred_self_attention: False
 pred_dyadic_dims: False
 pred_mlp_adaln: True
 
@@ -76,15 +76,13 @@ fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 
 # HEALPix level for spatial tokenization
-# Source (ERA5): level 5 = ~370km cells, good for ~110km resolution
-# Target (CERRA): level 7 = ~23km cells, better for 5.5km resolution
-healpix_level: 5
-healpix_level_target: 7
+healpix_level: 5          # source (ERA5)
+healpix_level_target: 7   # target (CERRA), higher-res output tokens
 
 # Computation settings
 with_mixed_precision: True
 with_flash_attention: True
-compile_flex_attention: True
+compile_flex_attention: False
 compile_model: False
 with_fsdp: False
 attention_dtype: bf16
@@ -162,6 +160,6 @@ train_log:
 # Run settings
 istep: 0
 run_history: []
-desc: "Downscaling: ERA5 (1 deg) -> CERRA (5.5km) over Europe"
+desc: "Downscaling: ERA5 (1 deg) -> CERRA 2t (5.5km) over Europe"
 data_loader_rng_seed: ???
 run_id: ???

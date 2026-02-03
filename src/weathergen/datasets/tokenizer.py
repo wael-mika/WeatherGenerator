@@ -24,63 +24,87 @@ class Tokenizer:
     Base class for tokenizers.
     """
 
-    def __init__(self, healpix_level: int):
+    def __init__(self, healpix_level: int, healpix_level_target: int | None = None):
         ref = torch.tensor([1.0, 0.0, 0.0])
 
         self.hl_source = healpix_level
-        self.hl_target = healpix_level
+        self.hl_target = healpix_level_target if healpix_level_target is not None else healpix_level
 
         self.num_healpix_cells_source = 12 * 4**self.hl_source
         self.num_healpix_cells_target = 12 * 4**self.hl_target
 
         self.size_time_embedding = 6
 
-        verts00, verts00_rots = healpix_verts_rots(self.hl_source, 0.0, 0.0)
-        verts10, verts10_rots = healpix_verts_rots(self.hl_source, 1.0, 0.0)
-        verts11, verts11_rots = healpix_verts_rots(self.hl_source, 1.0, 1.0)
-        verts01, verts01_rots = healpix_verts_rots(self.hl_source, 0.0, 1.0)
-        vertsmm, vertsmm_rots = healpix_verts_rots(self.hl_source, 0.5, 0.5)
-        self.hpy_verts = [
-            verts00.to(torch.float32),
-            verts10.to(torch.float32),
-            verts11.to(torch.float32),
-            verts01.to(torch.float32),
-            vertsmm.to(torch.float32),
+        # Build SOURCE verts
+        verts00_src, verts00_rots_src = healpix_verts_rots(self.hl_source, 0.0, 0.0)
+        verts10_src, verts10_rots_src = healpix_verts_rots(self.hl_source, 1.0, 0.0)
+        verts11_src, verts11_rots_src = healpix_verts_rots(self.hl_source, 1.0, 1.0)
+        verts01_src, verts01_rots_src = healpix_verts_rots(self.hl_source, 0.0, 1.0)
+        vertsmm_src, vertsmm_rots_src = healpix_verts_rots(self.hl_source, 0.5, 0.5)
+
+        # Store source verts separately (FIXED: was being overwritten)
+        self.hpy_verts_source = [
+            verts00_src.to(torch.float32),
+            verts10_src.to(torch.float32),
+            verts11_src.to(torch.float32),
+            verts01_src.to(torch.float32),
+            vertsmm_src.to(torch.float32),
         ]
         self.hpy_verts_rots_source = [
-            verts00_rots.to(torch.float32),
-            verts10_rots.to(torch.float32),
-            verts11_rots.to(torch.float32),
-            verts01_rots.to(torch.float32),
-            vertsmm_rots.to(torch.float32),
+            verts00_rots_src.to(torch.float32),
+            verts10_rots_src.to(torch.float32),
+            verts11_rots_src.to(torch.float32),
+            verts01_rots_src.to(torch.float32),
+            vertsmm_rots_src.to(torch.float32),
         ]
 
-        verts00, verts00_rots = healpix_verts_rots(self.hl_target, 0.0, 0.0)
-        verts10, verts10_rots = healpix_verts_rots(self.hl_target, 1.0, 0.0)
-        verts11, verts11_rots = healpix_verts_rots(self.hl_target, 1.0, 1.0)
-        verts01, verts01_rots = healpix_verts_rots(self.hl_target, 0.0, 1.0)
-        vertsmm, vertsmm_rots = healpix_verts_rots(self.hl_target, 0.5, 0.5)
-        self.hpy_verts = [
-            verts00.to(torch.float32),
-            verts10.to(torch.float32),
-            verts11.to(torch.float32),
-            verts01.to(torch.float32),
-            vertsmm.to(torch.float32),
-        ]
-        self.hpy_verts_rots_target = [
-            verts00_rots.to(torch.float32),
-            verts10_rots.to(torch.float32),
-            verts11_rots.to(torch.float32),
-            verts01_rots.to(torch.float32),
-            vertsmm_rots.to(torch.float32),
-        ]
+        # Build TARGET verts (may be different resolution)
+        if self.hl_target != self.hl_source:
+            verts00_tgt, verts00_rots_tgt = healpix_verts_rots(self.hl_target, 0.0, 0.0)
+            verts10_tgt, verts10_rots_tgt = healpix_verts_rots(self.hl_target, 1.0, 0.0)
+            verts11_tgt, verts11_rots_tgt = healpix_verts_rots(self.hl_target, 1.0, 1.0)
+            verts01_tgt, verts01_rots_tgt = healpix_verts_rots(self.hl_target, 0.0, 1.0)
+            vertsmm_tgt, vertsmm_rots_tgt = healpix_verts_rots(self.hl_target, 0.5, 0.5)
 
+            self.hpy_verts_target = [
+                verts00_tgt.to(torch.float32),
+                verts10_tgt.to(torch.float32),
+                verts11_tgt.to(torch.float32),
+                verts01_tgt.to(torch.float32),
+                vertsmm_tgt.to(torch.float32),
+            ]
+            self.hpy_verts_rots_target = [
+                verts00_rots_tgt.to(torch.float32),
+                verts10_rots_tgt.to(torch.float32),
+                verts11_rots_tgt.to(torch.float32),
+                verts01_rots_tgt.to(torch.float32),
+                vertsmm_rots_tgt.to(torch.float32),
+            ]
+        else:
+            # Same level - reuse source verts
+            self.hpy_verts_target = self.hpy_verts_source
+            self.hpy_verts_rots_target = self.hpy_verts_rots_source
+            verts00_tgt = verts00_src
+            verts10_tgt = verts10_src
+            verts11_tgt = verts11_src
+            verts01_tgt = verts01_src
+            vertsmm_tgt = vertsmm_src
+            verts00_rots_tgt = verts00_rots_src
+            verts10_rots_tgt = verts10_rots_src
+            verts11_rots_tgt = verts11_rots_src
+            verts01_rots_tgt = verts01_rots_src
+            vertsmm_rots_tgt = vertsmm_rots_src
+
+        # Keep backward compatibility alias (uses target verts, as before)
+        self.hpy_verts = self.hpy_verts_target
+
+        # Build local coordinate transforms for target
         transforms = [
-            ([verts10, verts11, verts01, vertsmm], verts00_rots),
-            ([verts00, verts11, verts01, vertsmm], verts10_rots),
-            ([verts00, verts10, verts01, vertsmm], verts11_rots),
-            ([verts00, verts11, verts10, vertsmm], verts01_rots),
-            ([verts00, verts10, verts11, verts01], vertsmm_rots),
+            ([verts10_tgt, verts11_tgt, verts01_tgt, vertsmm_tgt], verts00_rots_tgt),
+            ([verts00_tgt, verts11_tgt, verts01_tgt, vertsmm_tgt], verts10_rots_tgt),
+            ([verts00_tgt, verts10_tgt, verts01_tgt, vertsmm_tgt], verts11_rots_tgt),
+            ([verts00_tgt, verts11_tgt, verts10_tgt, vertsmm_tgt], verts01_rots_tgt),
+            ([verts00_tgt, verts10_tgt, verts11_tgt, verts01_tgt], vertsmm_rots_tgt),
         ]
 
         self.verts_local = []
@@ -109,7 +133,7 @@ class Tokenizer:
         for i, row in enumerate(temp):
             temp[i][row == -1] = i
         self.hpy_nctrs_target = (
-            vertsmm[temp.flatten()]
+            vertsmm_tgt[temp.flatten()]
             .reshape((num_healpix_cells, 8, 3))
             .transpose(1, 0)
             .to(torch.float32)
@@ -118,7 +142,9 @@ class Tokenizer:
     def compute_source_centroids(self, source_tokens_cells: list[torch.Tensor]) -> torch.Tensor:
         source_means = [
             (
-                self.hpy_verts[-1][i].unsqueeze(0).repeat(len(s), 1)
+                # FIXED: Use hpy_verts_source[-1] instead of hpy_verts[-1]
+                # hpy_verts was being overwritten with target verts
+                self.hpy_verts_source[-1][i].unsqueeze(0).repeat(len(s), 1)
                 if len(s) > 0
                 else torch.tensor([])
             )

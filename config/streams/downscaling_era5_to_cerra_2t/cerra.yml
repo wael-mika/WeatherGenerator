@@ -10,6 +10,7 @@
 # CERRA stream configured as OUTPUT ONLY for ERA5 -> CERRA downscaling
 # High-resolution (5.5km) regional reanalysis over Europe
 # All input/source capabilities are disabled - ERA5 provides the inputs
+# Single-variable target (2t) for higher-resolution focus
 
 CERRA:
   type: anemoi
@@ -30,9 +31,10 @@ CERRA:
   masking_rate_none: 0.05
 
   # Token size tuned for higher-resolution targets
-  token_size: 256
+  token_size: 128
   tokenize_spacetime: True
-  max_num_targets: -1  # Use all targets
+  max_num_targets: 200000  # Cap total target points for memory
+  sampling_rate_target: 1.0
 
   embed:
     net: transformer

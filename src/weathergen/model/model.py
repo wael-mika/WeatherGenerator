@@ -794,6 +794,15 @@ class Model(torch.nn.Module):
         tokens_stream = (tokens.reshape(s) + model_params.pe_global).flatten(0, 1)
         tokens_stream = tokens_stream[model_params.hp_nbours.flatten()].flatten(0, 1)
 
+        # If target HEALPix level differs, expand kv sequences only for non-empty target cells
+        target_hl = self.cf.get("healpix_level_target", self.cf.healpix_level)
+        tokens_stream_cells = None
+        if target_hl > self.cf.healpix_level:
+            tokens_per_cell = int(model_params.tokens_lens[1].item())
+            tokens_stream_cells = tokens_stream.view(
+                self.num_healpix_cells, tokens_per_cell, tokens_stream.shape[-1]
+            )
+
         # pair with tokens from assimilation engine to obtain target tokens
         preds_tokens = []
         for ii, (tte, tte_kv) in enumerate(
@@ -843,16 +852,40 @@ class Model(torch.nn.Module):
             assert isinstance(tte_kv, torch.nn.Identity)
 
             # lens for varlen attention
-            tcs_lens = target_coords_idxs[ii][fstep]
+            tcs_lens_full = target_coords_idxs[ii][fstep]
+            tokens_stream_kv = tokens_stream
+            tokens_lens_kv = model_params.tokens_lens
+            tcs_lens = tcs_lens_full
+            if target_hl > self.cf.healpix_level:
+                tcs_lens_cells = tcs_lens_full[1:]
+                keep_mask = tcs_lens_cells > 0
+                if not torch.any(keep_mask):
+                    preds_tokens += [torch.tensor([], device=tc_tokens.device)]
+                    continue
+
+                keep_idx = torch.nonzero(keep_mask, as_tuple=False).flatten()
+                tcs_lens = torch.cat([tcs_lens_full[:1], tcs_lens_cells[keep_idx]])
+
+                children_per_parent = 4 ** (target_hl - self.cf.healpix_level)
+                parent_idx = keep_idx // children_per_parent
+                tokens_stream_kv = tokens_stream_cells[parent_idx].reshape(
+                    -1, tokens_stream_cells.shape[-1]
+                )
+                tokens_lens_kv = torch.cat(
+                    [
+                        model_params.tokens_lens[:1],
+                        model_params.tokens_lens[1:2].repeat(keep_idx.shape[0]),
+                    ]
+                )
             # coord information for learnable layer norm
             tcs_aux = torch.cat(
                 [streams_data[i_b][ii].target_coords[fstep] for i_b in range(len(streams_data))]
             )
 
             tc_tokens = tte(
-                latent=tokens_stream,
+                latent=tokens_stream_kv,
                 output=tc_tokens,
-                latent_lens=model_params.tokens_lens,
+                latent_lens=tokens_lens_kv,
                 output_lens=tcs_lens,
                 coordinates=tcs_aux,
             )
