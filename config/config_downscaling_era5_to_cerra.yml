@@ -159,6 +159,6 @@ train_log:
 # Run settings
 istep: 0
 run_history: []
-desc: "Downscaling: ERA5 (1 deg) -> CERRA (5.5km) over Europe"
+desc: "Downscaling: ERA5 (2t,10u,10v) -> CERRA (2t) with CERRA geoinfo (orog,lsm)"
 data_loader_rng_seed: ???
 run_id: ???
