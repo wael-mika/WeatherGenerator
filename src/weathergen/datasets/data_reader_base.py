@@ -540,7 +540,13 @@ class DataReaderBase(metaclass=ABCMeta):
 
         assert geoinfos.shape[-1] == len(self.geoinfo_idx), "incorrect number of geoinfo channels"
         for i, _ in enumerate(self.geoinfo_idx):
-            geoinfos[..., i] = (geoinfos[..., i] - self.mean_geoinfo[i]) / self.stdev_geoinfo[i]
+            stdev = self.stdev_geoinfo[i]
+            # Protect against division by zero for constant fields (stdev=0)
+            if stdev == 0 or np.isclose(stdev, 0):
+                # For constant fields, just center the data (resulting in 0s after subtracting mean)
+                geoinfos[..., i] = geoinfos[..., i] - self.mean_geoinfo[i]
+            else:
+                geoinfos[..., i] = (geoinfos[..., i] - self.mean_geoinfo[i]) / stdev
 
         return geoinfos
 
