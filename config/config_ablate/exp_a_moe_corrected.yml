@@ -7,7 +7,7 @@
 #   - soft_exceedance thresholds: removed 1.0mm, adjusted weights
 # Expected: FBI 1.8 -> ~1.3-1.5, FAR 0.54 -> ~0.40-0.45, ETS ~0.38-0.42
 
-streams_directory: "./config/streams/era5_imerg_precip"
+streams_directory: "./config/streams/era5_imerg_precip_ablate"
 
 embed_orientation: "channels"
 embed_local_coords: True
@@ -74,12 +74,12 @@ impute_latent_noise_std: 0.0
 
 # MoE Configuration for Forecasting Engine - ENABLED (unchanged from kkeromx9)
 fe_use_moe: True
-fe_moe_blocks: [0, 3, 7]
+fe_moe_blocks: "all"
 fe_moe_num_experts: 8
 fe_moe_top_k: 2
 fe_moe_load_balance_weight: 0.001           # Unchanged
 fe_moe_jitter_noise: 0.0
-fe_moe_expert_hidden_factor: 1.0
+fe_moe_expert_hidden_factor: 2.0
 
 # Spatial Routing - ENABLED (unchanged)
 fe_moe_use_spatial_routing: True
@@ -118,6 +118,9 @@ loss_fcts:
   -
     - "quantile_upper"
     - 0.1
+  -
+    - "mse"
+    - 0.2
 loss_fcts_val:
   -
     - "mse_intensity_weighted"
@@ -128,6 +131,9 @@ loss_fcts_val:
   -
     - "quantile_upper"
     - 0.1
+  -
+    - "mse"
+    - 0.2
 
 loss_config:
   intensity_weighted_mse:
@@ -222,7 +228,7 @@ streams_output: ["IMERG_ANEMOI"]
 istep: 0
 run_history: []
 
-desc: "Exp A: Reduce false alarms - reduced extreme weighting"
+desc: "Exp A (MoE corrected): reduce false alarms (ablate+MSE)"
 data_loader_rng_seed: ???
 run_id: ???
 
@@ -233,5 +239,5 @@ train_log_freq:
 
 wgtags:
   org: None
-  exp: "exp_a_reduce_false_alarms"
+  exp: "exp_a_moe_corrected"
   grid: None

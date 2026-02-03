@@ -5,7 +5,7 @@
 #   - fe_moe_load_balance_weight: 0.001 -> 0.005 (prevent expert collapse)
 # Expected: Centroid shift@20mm <4000km, FSS@10mm@500km >0.80
 
-streams_directory: "./config/streams/era5_imerg_precip"
+streams_directory: "./config/streams/era5_imerg_precip_ablate"
 
 embed_orientation: "channels"
 embed_local_coords: True
@@ -72,12 +72,12 @@ impute_latent_noise_std: 0.0
 
 # MoE Configuration for Forecasting Engine - ENABLED with ENHANCED SPATIAL ROUTING
 fe_use_moe: True
-fe_moe_blocks: [0, 3, 7]
+fe_moe_blocks: "all"
 fe_moe_num_experts: 8
 fe_moe_top_k: 2
 fe_moe_load_balance_weight: 0.005           # CHANGED: Increased from 0.001
 fe_moe_jitter_noise: 0.0
-fe_moe_expert_hidden_factor: 1.0
+fe_moe_expert_hidden_factor: 2.0
 
 # Spatial Routing - ENHANCED
 fe_moe_use_spatial_routing: True
@@ -116,6 +116,9 @@ loss_fcts:
   -
     - "quantile_upper"
     - 0.1
+  -
+    - "mse"
+    - 0.2
 loss_fcts_val:
   -
     - "mse_intensity_weighted"
@@ -126,6 +129,9 @@ loss_fcts_val:
   -
     - "quantile_upper"
     - 0.1
+  -
+    - "mse"
+    - 0.2
 
 # Loss config UNCHANGED from kkeromx9 (keeping original extreme weighting)
 loss_config:
@@ -221,7 +227,7 @@ streams_output: ["IMERG_ANEMOI"]
 istep: 0
 run_history: []
 
-desc: "Exp B: Improve spatial accuracy - enhanced position embeddings"
+desc: "Exp B: Improve spatial accuracy - enhanced position embeddings (ablate+MSE)"
 data_loader_rng_seed: ???
 run_id: ???
 
