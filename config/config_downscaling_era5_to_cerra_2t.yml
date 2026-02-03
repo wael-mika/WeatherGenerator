@@ -30,7 +30,7 @@ target_cell_local_prediction: True
 
 # Local autoencoder - increased for higher-resolution targets
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
-ae_local_dim_embed: 256
+ae_local_dim_embed: 128
 ae_local_num_blocks: 4
 ae_local_num_heads: 8
 ae_local_dropout_rate: 0.1
@@ -47,7 +47,7 @@ ae_adapter_dropout_rate: 0.1
 # Global autoencoder - increased for higher-resolution targets
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
 ae_global_dim_embed: 256
-ae_global_num_blocks: 4
+ae_global_num_blocks: 2
 ae_global_num_heads: 8
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
@@ -107,7 +107,7 @@ batch_size_validation: 1
 training_mode: "masking"
 masking_rate: 0.2
 masking_rate_sampling: True
-sampling_rate_target: 1.0
+sampling_rate_target: 0.25
 masking_strategy: "random"
 
 # Training schedule - reduced for initial experiments
@@ -150,7 +150,7 @@ input_window_steps: 1
 val_initial: False
 
 # Data loading - reduced for memory efficiency
-loader_num_workers: 2
+loader_num_workers: 8
 
 # Logging
 log_validation: 0

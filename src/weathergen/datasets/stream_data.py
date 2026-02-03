@@ -228,20 +228,45 @@ class StreamData:
         None
         """
 
-        self.target_tokens[fstep] = torch.cat(targets)
-        self.target_coords[fstep] = torch.cat(target_coords)
-        self.target_times_raw[fstep] = np.concatenate(times_raw)
-        self.target_coords_raw[fstep] = torch.cat(target_coords_raw)
+        # targets/coords can be returned as a list (per healpix cell) or as an empty tensor
+        if isinstance(targets, (list, tuple)):
+            self.target_tokens[fstep] = torch.cat(targets) if len(targets) > 0 else torch.tensor([])
+            self.target_tokens_lens[fstep] = torch.tensor([len(f) for f in targets], dtype=torch.int)
+        else:
+            # empty target case
+            self.target_tokens[fstep] = targets if torch.is_tensor(targets) else torch.tensor([])
 
-        tc = target_coords
-        self.target_coords_lens[fstep] = torch.tensor(
-            [len(f) for f in tc] if len(tc) > 1 else self.target_coords_lens[fstep],
-            dtype=torch.int,
-        )
-        self.target_tokens_lens[fstep] = torch.tensor(
-            [len(f) for f in targets] if len(targets) > 1 else self.target_tokens_lens[fstep],
-            dtype=torch.int,
-        )
+        if isinstance(target_coords, (list, tuple)):
+            self.target_coords[fstep] = (
+                torch.cat(target_coords) if len(target_coords) > 0 else torch.tensor([])
+            )
+            self.target_coords_lens[fstep] = torch.tensor(
+                [len(f) for f in target_coords], dtype=torch.int
+            )
+        else:
+            self.target_coords[fstep] = (
+                target_coords if torch.is_tensor(target_coords) else torch.tensor([])
+            )
+
+        if isinstance(target_coords_raw, (list, tuple)):
+            self.target_coords_raw[fstep] = (
+                torch.cat(target_coords_raw) if len(target_coords_raw) > 0 else torch.tensor([])
+            )
+        else:
+            self.target_coords_raw[fstep] = (
+                target_coords_raw if torch.is_tensor(target_coords_raw) else torch.tensor([])
+            )
+
+        if isinstance(times_raw, (list, tuple)):
+            self.target_times_raw[fstep] = (
+                np.concatenate(times_raw) if len(times_raw) > 0 else np.array([])
+            )
+        elif isinstance(times_raw, np.ndarray):
+            self.target_times_raw[fstep] = times_raw
+        elif torch.is_tensor(times_raw):
+            self.target_times_raw[fstep] = times_raw.detach().cpu().numpy()
+        else:
+            self.target_times_raw[fstep] = np.array([])
 
     def target_empty(self) -> bool:
         """
