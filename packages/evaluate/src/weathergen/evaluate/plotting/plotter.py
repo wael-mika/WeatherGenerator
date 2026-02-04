@@ -1742,3 +1742,761 @@ def channel_sort_key(name: str) -> tuple[int, str, int]:
         return (0, prefix, int(number))
     else:
         return (1, name, float("inf"))
+
+
+class HeatmapScoreCard:
+    """
+    Generate heatmap-style score cards showing variables vs lead times.
+
+    Creates a grid visualization where:
+    - Rows: Variables/channels
+    - Columns: Lead times (hours)
+    - Color intensity: Metric values
+
+    Supports side-by-side comparison of multiple models with diverging
+    colormaps when comparing to a baseline (blue=better, red=worse).
+    """
+
+    def __init__(self, plotter_cfg: dict, output_basedir: str | Path) -> None:
+        """
+        Initialize the HeatmapScoreCard class.
+
+        Parameters
+        ----------
+        plotter_cfg : dict
+            Configuration dictionary containing:
+                - image_format: Format of saved images (e.g., 'png', 'pdf')
+                - dpi_val: DPI value for saved images
+                - baseline: Run ID to use as baseline for comparison
+                - annotate_cells: bool, whether to show numeric values in cells
+        output_basedir : str | Path
+            Base directory for saving plots
+        """
+        self.image_format = plotter_cfg.get("image_format", "png")
+        self.dpi_val = plotter_cfg.get("dpi_val", 300)
+        self.baseline = plotter_cfg.get("baseline")
+        self.annotate_cells = plotter_cfg.get("annotate_cells", True)
+        self.out_plot_dir = Path(output_basedir) / "heatmap_scorecards"
+
+        if not os.path.exists(self.out_plot_dir):
+            _logger.info(f"Creating dir {self.out_plot_dir}")
+            os.makedirs(self.out_plot_dir, exist_ok=True)
+
+    def plot(
+        self,
+        data: list[xr.DataArray],
+        runs: list[str],
+        metric: str,
+        channels: list[str],
+        tag: str,
+    ) -> None:
+        """
+        Generate heatmap scorecard visualization.
+
+        Parameters
+        ----------
+        data : list[xr.DataArray]
+            List of DataArrays with scores for each run
+        runs : list[str]
+            List of run identifiers
+        metric : str
+            Metric name being visualized
+        channels : list[str]
+            List of channel/variable names
+        tag : str
+            Tag for filename
+        """
+        n_runs = len(runs)
+        if n_runs == 0:
+            _logger.warning("HeatmapScoreCard: No data to plot.")
+            return
+
+        # Reorder so baseline is first if specified
+        if self.baseline and self.baseline in runs:
+            baseline_idx = runs.index(self.baseline)
+            runs = [runs[baseline_idx]] + runs[:baseline_idx] + runs[baseline_idx + 1 :]
+            data = [data[baseline_idx]] + data[:baseline_idx] + data[baseline_idx + 1 :]
+
+        # Get common channels sorted
+        common_channels = sorted(
+            [ch for ch in channels if all(ch in d.channel.values for d in data)],
+            key=channel_sort_key,
+        )
+
+        if not common_channels:
+            _logger.warning("HeatmapScoreCard: No common channels found.")
+            return
+
+        # Get lead times from first dataset
+        sample_data = data[0]
+        if "lead_time" in sample_data.coords:
+            lead_times = np.unique(sample_data.lead_time.values)
+            x_label = "Lead Time (h)"
+            x_dim = "lead_time"
+        else:
+            lead_times = sample_data.forecast_step.values
+            x_label = "Forecast Step"
+            x_dim = "forecast_step"
+
+        n_channels = len(common_channels)
+        n_times = len(lead_times)
+
+        # Create figure with subplots for each model
+        fig_width = max(8, 2 * n_times * n_runs / 10)
+        fig_height = max(6, 0.4 * n_channels)
+        fig, axes = plt.subplots(
+            1, n_runs, figsize=(fig_width, fig_height), squeeze=False, dpi=self.dpi_val
+        )
+        axes = axes.flatten()
+
+        # Prepare heatmap data for each run
+        heatmap_matrices = []
+        for run_data in data:
+            matrix = self._create_heatmap_data(run_data, common_channels, lead_times, x_dim)
+            heatmap_matrices.append(matrix)
+
+        # Determine if we should use comparison mode (ratio to baseline)
+        use_comparison = self.baseline is not None and n_runs > 1
+        baseline_matrix = heatmap_matrices[0] if use_comparison else None
+
+        # Find global min/max for consistent colorbar
+        if use_comparison:
+            # Compute ratios for non-baseline runs
+            ratio_matrices = []
+            for i, matrix in enumerate(heatmap_matrices):
+                if i == 0:
+                    ratio_matrices.append(np.ones_like(matrix))  # baseline shows as 1.0
+                else:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = matrix / baseline_matrix
+                        ratio_matrices.append(ratio)
+
+            all_ratios = np.concatenate([m.flatten() for m in ratio_matrices[1:]])
+            valid_ratios = all_ratios[np.isfinite(all_ratios)]
+            if len(valid_ratios) > 0:
+                vmin = max(0.5, np.nanpercentile(valid_ratios, 2))
+                vmax = min(2.0, np.nanpercentile(valid_ratios, 98))
+            else:
+                vmin, vmax = 0.5, 2.0
+            vcenter = 1.0
+        else:
+            all_values = np.concatenate([m.flatten() for m in heatmap_matrices])
+            valid_values = all_values[np.isfinite(all_values)]
+            if len(valid_values) > 0:
+                vmin = np.nanpercentile(valid_values, 2)
+                vmax = np.nanpercentile(valid_values, 98)
+            else:
+                vmin, vmax = 0, 1
+            vcenter = None
+
+        # Plot each model
+        for idx, (ax, run_id, matrix) in enumerate(zip(axes, runs, heatmap_matrices, strict=False)):
+            if use_comparison and idx > 0:
+                # Show ratio to baseline
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    plot_matrix = matrix / baseline_matrix
+                cmap = self._get_comparison_colormap(metric)
+                norm = mpl.colors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+                title_suffix = f" (vs {runs[0]})"
+            elif use_comparison and idx == 0:
+                # Baseline: show absolute values
+                plot_matrix = matrix
+                cmap = plt.get_cmap("magma_r") if lower_is_better(metric) else plt.get_cmap("magma")
+                norm = mpl.colors.Normalize(
+                    vmin=np.nanpercentile(matrix, 2), vmax=np.nanpercentile(matrix, 98)
+                )
+                title_suffix = " (baseline)"
+            else:
+                # No comparison: absolute values
+                plot_matrix = matrix
+                cmap = plt.get_cmap("magma_r") if lower_is_better(metric) else plt.get_cmap("magma")
+                norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+                title_suffix = ""
+
+            # Format x-axis labels (lead times)
+            if x_dim == "lead_time":
+                x_labels = [f"{int(lt)}h" for lt in lead_times]
+            else:
+                x_labels = [str(int(lt)) for lt in lead_times]
+
+            im = sns.heatmap(
+                plot_matrix,
+                ax=ax,
+                cmap=cmap,
+                norm=norm,
+                xticklabels=x_labels,
+                yticklabels=common_channels,
+                annot=self.annotate_cells,
+                fmt=".2f",
+                annot_kws={"size": 7},
+                cbar=False,
+                linewidths=0.5,
+                linecolor="white",
+            )
+
+            ax.set_title(f"{run_id}{title_suffix}", fontsize=10, fontweight="bold")
+            ax.set_xlabel(x_label, fontsize=9)
+            ax.set_ylabel("Variable" if idx == 0 else "", fontsize=9)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+            plt.setp(ax.get_yticklabels(), fontsize=8)
+
+        # Add shared colorbar
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+        if use_comparison:
+            sm = plt.cm.ScalarMappable(cmap=self._get_comparison_colormap(metric), norm=norm)
+            cbar = fig.colorbar(sm, cax=cbar_ax)
+            cbar.set_label(f"{metric.upper()} Ratio", fontsize=9)
+        else:
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            cbar = fig.colorbar(sm, cax=cbar_ax)
+            cbar.set_label(metric.upper(), fontsize=9)
+
+        fig.suptitle(f"Heatmap Scorecard: {metric.upper()}", fontsize=12, fontweight="bold", y=1.02)
+        plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+        # Save figure
+        parts = ["heatmap_scorecard", tag] + runs
+        name = "_".join(filter(None, parts))
+        save_path = self.out_plot_dir / f"{name}.{self.image_format}"
+        _logger.info(f"Saving heatmap scorecard to: {save_path}")
+        plt.savefig(save_path, bbox_inches="tight", dpi=self.dpi_val)
+        plt.close(fig)
+
+    def _create_heatmap_data(
+        self,
+        data: xr.DataArray,
+        channels: list[str],
+        lead_times: np.ndarray,
+        x_dim: str,
+    ) -> np.ndarray:
+        """
+        Prepare 2D array for heatmap: rows=channels, cols=lead_times.
+
+        Parameters
+        ----------
+        data : xr.DataArray
+            Input data array
+        channels : list[str]
+            List of channel names for rows
+        lead_times : np.ndarray
+            Array of lead time values for columns
+        x_dim : str
+            Dimension name for x-axis ('lead_time' or 'forecast_step')
+
+        Returns
+        -------
+        np.ndarray
+            2D array with shape (n_channels, n_lead_times)
+        """
+        n_channels = len(channels)
+        n_times = len(lead_times)
+        matrix = np.full((n_channels, n_times), np.nan)
+
+        # Average over sample and any other dimensions except channel and x_dim
+        avg_dims = [d for d in data.dims if d not in ["channel", x_dim, "forecast_step"]]
+        if avg_dims:
+            data = data.mean(dim=avg_dims, skipna=True)
+
+        # If x_dim is lead_time but data uses forecast_step, swap
+        if x_dim == "lead_time" and "lead_time" in data.coords:
+            if "forecast_step" in data.dims:
+                data = data.swap_dims({"forecast_step": "lead_time"})
+
+        for i, ch in enumerate(channels):
+            if ch not in data.channel.values:
+                continue
+            ch_data = data.sel(channel=ch)
+
+            for j, lt in enumerate(lead_times):
+                try:
+                    if x_dim in ch_data.dims:
+                        val = ch_data.sel({x_dim: lt}, method="nearest")
+                    elif x_dim in ch_data.coords:
+                        val = ch_data.where(ch_data[x_dim] == lt, drop=True)
+                        if val.size > 0:
+                            val = val.mean()
+                        else:
+                            continue
+                    else:
+                        continue
+
+                    matrix[i, j] = float(val.values) if val.size == 1 else float(val.mean().values)
+                except (KeyError, ValueError):
+                    continue
+
+        return matrix
+
+    def _get_comparison_colormap(self, metric: str) -> mpl.colors.Colormap:
+        """
+        Return appropriate diverging colormap for metric comparison.
+
+        Parameters
+        ----------
+        metric : str
+            Metric name
+
+        Returns
+        -------
+        mpl.colors.Colormap
+            Colormap where blue=better, red=worse
+        """
+        # For lower-is-better metrics: ratio < 1 is better (blue), ratio > 1 is worse (red)
+        # For higher-is-better metrics: ratio > 1 is better, ratio < 1 is worse
+        if lower_is_better(metric):
+            return plt.get_cmap("RdBu")  # Red for high (worse), Blue for low (better)
+        else:
+            return plt.get_cmap("RdBu_r")  # Blue for high (better), Red for low (worse)
+
+
+class SummaryCard:
+    """
+    Generate compact summary cards showing key statistics per model.
+
+    Each card displays:
+    - Model name and overall mean score
+    - Best/worst performing variables
+    - Improvement vs baseline (if available)
+    - Score trend across lead time (mini sparkline)
+    """
+
+    def __init__(self, plotter_cfg: dict, output_basedir: str | Path) -> None:
+        """
+        Initialize the SummaryCard class.
+
+        Parameters
+        ----------
+        plotter_cfg : dict
+            Configuration dictionary containing:
+                - image_format: Format of saved images
+                - dpi_val: DPI value
+                - baseline: Run ID for baseline comparison
+                - cards_per_row: int, number of cards per row in grid layout
+                - show_sparklines: bool, show mini trend lines
+        output_basedir : str | Path
+            Base directory for saving plots
+        """
+        self.image_format = plotter_cfg.get("image_format", "png")
+        self.dpi_val = plotter_cfg.get("dpi_val", 300)
+        self.baseline = plotter_cfg.get("baseline")
+        self.cards_per_row = plotter_cfg.get("cards_per_row", 3)
+        self.show_sparklines = plotter_cfg.get("show_sparklines", True)
+        self.out_plot_dir = Path(output_basedir) / "summary_cards"
+
+        if not os.path.exists(self.out_plot_dir):
+            _logger.info(f"Creating dir {self.out_plot_dir}")
+            os.makedirs(self.out_plot_dir, exist_ok=True)
+
+    def plot(
+        self,
+        data: list[xr.DataArray],
+        runs: list[str],
+        metric: str,
+        channels: list[str],
+        tag: str,
+    ) -> None:
+        """
+        Generate summary card visualization for multiple models.
+
+        Parameters
+        ----------
+        data : list[xr.DataArray]
+            List of DataArrays with scores for each run
+        runs : list[str]
+            List of run identifiers
+        metric : str
+            Metric name being visualized
+        channels : list[str]
+            List of channel/variable names
+        tag : str
+            Tag for filename
+        """
+        n_runs = len(runs)
+        if n_runs == 0:
+            _logger.warning("SummaryCard: No data to plot.")
+            return
+
+        # Reorder so baseline is first if specified
+        baseline_data = None
+        if self.baseline and self.baseline in runs:
+            baseline_idx = runs.index(self.baseline)
+            baseline_data = data[baseline_idx]
+
+        # Calculate grid layout
+        n_cols = min(self.cards_per_row, n_runs)
+        n_rows = (n_runs + n_cols - 1) // n_cols
+
+        # Create figure
+        card_width = 3.5
+        card_height = 3.0 if self.show_sparklines else 2.5
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(card_width * n_cols, card_height * n_rows),
+            squeeze=False,
+            dpi=self.dpi_val,
+        )
+
+        # Flatten axes for easy iteration
+        axes_flat = axes.flatten()
+
+        # Create each card
+        for idx, (ax, run_id, run_data) in enumerate(
+            zip(axes_flat[:n_runs], runs, data, strict=False)
+        ):
+            self._create_single_card(
+                ax,
+                run_data,
+                run_id,
+                metric,
+                channels,
+                baseline_data if run_id != self.baseline else None,
+            )
+
+        # Hide unused axes
+        for ax in axes_flat[n_runs:]:
+            ax.axis("off")
+
+        fig.suptitle(
+            f"Model Summary Cards: {metric.upper()}",
+            fontsize=14,
+            fontweight="bold",
+            y=1.02,
+        )
+        plt.tight_layout()
+
+        # Save figure
+        parts = ["summary_cards", tag] + runs
+        name = "_".join(filter(None, parts))
+        save_path = self.out_plot_dir / f"{name}.{self.image_format}"
+        _logger.info(f"Saving summary cards to: {save_path}")
+        plt.savefig(save_path, bbox_inches="tight", dpi=self.dpi_val)
+        plt.close(fig)
+
+    def _create_single_card(
+        self,
+        ax: plt.Axes,
+        data: xr.DataArray,
+        run_id: str,
+        metric: str,
+        channels: list[str],
+        baseline_data: xr.DataArray | None = None,
+    ) -> None:
+        """
+        Render a single summary card on the given axes.
+
+        Parameters
+        ----------
+        ax : plt.Axes
+            Matplotlib axes to draw on
+        data : xr.DataArray
+            Score data for this run
+        run_id : str
+            Run identifier
+        metric : str
+            Metric name
+        channels : list[str]
+            List of channel names
+        baseline_data : xr.DataArray | None
+            Baseline data for comparison
+        """
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+
+        # Compute summary statistics
+        stats = self._compute_summary_stats(data, channels, metric)
+
+        # Card background
+        from matplotlib.patches import FancyBboxPatch
+
+        card_bg = FancyBboxPatch(
+            (0.02, 0.02),
+            0.96,
+            0.96,
+            boxstyle="round,pad=0.02,rounding_size=0.05",
+            facecolor="#f8f9fa",
+            edgecolor="#dee2e6",
+            linewidth=2,
+        )
+        ax.add_patch(card_bg)
+
+        # Model name header
+        ax.text(
+            0.5,
+            0.92,
+            run_id,
+            ha="center",
+            va="top",
+            fontsize=11,
+            fontweight="bold",
+            color="#212529",
+        )
+
+        # Mean score
+        ax.text(
+            0.5,
+            0.78,
+            f"Mean {metric.upper()}: {stats['mean_score']:.3f}",
+            ha="center",
+            va="top",
+            fontsize=10,
+            color="#495057",
+        )
+
+        # Divider line
+        ax.axhline(y=0.70, xmin=0.1, xmax=0.9, color="#dee2e6", linewidth=1)
+
+        # Best/Worst channels
+        ax.text(
+            0.1,
+            0.62,
+            f"Best:  {stats['best_channel']} ({stats['best_score']:.3f})",
+            ha="left",
+            va="top",
+            fontsize=9,
+            color="#28a745",
+        )
+        ax.text(
+            0.1,
+            0.50,
+            f"Worst: {stats['worst_channel']} ({stats['worst_score']:.3f})",
+            ha="left",
+            va="top",
+            fontsize=9,
+            color="#dc3545",
+        )
+
+        # Improvement vs baseline
+        if baseline_data is not None:
+            baseline_stats = self._compute_summary_stats(baseline_data, channels, metric)
+            improvement, color = self._format_improvement(
+                stats["mean_score"], baseline_stats["mean_score"], metric
+            )
+
+            ax.axhline(y=0.40, xmin=0.1, xmax=0.9, color="#dee2e6", linewidth=1)
+            ax.text(
+                0.5,
+                0.32,
+                f"vs Baseline: {improvement}",
+                ha="center",
+                va="top",
+                fontsize=10,
+                fontweight="bold",
+                color=color,
+            )
+            sparkline_y = 0.22
+        else:
+            sparkline_y = 0.32
+
+        # Sparkline showing trend across lead times
+        if self.show_sparklines and len(stats["trend_values"]) > 1:
+            ax.axhline(y=sparkline_y + 0.08, xmin=0.1, xmax=0.9, color="#dee2e6", linewidth=1)
+            self._draw_sparkline(ax, stats["trend_values"], stats["trend_times"], metric, sparkline_y)
+
+    def _compute_summary_stats(
+        self,
+        data: xr.DataArray,
+        channels: list[str],
+        metric: str,
+    ) -> dict:
+        """
+        Compute summary statistics for a single run.
+
+        Parameters
+        ----------
+        data : xr.DataArray
+            Score data
+        channels : list[str]
+            List of channel names
+        metric : str
+            Metric name
+
+        Returns
+        -------
+        dict
+            Dictionary with summary statistics
+        """
+        # Filter to available channels
+        available_channels = [ch for ch in channels if ch in data.channel.values]
+        if not available_channels:
+            available_channels = list(data.channel.values)
+
+        # Average over all dimensions except channel for per-channel stats
+        non_channel_dims = [d for d in data.dims if d != "channel"]
+        if non_channel_dims:
+            channel_means = data.sel(channel=available_channels).mean(dim=non_channel_dims, skipna=True)
+        else:
+            channel_means = data.sel(channel=available_channels)
+
+        # Overall mean
+        mean_score = float(channel_means.mean(skipna=True).values)
+
+        # Best/worst channels (depends on metric direction)
+        channel_values = {ch: float(channel_means.sel(channel=ch).values) for ch in available_channels}
+        if lower_is_better(metric):
+            best_channel = min(channel_values, key=channel_values.get)
+            worst_channel = max(channel_values, key=channel_values.get)
+        else:
+            best_channel = max(channel_values, key=channel_values.get)
+            worst_channel = min(channel_values, key=channel_values.get)
+
+        best_score = channel_values[best_channel]
+        worst_score = channel_values[worst_channel]
+
+        # Trend across lead times
+        if "lead_time" in data.coords:
+            x_dim = "lead_time"
+            if "forecast_step" in data.dims:
+                trend_data = data.swap_dims({"forecast_step": "lead_time"})
+            else:
+                trend_data = data
+        elif "forecast_step" in data.dims:
+            x_dim = "forecast_step"
+            trend_data = data
+        else:
+            x_dim = None
+            trend_data = data
+
+        if x_dim and x_dim in trend_data.dims:
+            # Average over all dims except x_dim
+            other_dims = [d for d in trend_data.dims if d != x_dim]
+            if other_dims:
+                trend_means = trend_data.mean(dim=other_dims, skipna=True)
+            else:
+                trend_means = trend_data
+            trend_values = trend_means.values
+            trend_times = trend_means[x_dim].values
+        else:
+            trend_values = np.array([mean_score])
+            trend_times = np.array([0])
+
+        return {
+            "mean_score": mean_score,
+            "best_channel": best_channel,
+            "worst_channel": worst_channel,
+            "best_score": best_score,
+            "worst_score": worst_score,
+            "trend_values": trend_values,
+            "trend_times": trend_times,
+        }
+
+    def _draw_sparkline(
+        self,
+        ax: plt.Axes,
+        values: np.ndarray,
+        times: np.ndarray,
+        metric: str,
+        y_position: float,
+    ) -> None:
+        """
+        Draw a mini sparkline showing score trend across lead times.
+
+        Parameters
+        ----------
+        ax : plt.Axes
+            Axes to draw on
+        values : np.ndarray
+            Score values
+        times : np.ndarray
+            Time values
+        metric : str
+            Metric name
+        y_position : float
+            Y position for sparkline (in axes coordinates)
+        """
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+        # Create inset axes for sparkline
+        inset = inset_axes(
+            ax,
+            width="70%",
+            height="25%",
+            loc="lower center",
+            bbox_to_anchor=(0, y_position - 0.15, 1, 0.3),
+            bbox_transform=ax.transAxes,
+            borderpad=0,
+        )
+
+        # Normalize x values for plotting
+        x = np.arange(len(values))
+
+        # Determine color based on trend direction
+        if len(values) > 1:
+            slope = (values[-1] - values[0]) / (len(values) - 1) if len(values) > 1 else 0
+            # For lower-is-better: increasing slope is bad (red)
+            # For higher-is-better: decreasing slope is bad (red)
+            if (lower_is_better(metric) and slope > 0) or (not lower_is_better(metric) and slope < 0):
+                color = "#dc3545"  # Red - degrading
+            else:
+                color = "#28a745"  # Green - improving or stable
+        else:
+            color = "#6c757d"  # Gray
+
+        inset.plot(x, values, color=color, linewidth=1.5)
+        inset.fill_between(x, values, alpha=0.2, color=color)
+
+        # Minimal axis styling
+        inset.set_xlim(x[0], x[-1])
+        inset.spines["top"].set_visible(False)
+        inset.spines["right"].set_visible(False)
+        inset.spines["left"].set_visible(False)
+        inset.spines["bottom"].set_linewidth(0.5)
+        inset.tick_params(left=False, labelleft=False, bottom=True, labelbottom=True, labelsize=6)
+
+        # Show first and last time labels
+        if len(times) > 1:
+            if isinstance(times[0], (np.timedelta64, np.datetime64)):
+                first_label = f"{int(times[0].astype('timedelta64[h]').astype(int))}h"
+                last_label = f"{int(times[-1].astype('timedelta64[h]').astype(int))}h"
+            else:
+                first_label = str(int(times[0]))
+                last_label = str(int(times[-1]))
+            inset.set_xticks([x[0], x[-1]])
+            inset.set_xticklabels([first_label, last_label])
+        else:
+            inset.set_xticks([])
+
+    def _format_improvement(
+        self,
+        current: float,
+        baseline: float,
+        metric: str,
+    ) -> tuple[str, str]:
+        """
+        Format improvement value and determine color.
+
+        Parameters
+        ----------
+        current : float
+            Current model's score
+        baseline : float
+            Baseline model's score
+        metric : str
+            Metric name
+
+        Returns
+        -------
+        tuple[str, str]
+            Formatted improvement string and color
+        """
+        if baseline == 0:
+            return "N/A", "#6c757d"
+
+        pct_change = ((current - baseline) / abs(baseline)) * 100
+
+        # Determine if improvement or degradation based on metric direction
+        if lower_is_better(metric):
+            # Lower is better: negative change = improvement
+            is_improvement = pct_change < 0
+        else:
+            # Higher is better: positive change = improvement
+            is_improvement = pct_change > 0
+
+        if is_improvement:
+            color = "#28a745"  # Green
+            arrow = "\u2193" if lower_is_better(metric) else "\u2191"
+        else:
+            color = "#dc3545"  # Red
+            arrow = "\u2191" if lower_is_better(metric) else "\u2193"
+
+        return f"{arrow} {abs(pct_change):.1f}%", color

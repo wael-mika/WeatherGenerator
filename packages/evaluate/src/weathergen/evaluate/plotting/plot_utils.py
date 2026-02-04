@@ -365,6 +365,94 @@ def bar_plot_metric_region(
             br_plotter.plot(selected_data, run_ids, metric, channels_set, name)
 
 
+def heatmap_scorecard_metric_region(
+    metric: str,
+    region: str,
+    runs: dict,
+    scores_dict: dict,
+    hm_plotter: object,
+) -> None:
+    """
+    Create heatmap scorecards for all streams for a given metric and region.
+
+    Heatmap scorecards show a grid of variables (rows) vs lead times (columns)
+    with color intensity representing metric values.
+
+    Parameters
+    ----------
+    metric: str
+        String specifying the metric to plot
+    region: str
+        String specifying the region to plot
+    runs: dict
+        Dictionary containing the config for all runs
+    scores_dict : dict
+        The dictionary containing all computed metrics.
+    hm_plotter:
+        HeatmapScoreCard plotter object
+    """
+    streams_set = collect_streams(runs)
+    channels_set = collect_channels(scores_dict, metric, region, runs)
+
+    for stream in streams_set:
+        selected_data, run_ids = [], []
+
+        for run_id, data in scores_dict[metric][region].get(stream, {}).items():
+            if data.isnull().all():
+                continue
+            selected_data.append(data)
+            run_ids.append(run_id)
+
+        if selected_data:
+            _logger.info(f"Creating heatmap scorecards for {metric} - {region} - {stream}.")
+            name = "_".join([metric, region, stream])
+            hm_plotter.plot(selected_data, run_ids, metric, channels_set, name)
+
+
+def summary_card_metric_region(
+    metric: str,
+    region: str,
+    runs: dict,
+    scores_dict: dict,
+    sm_plotter: object,
+) -> None:
+    """
+    Create summary cards for all streams for a given metric and region.
+
+    Summary cards show compact statistics per model including mean score,
+    best/worst variables, improvement vs baseline, and trend sparklines.
+
+    Parameters
+    ----------
+    metric: str
+        String specifying the metric to plot
+    region: str
+        String specifying the region to plot
+    runs: dict
+        Dictionary containing the config for all runs
+    scores_dict : dict
+        The dictionary containing all computed metrics.
+    sm_plotter:
+        SummaryCard plotter object
+    """
+    streams_set = collect_streams(runs)
+    channels_set = collect_channels(scores_dict, metric, region, runs)
+
+    for stream in streams_set:
+        selected_data, run_ids = [], []
+
+        for run_id, data in scores_dict[metric][region].get(stream, {}).items():
+            if data.isnull().all():
+                continue
+            selected_data.append(data)
+            run_ids.append(run_id)
+
+        if selected_data:
+            _logger.info(f"Creating summary cards for {metric} - {region} - {stream}.")
+            name = "_".join([metric, region, stream])
+            sm_plotter.plot(selected_data, run_ids, metric, channels_set, name)
+
+
 class DefaultMarkerSize:
     """
     Utility class for managing default configuration values, such as marker sizes

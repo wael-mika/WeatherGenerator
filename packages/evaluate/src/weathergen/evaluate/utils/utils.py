@@ -24,11 +24,20 @@ from weathergen.evaluate.io.io_reader import Reader
 from weathergen.evaluate.plotting.plot_utils import (
     bar_plot_metric_region,
     heat_maps_metric_region,
+    heatmap_scorecard_metric_region,
     plot_metric_region,
     ratio_plot_metric_region,
     score_card_metric_region,
+    summary_card_metric_region,
 )
-from weathergen.evaluate.plotting.plotter import BarPlots, LinePlots, Plotter, ScoreCards
+from weathergen.evaluate.plotting.plotter import (
+    BarPlots,
+    HeatmapScoreCard,
+    LinePlots,
+    Plotter,
+    ScoreCards,
+    SummaryCard,
+)
 from weathergen.evaluate.scores.score import VerifiedData, get_score
 from weathergen.evaluate.utils.clim_utils import get_climatology
 from weathergen.evaluate.utils.regions import RegionBoundingBox
@@ -546,6 +555,14 @@ def plot_summary(cfg: dict, scores_dict: dict, summary_dir: Path):
                 score_card_metric_region(metric, region, runs, scores_dict, sc_plotter)
             if eval_opt.get("bar_plots", False):
                 bar_plot_metric_region(metric, region, runs, scores_dict, br_plotter)
+            if eval_opt.get("heatmap_scorecards", False):
+                hm_opts = eval_opt.get("heatmap_scorecard_options", {})
+                hm_plotter = HeatmapScoreCard({**plot_cfg, **hm_opts}, summary_dir)
+                heatmap_scorecard_metric_region(metric, region, runs, scores_dict, hm_plotter)
+            if eval_opt.get("summary_cards", False):
+                sm_opts = eval_opt.get("summary_card_options", {})
+                sm_plotter = SummaryCard({**plot_cfg, **sm_opts}, summary_dir)
+                summary_card_metric_region(metric, region, runs, scores_dict, sm_plotter)
 
 
 ############# Utility functions ############
