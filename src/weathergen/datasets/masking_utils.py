@@ -160,3 +160,129 @@ def log_masking_summary(source_cfgs, target_cfgs, losses):
         logger.info(f"  = {eff} | config {'USED' if used else 'IGNORED'}")
 
     logger.info("=" * 50)
+
+
+def check_masking_config(config, strict=False, print_summary=True):
+    """Check masking config validity before training.
+
+    Can be used standalone to validate a config file:
+        from weathergen.datasets.masking_utils import check_masking_config
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.load("path/to/config.yaml")
+        is_valid, warnings, errors = check_masking_config(cfg, strict=True)
+
+    Or from command line:
+        python -c "
+        from weathergen.datasets.masking_utils import check_masking_config
+        from omegaconf import OmegaConf
+        cfg = OmegaConf.load('config.yaml')
+        check_masking_config(cfg, strict=True)
+        "
+
+    Args:
+        config: OmegaConf config object or path to config file
+        strict: If True, treat warnings as errors
+        print_summary: If True, print human-readable summary to stdout
+
+    Returns:
+        tuple: (is_valid: bool, warnings: list[str], errors: list[str])
+    """
+    # Load config if path provided
+    if isinstance(config, str):
+        config = omegaconf.OmegaConf.load(config)
+
+    errors = []
+    warnings_list = []
+
+    # Extract masking config from various possible locations
+    stage_cfg = None
+    if hasattr(config, "stage"):
+        stage_cfg = config.stage
+    elif hasattr(config, "training") and hasattr(config.training, "stage"):
+        stage_cfg = config.training.stage
+    else:
+        stage_cfg = config  # Assume config is already the stage config
+
+    # Get source and target configs
+    source_cfgs = stage_cfg.get("model_input", [])
+    target_cfgs = stage_cfg.get("target_input", [])
+    losses = stage_cfg.get("losses", {})
+
+    # Convert to list if needed
+    if hasattr(source_cfgs, "values"):
+        source_cfgs = list(source_cfgs.values())
+    if hasattr(target_cfgs, "values"):
+        target_cfgs = list(target_cfgs.values())
+
+    # Use source as target if target not specified
+    if not target_cfgs:
+        target_cfgs = source_cfgs
+
+    if not source_cfgs:
+        if print_summary:
+            print("No masking config found (no model_input defined)")
+        return True, [], []
+
+    # Run validation
+    try:
+        warnings_list = validate_masking_config(source_cfgs, target_cfgs, losses, strict=strict)
+    except ValueError as e:
+        errors.append(str(e))
+
+    is_valid = len(errors) == 0
+
+    # Print summary
+    if print_summary:
+        print("=" * 60)
+        print("MASKING CONFIG CHECK")
+        print("=" * 60)
+
+        print(f"\nTargets ({len(target_cfgs)}):")
+        for i, tgt in enumerate(target_cfgs):
+            s = tgt.get("masking_strategy", "random")
+            c = dict(tgt.get("masking_strategy_config", {}))
+            print(f"  [{i}] {s} {c}")
+
+        print(f"\nSources ({len(source_cfgs)}):")
+        mapping = parse_source_target_mapping(losses, len(source_cfgs), len(target_cfgs))
+        for i, src in enumerate(source_cfgs):
+            s = src.get("masking_strategy", "random")
+            c = dict(src.get("masking_strategy_config", {}))
+            rel, tgt_idx = mapping.get(i, (None, 0))
+            tgt_strat = target_cfgs[tgt_idx].get("masking_strategy", "random") if tgt_idx < len(target_cfgs) else "random"
+
+            if rel is None:
+                rel = DEFAULT_RELATIONSHIP.get(s, "independent")
+                rel_note = "default"
+            else:
+                rel_note = "explicit"
+
+            config_used = rel not in SOURCE_IGNORED_RELATIONSHIPS
+            status = "CONFIG USED" if config_used else "CONFIG IGNORED"
+
+            print(f"  [{i}] {s} {c}")
+            print(f"      -> {rel} ({rel_note}) -> target[{tgt_idx}] | {status}")
+
+        print("\n" + "-" * 60)
+
+        if errors:
+            print(f"ERRORS ({len(errors)}):")
+            for err in errors:
+                print(f"  x {err}")
+
+        if warnings_list:
+            print(f"WARNINGS ({len(warnings_list)}):")
+            for warn in warnings_list:
+                print(f"  ! {warn}")
+
+        if is_valid and not warnings_list:
+            print("OK: Config is valid with no warnings")
+        elif is_valid:
+            print(f"OK: Config is valid but has {len(warnings_list)} warning(s)")
+        else:
+            print(f"FAIL: Config is INVALID with {len(errors)} error(s)")
+
+        print("=" * 60)
+
+    return is_valid, warnings_list, errors

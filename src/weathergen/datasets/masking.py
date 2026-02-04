@@ -404,6 +404,30 @@ class Masker:
 
         relationship, target_mask = target_relationship_mask
 
+        # Runtime validation - defense-in-depth checks that should never be triggered
+        # if config validation ran properly.
+
+        # Option 1: Using ValueError (recommended - never stripped by python -O)
+        # if strategy not in VALID_STRATEGIES:
+        #     raise ValueError(f"Invalid masking strategy: '{strategy}'. Valid: {VALID_STRATEGIES}")
+        # if relationship not in VALID_RELATIONSHIPS:
+        #     raise ValueError(f"Invalid relationship: '{relationship}'. Valid: {VALID_RELATIONSHIPS}")
+        # if (strategy, relationship) in INVALID_COMBINATIONS:
+        #     raise ValueError(
+        #         f"Invalid combination: strategy='{strategy}' with relationship='{relationship}'"
+        #     )
+
+        # Option 2: Using assert (simpler, but can be stripped with python -O)
+        assert strategy in VALID_STRATEGIES, (
+            f"Invalid masking strategy: '{strategy}'. Valid: {VALID_STRATEGIES}"
+        )
+        assert relationship in VALID_RELATIONSHIPS, (
+            f"Invalid relationship: '{relationship}'. Valid: {VALID_RELATIONSHIPS}"
+        )
+        assert (strategy, relationship) not in INVALID_COMBINATIONS, (
+            f"Invalid combination: strategy='{strategy}' with relationship='{relationship}'"
+        )
+
         if strategy == "forecast":
             if relationship is not None:
                 assert relationship == "independent", (
