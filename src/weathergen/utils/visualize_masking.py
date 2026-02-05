@@ -612,7 +612,8 @@ def _plot_cartopy_three_panel(
     - Panel 2: Source/Student view with mask applied
     - Panel 3: Target/Teacher view with mask applied
 
-    Masked-out regions are shown as light gray background points.
+    Masked-out regions appear as clean white background (land/ocean features),
+    while visible data points are shown with the colormap.
 
     Parameters
     ----------
@@ -640,7 +641,7 @@ def _plot_cartopy_three_panel(
     point_size : float
         Scatter point size.
     shared_colorbar : bool
-        If True, use a single colorbar below all panels instead of per-panel colorbars.
+        If True, use a single shared colorbar below all panels instead of per-panel colorbars.
     """
     if len(vals_full) == 0 and len(vals_src) == 0 and len(vals_tgt) == 0:
         raise ValueError("No data points to plot after masking.")
@@ -652,27 +653,48 @@ def _plot_cartopy_three_panel(
         vals_ref = vals_full
         if len(vals_ref) == 0:
             vals_ref = vals_src if len(vals_src) else vals_tgt
-        vmin = np.nanpercentile(vals_ref, 2)
-        vmax = np.nanpercentile(vals_ref, 98)
+        # Use tighter percentiles for more saturated colors
+        vmin = np.nanpercentile(vals_ref, 1)
+        vmax = np.nanpercentile(vals_ref, 99)
 
     proj = ccrs.Robinson()
-    fig = plt.figure(figsize=(8 * ncols, 7.5), dpi=dpi)
 
-    # Size for masked-out background points
-    bg_point_size = max(1.0, point_size * 0.5)
+    # Compact figure with less vertical space
+    fig_width = 7 * ncols
+    fig_height = 5.5
+    fig, axes_grid = plt.subplots(
+        1, ncols,
+        figsize=(fig_width, fig_height),
+        dpi=dpi,
+        subplot_kw={"projection": proj},
+    )
+    if ncols == 1:
+        axes_grid = [axes_grid]
+
+    # Clean white background for masked regions
+    fig.patch.set_facecolor("white")
 
     def _setup_axis(ax, title_text: str):
         ax.set_global()
-        ax.coastlines(resolution="110m", linewidth=0.5)
-        ax.add_feature(cfeature.BORDERS, linewidth=0.3, alpha=0.5)
-        ax.set_title(title_text, fontsize=11, fontweight="bold")
+        # Clean white background
+        ax.set_facecolor("white")
+        ax.add_feature(cfeature.LAND, facecolor="white", edgecolor="none", zorder=0)
+        ax.coastlines(resolution="110m", linewidth=0.8, color="#333333", zorder=3)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.3, alpha=0.4, color="#555555", zorder=3)
+        ax.set_title(title_text, fontsize=10, fontweight="bold", pad=4)
+        # Add subtle border around the map using spines
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#aaaaaa")
+            spine.set_linewidth(0.5)
 
     axes = []
     scatters = []
+    ax_idx = 0
 
     # Panel 1: Full data
     if include_full:
-        ax1 = fig.add_subplot(1, ncols, 1, projection=proj)
+        ax1 = axes_grid[ax_idx]
+        ax_idx += 1
         _setup_axis(ax1, "Full Data (No Masking)")
         sc1 = ax1.scatter(
             lons_full,
@@ -680,103 +702,101 @@ def _plot_cartopy_three_panel(
             c=vals_full,
             s=point_size,
             cmap=cmap,
-            alpha=0.8,
+            alpha=1.0,
             vmin=vmin,
             vmax=vmax,
             transform=ccrs.PlateCarree(),
             rasterized=True,
+            zorder=2,
+            edgecolors="none",
         )
         axes.append(ax1)
         scatters.append(sc1)
-        if not shared_colorbar:
-            plt.colorbar(sc1, ax=ax1, fraction=0.04, pad=0.02, orientation="horizontal")
 
-    # Panel 2: Source
-    ax2 = fig.add_subplot(1, ncols, 2 if include_full else 1, projection=proj)
+    # Panel 2: Source - only plot visible points (masked areas stay white)
+    ax2 = axes_grid[ax_idx]
+    ax_idx += 1
     _setup_axis(ax2, src_label)
-    if len(lats_full) and len(src_visible):
-        ax2.scatter(
-            lons_full[~src_visible],
-            lats_full[~src_visible],
-            c="#d3d3d3",
-            s=bg_point_size,
-            alpha=0.3,
+
+    # Only plot visible source points - masked areas are clean white
+    if len(vals_src) > 0:
+        sc2 = ax2.scatter(
+            lons_src,
+            lats_src,
+            c=vals_src,
+            s=point_size,
+            cmap=cmap,
+            alpha=1.0,
+            vmin=vmin,
+            vmax=vmax,
             transform=ccrs.PlateCarree(),
             rasterized=True,
+            zorder=2,
+            edgecolors="none",
         )
-    sc2 = ax2.scatter(
-        lons_src,
-        lats_src,
-        c=vals_src,
-        s=point_size,
-        cmap=cmap,
-        alpha=0.8,
-        vmin=vmin,
-        vmax=vmax,
-        transform=ccrs.PlateCarree(),
-        rasterized=True,
-    )
+    else:
+        # Create a dummy scatter for colorbar if no visible points
+        sc2 = ax2.scatter([], [], c=[], cmap=cmap, vmin=vmin, vmax=vmax)
+
     axes.append(ax2)
     scatters.append(sc2)
-    if not shared_colorbar:
-        plt.colorbar(sc2, ax=ax2, fraction=0.04, pad=0.02, orientation="horizontal")
 
-    # Panel 3: Target
-    ax3 = fig.add_subplot(1, ncols, 3 if include_full else 2, projection=proj)
+    # Panel 3: Target - only plot visible points (masked areas stay white)
+    ax3 = axes_grid[ax_idx]
     _setup_axis(ax3, tgt_label)
-    if len(lats_full) and len(tgt_visible):
-        ax3.scatter(
-            lons_full[~tgt_visible],
-            lats_full[~tgt_visible],
-            c="#d3d3d3",
-            s=bg_point_size,
-            alpha=0.3,
-            transform=ccrs.PlateCarree(),
-            rasterized=True,
-        )
-    if len(vals_tgt):
+
+    # Only plot visible target points - masked areas are clean white
+    if len(vals_tgt) > 0:
         sc3 = ax3.scatter(
             lons_tgt,
             lats_tgt,
             c=vals_tgt,
             s=point_size,
             cmap=cmap,
-            alpha=0.8,
+            alpha=1.0,
             vmin=vmin,
             vmax=vmax,
             transform=ccrs.PlateCarree(),
             rasterized=True,
+            zorder=2,
+            edgecolors="none",
         )
-    else:
+    elif len(lats_full) > 0 and len(tgt_visible) > 0:
+        # Fallback: use full data with visibility mask
         sc3 = ax3.scatter(
             lons_full[tgt_visible],
             lats_full[tgt_visible],
             c=vals_full[tgt_visible],
             s=point_size,
             cmap=cmap,
-            alpha=0.8,
+            alpha=1.0,
             vmin=vmin,
             vmax=vmax,
             transform=ccrs.PlateCarree(),
             rasterized=True,
+            zorder=2,
+            edgecolors="none",
         )
+    else:
+        # Create a dummy scatter for colorbar
+        sc3 = ax3.scatter([], [], c=[], cmap=cmap, vmin=vmin, vmax=vmax)
+
     axes.append(ax3)
     scatters.append(sc3)
-    if not shared_colorbar:
-        plt.colorbar(sc3, ax=ax3, fraction=0.04, pad=0.02, orientation="horizontal")
 
-    fig.suptitle(title, fontsize=14, fontweight="bold", y=0.99)
+    # Add a single shared colorbar at the bottom
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.88, bottom=0.15, wspace=0.08)
 
-    if shared_colorbar:
-        # Add a single shared colorbar below all panels
-        fig.subplots_adjust(top=0.92, bottom=0.18, wspace=0.06)
-        cbar_ax = fig.add_axes([0.15, 0.08, 0.7, 0.03])
-        fig.colorbar(scatters[0], cax=cbar_ax, orientation="horizontal")
-    else:
-        fig.subplots_adjust(top=0.96, bottom=0.08, wspace=0.06)
+    # Shared colorbar spanning all panels
+    cbar_ax = fig.add_axes([0.25, 0.06, 0.5, 0.025])
+    cbar = fig.colorbar(scatters[0], cax=cbar_ax, orientation="horizontal")
+    cbar.ax.tick_params(labelsize=9)
+
+    # Compact title closer to plots
+    fig.suptitle(title, fontsize=12, fontweight="bold", y=0.95)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white", edgecolor="none")
     plt.close(fig)
 
 
