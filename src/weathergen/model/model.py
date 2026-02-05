@@ -260,6 +260,10 @@ class Model(torch.nn.Module):
 
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
+        self.healpix_level_target = getattr(cf, "healpix_level_target", None)
+        if self.healpix_level_target is None:
+            self.healpix_level_target = self.healpix_level
+        self.num_healpix_cells_target = 12 * 4**self.healpix_level_target
 
         self.cf = cf
         self.dtype = get_dtype(self.cf.attention_dtype)
@@ -662,6 +666,20 @@ class Model(torch.nn.Module):
             (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
         )
         tokens_nbors_lens[0] = 0
+        target_hl = self.healpix_level_target
+        tokens_nbors_cells = None
+        tokens_nbors_tokens_per_cell = None
+        if target_hl > self.healpix_level:
+            denom = batch_size * self.num_healpix_cells
+            assert denom > 0, "invalid healpix cell count"
+            assert tokens_nbors.shape[0] % denom == 0, (
+                "tokens_nbors shape does not align with healpix cell count"
+            )
+            tokens_per_cell = tokens_nbors.shape[0] // denom
+            tokens_nbors_tokens_per_cell = tokens_per_cell
+            tokens_nbors_cells = tokens_nbors.view(
+                batch_size * self.num_healpix_cells, tokens_per_cell, tokens_nbors.shape[-1]
+            )
 
         # pair with tokens from assimilation engine to obtain target tokens
         for stream_name in self.stream_names:
@@ -702,19 +720,59 @@ class Model(torch.nn.Module):
                         for sample in batch.samples
                     ]
                 )
-                tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
+                tcs_lens_full = torch.cat(
+                    [torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls]
+                )
+                tcs_lens = tcs_lens_full
+                tokens_nbors_kv = tokens_nbors
+                tokens_nbors_lens_kv = tokens_nbors_lens
+                if target_hl > self.healpix_level:
+                    tcs_lens_cells = tcs_lens_full[1:]
+                    keep_mask = tcs_lens_cells > 0
+                    assert torch.any(keep_mask), "no target cells with coordinates"
+                    keep_idx = torch.nonzero(keep_mask, as_tuple=False).flatten()
+                    tcs_lens = torch.cat([tcs_lens_full[:1], tcs_lens_cells[keep_idx]])
+
+                    cells_per_sample = (
+                        tcs_lens_cells.numel() // batch_size if batch_size > 0 else 0
+                    )
+                    assert tcs_lens_cells.numel() % batch_size == 0, (
+                        "target lens not divisible by batch size"
+                    )
+                    assert cells_per_sample > 0, "invalid target cell count"
+                    sample_idx = keep_idx // cells_per_sample
+                    cell_idx = keep_idx % cells_per_sample
+                    children_per_parent = 4 ** (target_hl - self.healpix_level)
+                    parent_idx = sample_idx * self.num_healpix_cells + (
+                        cell_idx // children_per_parent
+                    )
+
+                    tokens_nbors_kv = tokens_nbors_cells[parent_idx].reshape(
+                        -1, tokens_nbors_cells.shape[-1]
+                    )
+                    tokens_nbors_lens_kv = torch.cat(
+                        [
+                            tokens_nbors_lens[:1],
+                            torch.full(
+                                (parent_idx.shape[0],),
+                                tokens_nbors_tokens_per_cell,
+                                dtype=tokens_nbors_lens.dtype,
+                                device=tokens_nbors_lens.device,
+                            ),
+                        ]
+                    )
 
                 if self.cf.decoder_type == "Linear":
                     pred = self.target_token_engines[stream_name](
                         tc_tokens,
                         tokens.reshape(-1, s[-1]),  # collapse the batch and token dimensions
-                        tcs_lens,
+                        tcs_lens_full,
                     ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
                 else:
                     tc_tokens = self.target_token_engines[stream_name](
-                        latent=tokens_nbors,
+                        latent=tokens_nbors_kv,
                         output=tc_tokens,
-                        latent_lens=tokens_nbors_lens,
+                        latent_lens=tokens_nbors_lens_kv,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
                     )

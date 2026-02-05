@@ -19,7 +19,7 @@
 
 evaluation:
   metrics  : ["rmse", "mae"]
-  regions: ["global", "nhem"]
+  regions: ["nhem"]
   summary_plots : true
   ratio_plots : false
   heat_maps : false
@@ -64,16 +64,29 @@ default_streams:
       plot_animations: true
       
 run_ids :
-  ar40mckx:
-    label: "pretrained model ar40mckx"
+  xlv9hzt3:
+    label: "baseline"
     results_base_dir : "./results/"
-    #NEW: if "streams" is not specified, the default streams are used
+    mini_epoch: 0
+    rank: 0
+    streams:
+      CERRA:
+        channels: ['2t', 'msl', '10si', 'skt', 't_500', 't_850', 'u_500', 'v_500', 'z_500']
+        evaluation:
+          forecast_step: "all"
+          sample: "all"
+          ensemble: "all" #supported: "all", "mean", [0,1,2]
+        # plotting:
+        #   sample: [1, 5, 10, 15, 20, 25, 30, 31]
+        #   plot_maps: true
+        #   plot_target: true
+        #   plot_histograms: true
+        #   plot_animations: true
     
-      
-  c8g5katp:
-    label: "2 steps window"
-    results_base_dir : "./results/"
-    #NEW: if "streams" is not specified, the default streams are used
+  # c8g5katp:
+  #   label: "2 steps window"
+  #   results_base_dir : "./results/"
+  #   #NEW: if \"streams\" is not specified, the default streams are used
   
   ###############################
 

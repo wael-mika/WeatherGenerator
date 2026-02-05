@@ -56,7 +56,8 @@ class StreamData:
         idx: int,
         input_steps: int,
         output_steps: int,
-        healpix_cells: int,
+        healpix_cells_source: int,
+        healpix_cells_target: int | None = None,
     ) -> None:
         """
         StreamData object
@@ -70,8 +71,10 @@ class StreamData:
         output_steps : int
             Number of output steps
             Note -- Last input step and first output step always overlap.
-        healpix_cells : int
+        healpix_cells_source : int
             Number of healpix cells for source
+        healpix_cells_target : int, optional
+            Number of healpix cells for target (defaults to source count)
 
         Returns
         -------
@@ -82,7 +85,11 @@ class StreamData:
 
         self.input_steps = input_steps
         self.output_steps = output_steps
-        self.healpix_cells = healpix_cells
+        self.healpix_cells_source = healpix_cells_source
+        self.healpix_cells_target = (
+            healpix_cells_target if healpix_cells_target is not None else healpix_cells_source
+        )
+        self.healpix_cells = healpix_cells_source
 
         self.source_is_spoof = False
         self.target_is_spoof = False
@@ -94,7 +101,8 @@ class StreamData:
         self.target_times_raw = [np.array([], dtype="datetime64[ns]") for _ in range(output_steps)]
         # this is not directly used but to precompute index in compute_idxs_predict()
         self.target_coords_lens = [
-            torch.tensor([0 for _ in range(self.healpix_cells)]) for _ in range(output_steps)
+            torch.tensor([0 for _ in range(self.healpix_cells_target)])
+            for _ in range(output_steps)
         ]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
         self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]

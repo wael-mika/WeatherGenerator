@@ -111,7 +111,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.world_size = cf.world_size
 
         self.healpix_level: int = cf.healpix_level
+        self.healpix_level_target: int = getattr(cf, "healpix_level_target", None)
+        if self.healpix_level_target is None:
+            self.healpix_level_target = cf.healpix_level
         self.num_healpix_cells: int = 12 * 4**self.healpix_level
+        self.num_healpix_cells_target: int = 12 * 4**self.healpix_level_target
 
         self.mode_cfg = mode_cfg
         self.samples_per_mini_epoch = mode_cfg.samples_per_mini_epoch
@@ -279,7 +283,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             else cf.data_loading.rng_seed * 97
         )
 
-        self.tokenizer = TokenizerMasking(cf.healpix_level, Masker(cf.healpix_level, stage))
+        self.tokenizer = TokenizerMasking(
+            cf.healpix_level,
+            Masker(cf.healpix_level, stage),
+            self.healpix_level_target,
+        )
 
         self.mini_epoch = 0
 
@@ -531,6 +539,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             num_steps_input,
             num_output_steps,
             self.num_healpix_cells,
+            self.num_healpix_cells_target,
         )
 
         stream_data = self._build_stream_data_input(
@@ -602,7 +611,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     f"fstep={timestep_idx}, spoofing. time_win={time_win}"
                 )
                 rdata = spoof(
-                    self.healpix_level,
+                    self.healpix_level_target,
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
                     stream_ds[0].mean[stream_ds[0].target_idx],
@@ -612,6 +621,20 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             output_data += [rdata]
 
         return (input_data, output_data)
+
+    def _expand_mask_to_target_cells(self, mask):
+        if self.healpix_level_target <= self.healpix_level:
+            return mask
+
+        num_cells = mask.shape[0] if hasattr(mask, "shape") else len(mask)
+        if num_cells == self.num_healpix_cells_target:
+            return mask
+
+        children_per_parent = 4 ** (self.healpix_level_target - self.healpix_level)
+        if isinstance(mask, torch.Tensor):
+            return mask.repeat_interleave(children_per_parent)
+
+        return np.repeat(np.asarray(mask), children_per_parent)
 
     def _get_source_target_masks(self, training_mode):
         """
@@ -627,6 +650,14 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 self.mode_cfg,
                 stream_info,
             )
+            if self.healpix_level_target > self.healpix_level:
+                target_masks, source_masks, source_to_target = masks[stream_info["name"]]
+                target_masks.masks = [
+                    self._expand_mask_to_target_cells(mask) for mask in target_masks.masks
+                ]
+                for meta, mask in zip(target_masks.metadata, target_masks.masks, strict=True):
+                    meta.mask = mask
+                masks[stream_info["name"]] = (target_masks, source_masks, source_to_target)
             # identical for all streams
             num_target_samples = len(masks[stream_info["name"]][0])
             num_source_samples = len(masks[stream_info["name"]][1])

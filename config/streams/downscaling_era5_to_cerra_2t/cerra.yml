@@ -10,6 +10,7 @@
 # CERRA stream configured as OUTPUT ONLY for ERA5 -> CERRA downscaling
 # High-resolution (5.5km) regional reanalysis over Europe
 # All input/source capabilities are disabled - ERA5 provides the inputs
+# Single-variable target (2t) for higher-resolution focus
 
 CERRA:
   type: anemoi
@@ -19,8 +20,10 @@ CERRA:
   # Source configuration - empty list = no source (output-only stream)
   source: []
 
-  # Target configuration - single variable (2m temperature)
+  # Target configuration - single variable for higher-resolution learning
   target: ['2t']
+  target_exclude: ['mn2t', 'mx2t']  # avoid substring match expansion
+  geoinfo: ['orog', 'lsm']
 
   # NOTE: Do not use frequency parameter - causes index mismatch with zarr data
   # The training time windowing handles temporal alignment
@@ -30,11 +33,11 @@ CERRA:
   masking_rate: 0.6
   masking_rate_none: 0.05
 
-  # Larger token size + sampling to reduce memory for high-res targets
-  token_size: 1024
+  # Token size tuned for higher-resolution targets
+  token_size: 512
   tokenize_spacetime: True
-  sampling_rate_target: 0.02
-  max_num_targets: 50000
+  max_num_targets: 30000  # Cap total target points for memory
+  sampling_rate_target: 0.25
 
   embed:
     net: transformer

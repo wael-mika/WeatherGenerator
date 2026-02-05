@@ -16,9 +16,9 @@ ERA5:
   filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
   stream_id: 0
 
-  # Source configuration - use subset of meteorological fields for memory-efficient testing
-  # Key surface and pressure-level variables
-  source: ['2t', 'msl', '10u', '10v', 't_500', 't_850', 'u_500', 'v_500', 'z_500', 'q_500']
+  # Source configuration - minimal set for memory efficiency
+  # Using 2m temperature plus 10m wind components (u/v)
+  source: ['2t', '10u', '10v']
 
   # Target configuration - empty list = no targets (input-only stream)
   target: []

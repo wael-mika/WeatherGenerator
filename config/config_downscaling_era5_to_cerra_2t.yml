@@ -20,17 +20,17 @@
 # - Reduced model dimensions compared to full pretraining
 # - Small batch size due to high-resolution output grid
 
-streams_directory: "./config/streams/downscaling_era5_to_cerra"
+streams_directory: "./config/streams/downscaling_era5_to_cerra_2t"
 
 # Embedding configuration
 embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-# Local autoencoder - aggressively reduced for memory efficiency
+# Local autoencoder
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
 ae_local_dim_embed: 128
-ae_local_num_blocks: 2
+ae_local_num_blocks: 4
 ae_local_num_heads: 8
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
@@ -43,7 +43,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-# Global autoencoder - reduced for memory efficiency
+# Global autoencoder
 # Note: dim_embed / num_heads must be a power of 2 for flex_attention
 ae_global_dim_embed: 256
 ae_global_num_blocks: 2
@@ -57,7 +57,7 @@ ae_global_mlp_hidden_factor: 2
 # Decoder configuration
 decoder_type: PerceiverIOCoordConditioning
 pred_adapter_kv: False
-pred_self_attention: True
+pred_self_attention: False
 pred_dyadic_dims: False
 pred_mlp_adaln: True
 num_class_tokens: 1
@@ -78,7 +78,7 @@ healpix_level_target: 7
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
-compile_flex_attention: True
+compile_flex_attention: False
 with_fsdp: False
 attention_dtype: bf16
 mixed_precision_dtype: bf16
@@ -89,16 +89,20 @@ norm_type: "LayerNorm"
 # Run settings
 general:
   multiprocessing_method: "spawn"
-  desc: "Downscaling: ERA5 (2t,msl,10u,10v,t_500,t_850,u_500,v_500,z_500,q_500) -> CERRA (2t)"
+  desc: "Downscaling: ERA5 (2t,10u,10v) -> CERRA (2t) with CERRA geoinfo (orog,lsm)"
 
-# Data loading - reduced for memory efficiency
+# Data loading
+# Reduced for memory efficiency
+# Note: can be overridden via CLI
+# Example: --options data_loading.num_workers=4
+
 data_loading:
   num_workers: 2
 
 # Training config
 training_config:
   training_mode: ["masking"]
-  num_mini_epochs: 64
+  num_mini_epochs: 24
   samples_per_mini_epoch: 512
   shuffle: True
 
@@ -151,7 +155,7 @@ training_config:
       masking_strategy: "random"
       num_samples: 1
       masking_strategy_config:
-        rate: 0.6
+        rate: 0.2
         rate_sampling: True
 
   forecast:
