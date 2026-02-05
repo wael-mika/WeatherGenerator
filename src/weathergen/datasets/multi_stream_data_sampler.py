@@ -17,13 +17,16 @@ from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi_transform import DataReaderAnemoiTransform
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     TimeWindowHandler,
     TIndex,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_radklim import DataReaderRadklim
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -154,8 +157,21 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         dataset = DataReaderObs
                     case "anemoi":
                         dataset = DataReaderAnemoi
+                        datapath = cf.data_path_anemoi
+                    case "anemoi_transform":
+                        # Unified reader with configurable transform_type in stream_info
+                        # Supports: "arcsinh", "log10", "log_eps", "none"
+                        dataset = DataReaderAnemoiTransform
+                        datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
+                        datapath = cf.data_path_fesom
+                    case "imerg":
+                        dataset = DataReaderImerg
+                        datapath = cf.data_path_imerg
+                    case "radklim":
+                        dataset = DataReaderRadklim
+                        datapath = cf.data_path_radklim
                     case type_name:
                         dataset = get_extra_reader(type_name)
                         if dataset is None:
@@ -165,7 +181,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                # Handle empty filename: use datapath directly
+                if str(fname) in ('', '.'):
+                    filename = datapath
+                elif fname.exists():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
@@ -560,10 +579,14 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             if rdata.is_empty() and self._stage == TRAIN:
                 # work around for https://github.com/pytorch/pytorch/issues/158719
                 # create non-empty mean data instead of empty tensor
-                time_win = self.time_window_handler.window(timestep_idx)
+                time_win_target = self.time_window_handler.window(timestep_idx)
+                logger.warning(
+                    f"Stream fstep {timestep_idx}: "
+                    f"target data is EMPTY, spoofing. time_win={time_win_target}"
+                )
                 rdata = spoof(
                     self.healpix_level,
-                    time_win.start,
+                    time_win_target.start,
                     stream_ds[0].get_geoinfo_size(),
                     stream_ds[0].mean[stream_ds[0].source_idx],
                 )
