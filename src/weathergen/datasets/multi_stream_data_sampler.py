@@ -19,13 +19,16 @@ from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi_transform import DataReaderAnemoiTransform
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     TimeWindowHandler,
     TIndex,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_radklim import DataReaderRadklim
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -206,28 +209,59 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 "stage": self._stage,
             }
             dataset: type[AnyDataReader] | None = None
+            datapath: pathlib.Path | None = None
+            datapath_cfg: pathlib.Path | str | None = None
             match stream_info["type"]:
                 case "obs":
                     dataset = DataReaderObs
+                    datapath_cfg = cf.get("data_path_obs", None)
                 case "anemoi":
                     dataset = DataReaderAnemoi
+                    datapath_cfg = cf.get("data_path_anemoi", None)
+                case "anemoi_transform":
+                    dataset = DataReaderAnemoiTransform
+                    datapath_cfg = cf.get("data_path_anemoi", None)
                 case "fesom":
                     dataset = DataReaderFesom
+                    datapath_cfg = cf.get("data_path_fesom", None)
+                case "imerg":
+                    dataset = DataReaderImerg
+                    datapath_cfg = cf.get("data_path_imerg", None)
+                case "radklim":
+                    dataset = DataReaderRadklim
+                    datapath_cfg = cf.get("data_path_radklim", None)
                 case type_name:
                     dataset = get_extra_reader(type_name)
                     if dataset is None:
                         msg = f"Unsupported stream type {stream_info['type']}"
                         f"for stream name '{stream_info['name']}'."
                         raise ValueError(msg)
+                    datapath_cfg = None
+
+            if datapath_cfg is not None:
+                datapath = pathlib.Path(datapath_cfg)
+
+            search_paths = [pathlib.Path(path) for path in (cf.get("data_paths", []) or [])]
+            if datapath is not None and datapath not in search_paths:
+                search_paths = [datapath, *search_paths]
 
             for fname in stream_info["filenames"]:
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                # Handle empty filename: use datapath directly
+                if str(fname) in ("", "."):
+                    if datapath is None:
+                        msg = (
+                            f"Empty filename requires a configured data path for "
+                            f"{stream_info['type']} stream '{stream_info['name']}'."
+                        )
+                        raise ValueError(msg)
+                    filename = datapath
+                elif fname.exists():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
-                    filenames = [pathlib.Path(path) / fname for path in cf.data_paths]
+                    filenames = [path / fname for path in search_paths]
 
                     if not any(filename.exists() for filename in filenames):  # see above
                         msg = (
@@ -238,7 +272,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
                     # The same dataset can exist on different locations in the filesystem,
                     # so we need to choose here.
-                    filename = filenames[0]
+                    filename = next(filename for filename in filenames if filename.exists())
 
                 ds_type = stream_info["type"]
                 if is_root():
@@ -576,10 +610,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             if rdata.is_empty():
                 # work around for https://github.com/pytorch/pytorch/issues/158719
                 # create non-empty mean data instead of empty tensor
-                time_win = self.time_window_handler.window(step_forecast_dt)
+                time_win_target = self.time_window_handler.window(step_forecast_dt)
+                logger.warning(
+                    f"Stream fstep {timestep_idx}: "
+                    f"target data is EMPTY, spoofing. time_win={time_win_target}"
+                )
                 rdata = spoof(
                     self.healpix_level,
-                    time_win.start,
+                    time_win_target.start,
                     stream_ds[0].get_geoinfo_size(),
                     len(stream_ds[0].mean[stream_ds[0].target_idx]),
                 )
