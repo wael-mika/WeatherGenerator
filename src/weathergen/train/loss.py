@@ -406,6 +406,112 @@ def quantile_upper(
     return loss, total_loss
 
 
+def centroid_shift(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    coords: torch.Tensor | None,
+):
+    """
+    Centroid shift loss based on soft exceedance weights at specified thresholds.
+
+    Config options (via loss_config.centroid_shift):
+        thresholds_mm: [20.0] - thresholds in mm (transformed to model space)
+        threshold_weights: [1.0] - optional weights per threshold
+        temperature: 1.0 - sigmoid temperature for soft exceedance
+        min_points: 5 - minimum hard exceedances required for both target/pred
+        scale_km: 1000.0 - divide distance (km) by this to normalize magnitude
+        earth_radius_km: 6371.0 - radius used for distance
+    """
+    cfg = _get_loss_cfg("centroid_shift")
+    thresholds = _get_thresholds_tensor(target, cfg)
+    temperature = float(cfg.get("temperature", 1.0))
+    min_points = int(cfg.get("min_points", 5))
+    scale_km = float(cfg.get("scale_km", 1000.0))
+    earth_r = float(cfg.get("earth_radius_km", 6371.0))
+
+    threshold_weights_list = cfg.get("threshold_weights", None)
+    if threshold_weights_list is not None:
+        threshold_weights = torch.tensor(
+            threshold_weights_list, device=target.device, dtype=target.dtype
+        )
+    else:
+        threshold_weights = None
+
+    if coords is None or coords.numel() == 0:
+        loss_chs = torch.zeros(target.shape[-1], device=target.device, dtype=target.dtype)
+        loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+        return loss, loss_chs
+
+    # coords are [num_points, 2] => lat, lon in degrees
+    coords = coords.to(device=target.device, dtype=target.dtype)
+    lat = coords[:, 0] * np.pi / 180.0
+    lon = coords[:, 1] * np.pi / 180.0
+    x = torch.cos(lat) * torch.cos(lon)
+    y = torch.cos(lat) * torch.sin(lon)
+    z = torch.sin(lat)
+    vec = torch.stack([x, y, z], dim=-1)  # [N, 3]
+
+    mask_nan = ~torch.isnan(target)
+    pred_mean = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    target_filled = torch.where(mask_nan, target, 0)
+    pred_filled = torch.where(mask_nan, pred_mean, 0)
+
+    n_ch = target.shape[-1]
+    loss_chs = torch.zeros(n_ch, device=target.device, dtype=target.dtype)
+    weight_chs = torch.zeros(n_ch, device=target.device, dtype=target.dtype)
+
+    for i, thr in enumerate(thresholds):
+        w_thr = threshold_weights[i].item() if threshold_weights is not None else 1.0
+        for c in range(n_ch):
+            t = target_filled[:, c]
+            p = pred_filled[:, c]
+            valid = mask_nan[:, c]
+
+            if valid.sum() < min_points:
+                continue
+
+            # Hard exceedance counts for stability
+            if (t[valid] >= thr).sum() < min_points or (p[valid] >= thr).sum() < min_points:
+                continue
+
+            wt = torch.sigmoid((t - thr) / temperature) * valid
+            wp = torch.sigmoid((p - thr) / temperature) * valid
+
+            if weights_points is not None:
+                wt = wt * weights_points
+                wp = wp * weights_points
+
+            sum_wt = wt.sum()
+            sum_wp = wp.sum()
+            if sum_wt <= 0 or sum_wp <= 0:
+                continue
+
+            ct = (wt[:, None] * vec).sum(0) / (sum_wt + 1e-6)
+            cp = (wp[:, None] * vec).sum(0) / (sum_wp + 1e-6)
+
+            ct = ct / (ct.norm() + 1e-6)
+            cp = cp / (cp.norm() + 1e-6)
+
+            dot = (ct * cp).sum().clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            angle = torch.acos(dot)
+            dist = earth_r * angle / scale_km
+
+            loss_chs[c] += w_thr * dist
+            weight_chs[c] += w_thr
+
+    weight_chs = torch.where(weight_chs > 0, weight_chs, torch.ones_like(weight_chs))
+    loss_chs = loss_chs / weight_chs
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+
+    return loss, loss_chs
+
+
+# Signals to the loss calculator that coords are required.
+centroid_shift.requires_coords = True
+
+
 def cosine_latitude(stream_data, forecast_offset, fstep, min_value=1e-3, max_value=1.0):
     latitudes_radian = stream_data.target_coords_raw[forecast_offset + fstep][:, 0] * np.pi / 180
     return (max_value - min_value) * np.cos(latitudes_radian) + min_value

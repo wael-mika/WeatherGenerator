@@ -121,8 +121,12 @@ loss_fcts:
     - "quantile_upper"
     - 0.03
   -
+    - "centroid_shift"
+    - 0.05
+  -
     - "mse"
     - 0.2
+
 loss_fcts_val:
   -
     - "mse_intensity_weighted"
@@ -134,8 +138,12 @@ loss_fcts_val:
     - "quantile_upper"
     - 0.03
   -
+    - "centroid_shift"
+    - 0.05
+  -
     - "mse"
     - 0.2
+
 loss_config:
   intensity_weighted_mse:
     mode: "log1p"        # "log1p", "power", "linear"
@@ -157,6 +165,19 @@ loss_config:
   quantile_upper:
     quantiles: [0.9, 0.95, 0.99]  # Upper quantiles to optimize
     weights: [1.0, 1.3, 1.6]      # Higher weight for more extreme quantiles
+
+  centroid_shift:
+    thresholds_mm: [20.0]
+    threshold_weights: [1.0]
+    temperature: 2.0
+    min_points: 5
+    scale_km: 1000.0
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
 
 batch_size_per_gpu: 1
 batch_size_validation_per_gpu: 1

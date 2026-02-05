@@ -150,6 +150,7 @@ class LossCalculator:
         substep_masks: list[torch.Tensor],
         weights_channels: torch.Tensor,
         weights_locations: torch.Tensor,
+        coords_raw: torch.Tensor | None,
     ):
         """
         Compute loss for given loss function
@@ -162,9 +163,15 @@ class LossCalculator:
         for mask_t in substep_masks:
             assert mask_t.sum() == len(weights_locations) if weights_locations is not None else True
 
-            loss, loss_chs = loss_fct(
-                target[mask_t], pred[:, mask_t], weights_channels, weights_locations
-            )
+            if getattr(loss_fct, "requires_coords", False):
+                coords_sub = coords_raw[mask_t] if coords_raw is not None else None
+                loss, loss_chs = loss_fct(
+                    target[mask_t], pred[:, mask_t], weights_channels, weights_locations, coords_sub
+                )
+            else:
+                loss, loss_chs = loss_fct(
+                    target[mask_t], pred[:, mask_t], weights_channels, weights_locations
+                )
 
             # accumulate loss
             loss_lfct = loss_lfct + loss
@@ -289,6 +296,13 @@ class LossCalculator:
                 # get masks for sub-time steps
                 substep_masks = self._get_substep_masks(stream_info, fstep, stream_data)
 
+                # get raw coords for location-aware losses
+                coords_raw = stream_data.target_coords_raw[self.cf.forecast_offset + fstep]
+                if isinstance(coords_raw, np.ndarray):
+                    coords_raw = torch.from_numpy(coords_raw)
+                if isinstance(coords_raw, torch.Tensor) and coords_raw.device != target.device:
+                    coords_raw = coords_raw.to(target.device, non_blocking=True)
+
                 # accumulate loss from different loss functions
                 loss_fstep = torch.tensor(0.0, device=self.device, requires_grad=True)
                 ctr_loss_fcts = 0
@@ -302,6 +316,7 @@ class LossCalculator:
                         substep_masks,
                         weights_channels,
                         weights_locations,
+                        coords_raw,
                     )
                     losses_all[stream_info.name][:, i_lfct] += spoof_weight * loss_lfct_chs
 
