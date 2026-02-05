@@ -1,0 +1,60 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+IMERG:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+  stream_id: 0
+  source: ['precipitation']
+  target: ['precipitation']
+  source_exclude: []
+  target_exclude: []
+  frequency: "00:30:00"  # 30 minutes
+
+  # Spatial filtering to reduce memory usage (CRITICAL for IMERG's 11.3 TB dataset!)
+  # Format: [lat_min, lat_max, lon_min, lon_max]
+
+  # Option 1: Europe region (recommended)
+  spatial_bbox: [35.0, 70.0, -10.0, 40.0]  # ~95% reduction (6.48M → ~325K points)
+
+  # Option 2: Germany region
+  # spatial_bbox: [47.0, 55.0, 5.0, 15.0]  # ~99% reduction (6.48M → ~65K points)
+
+  # Option 3: Full globe (WARNING: Very high memory usage!)
+  # spatial_bbox: null  # 6.48M points - requires ~100+ GB RAM
+
+  # Additional subsampling via spatial stride
+  spatial_stride: 1  # Further reduces by 75% (every 2nd point)
+
+  # Combined effect with Europe bbox + stride=2:
+  # 6.48M → 325K → 81K points (~98.7% total reduction)
+
+  loss_weight: 1.0
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 1024  # Increased from 64 for memory optimization
+  tokenize_spacetime: True
+  max_num_targets: -1
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'  # token or obs_value
+    num_layers: 2
+    num_heads: 4
+    # sampling_rate: 0.2
+  pred_head:
+    ens_size: 1
+    num_layers: 1

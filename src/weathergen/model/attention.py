@@ -31,6 +31,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        compile_flex_attention=True,
     ):
         super(MultiSelfAttentionHeadVarlen, self).__init__()
 
@@ -119,6 +120,7 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
         softcap=0.0,
         norm_eps=1e-5,
         attention_dtype=torch.bfloat16,
+        compile_flex_attention=True,
     ):
         super(MultiSelfAttentionHeadVarlenFlex, self).__init__()
 
@@ -157,7 +159,9 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
 
             return flex_attention(qs, ks, vs, score_mod=sparsity_mask)
 
-        self.compiled_flex_attention = torch.compile(att, dynamic=False)
+        self.flex_attention = (
+            torch.compile(att, dynamic=False) if compile_flex_attention else att
+        )
 
     def forward(self, x, x_lens=None):
         if self.with_residual:
@@ -171,7 +175,7 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype).permute([1, 2, 0, 3])
         vs = self.proj_heads_v(x).reshape(s).permute([1, 2, 0, 3])
 
-        outs = self.compiled_flex_attention(qs, ks, vs).transpose(1, 2).squeeze()
+        outs = self.flex_attention(qs, ks, vs).transpose(1, 2).squeeze()
 
         out = self.dropout(self.proj_out(outs.flatten(-2, -1)))
         if self.with_residual:
@@ -240,7 +244,11 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
             mask_block_local, B=None, H=None, Q_LEN=qkv_len, KV_LEN=qkv_len
         )
         # compile for efficiency
-        self.flex_attention = torch.compile(flex_attention, dynamic=False)
+        self.flex_attention = (
+            torch.compile(flex_attention, dynamic=False)
+            if compile_flex_attention
+            else flex_attention
+        )
 
     def forward(self, x, ada_ln_aux=None):
         if self.with_residual:

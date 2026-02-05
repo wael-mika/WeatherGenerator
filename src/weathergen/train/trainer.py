@@ -463,24 +463,36 @@ class Trainer(TrainerBase):
 
             # backward pass
             self.optimizer.zero_grad()
-            self.grad_scaler.scale(loss).backward()
-
-            # gradient clipping
-            self.grad_scaler.unscale_(self.optimizer)
-            total_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
+            loss_has_grad = loss.grad_fn is not None
+            loss_is_finite = torch.isfinite(loss).item()
+            logger.debug(
+                f"Batch {bidx}: loss={loss.item():.6f}, grad_fn={loss.grad_fn}, is_finite={loss_is_finite}"
             )
+            if not loss_has_grad or not loss_is_finite:
+                logger.warning(
+                    f"Batch {bidx}: Skipping backward/step. grad_fn={loss.grad_fn}, "
+                    f"is_finite={loss_is_finite}"
+                )
+                total_norm = torch.tensor(0.0)
+            else:
+                self.grad_scaler.scale(loss).backward()
 
-            # log gradient norms
-            if self.log_grad_norms:
-                if bidx % self.train_log_freq.terminal == 0:
-                    self.last_grad_norm = self._get_tensor_item(total_norm)
-                if bidx % self.train_log_freq.metrics == 0:
-                    self._log_instant_grad_norms(TRAIN)
+                # gradient clipping
+                self.grad_scaler.unscale_(self.optimizer)
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
+                )
 
-            # optimizer step
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+                # log gradient norms
+                if self.log_grad_norms:
+                    if bidx % self.train_log_freq.terminal == 0:
+                        self.last_grad_norm = self._get_tensor_item(total_norm)
+                    if bidx % self.train_log_freq.metrics == 0:
+                        self._log_instant_grad_norms(TRAIN)
+
+                # optimizer step
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
 
             # update learning rate
             self.lr_scheduler.step()

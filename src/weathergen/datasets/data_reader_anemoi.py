@@ -275,9 +275,11 @@ class DataReaderAnemoi(DataReaderTimestep):
 
         """
 
-        geoinfo_channels = self.stream_info.get("geoinfo_channels", [])
+        geoinfo_channels = self.stream_info.get("geoinfo", None)
+        if geoinfo_channels is None:
+            geoinfo_channels = self.stream_info.get("geoinfo_channels", [])
 
-        if len(geoinfo_channels) == 0:
+        if not geoinfo_channels:
             return np.array([], dtype=np.int64)
 
         # Select channels that match the geoinfo list (exact match required)

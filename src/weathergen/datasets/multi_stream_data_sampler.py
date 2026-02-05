@@ -17,13 +17,16 @@ from weathergen.common.config import Config
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi_transform import DataReaderAnemoiTransform
 from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     TimeWindowHandler,
     TIndex,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_radklim import DataReaderRadklim
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -53,6 +56,7 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
     for ds in stream_datasets:
         # number of points to sub-sample
         num_subset = -1
+        sampling_rate_target = None
 
         if type == "source":
             get_reader_data = ds.get_source
@@ -62,12 +66,27 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
             get_reader_data = ds.get_target
             normalize_channels = ds.normalize_target_channels
             num_subset = ds.stream_info.get("max_num_targets", -1)
+            sampling_rate_target = ds.stream_info.get("sampling_rate_target", None)
             shuffle = ds.stream_info.get("shuffle_target", False)
         else:
             assert False, "invalid value for argument `type`"
 
         # get source (of potentially multi-step length)
-        rdata = get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords()
+        rdata = get_reader_data(idx)
+        if sampling_rate_target is not None and type == "target" and rdata.coords.shape[0] > 0:
+            if sampling_rate_target <= 0:
+                num_subset_rate = 0
+            elif sampling_rate_target < 1:
+                num_subset_rate = int(np.floor(rdata.coords.shape[0] * sampling_rate_target))
+            else:
+                num_subset_rate = None
+            if num_subset_rate is not None:
+                if num_subset < 0:
+                    num_subset = num_subset_rate
+                else:
+                    num_subset = min(num_subset, num_subset_rate)
+
+        rdata = rdata.shuffle(rng, shuffle, num_subset).remove_nan_coords()
         rdata.data = normalize_channels(rdata.data)
         rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
         rdatas += [rdata]
@@ -156,9 +175,20 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "anemoi":
                         dataset = DataReaderAnemoi
                         datapath = cf.data_path_anemoi
+                    case "anemoi_transform":
+                        # Unified reader with configurable transform_type in stream_info
+                        # Supports: "arcsinh", "log10", "log_eps", "none"
+                        dataset = DataReaderAnemoiTransform
+                        datapath = cf.data_path_anemoi
                     case "fesom":
                         dataset = DataReaderFesom
                         datapath = cf.data_path_fesom
+                    case "imerg":
+                        dataset = DataReaderImerg
+                        datapath = cf.data_path_imerg
+                    case "radklim":
+                        dataset = DataReaderRadklim
+                        datapath = cf.data_path_radklim
                     case type_name:
                         reader_entry = get_extra_reader(type_name, cf)
                         if reader_entry is not None:
@@ -172,7 +202,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 datapath = pathlib.Path(datapath)
                 fname = pathlib.Path(fname)
                 # dont check if file exists since zarr stores might be directories
-                if fname.exists():
+                # Handle empty filename: use datapath directly
+                if str(fname) in ("", "."):
+                    filename = datapath
+                elif fname.exists():
                     # check if fname is a valid path to allow for simple overwriting
                     filename = fname
                 else:
@@ -563,12 +596,16 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             if rdata.is_empty() and self._stage == TRAIN:
                 # work around for https://github.com/pytorch/pytorch/issues/158719
                 # create non-empty mean data instead of empty tensor
-                time_win = self.time_window_handler.window(timestep_idx)
+                time_win = self.time_window_handler.window(step_forecast_dt)
+                logger.warning(
+                    f"Target data is EMPTY for stream {stream_ds[0].stream_info['name']} "
+                    f"fstep={timestep_idx}, spoofing. time_win={time_win}"
+                )
                 rdata = spoof(
                     self.healpix_level,
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
-                    stream_ds[0].mean[stream_ds[0].source_idx],
+                    stream_ds[0].mean[stream_ds[0].target_idx],
                 )
                 rdata.is_spoof = True
 

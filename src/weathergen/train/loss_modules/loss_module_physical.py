@@ -331,6 +331,16 @@ class LossPhysical(LossModuleBase):
 
             ctr_streams += 1 if ctr_timesteps > 0 else 0
 
+        if ctr_streams == 0:
+            _logger.warning(
+                "No valid target streams in batch - returning zero loss (no grad)."
+            )
+            return LossValues(
+                loss=torch.tensor(0.0, device=self.device, requires_grad=False),
+                losses_all=defaultdict(dict),
+                stddev_all=None,
+            )
+
         # normalize by all targets and forecast steps that were non-empty
         # (with each having an expected loss of 1 for an uninitalized neural net)
         if loss == 0.0:
