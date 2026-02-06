@@ -150,6 +150,8 @@ def init_model_and_shard(
             logger.info(f"Continuing run with id={run_id_contd} at mini_epoch {mini_epoch_contd}.")
         model = load_model(cf, model, device, run_id_contd, mini_epoch_contd)
         model_for_init = model.module if hasattr(model, "module") else model
+        # MoE position IDs are non-persistent buffers (not saved in the
+        # checkpoint), so they must be recomputed after loading.
         if hasattr(model_for_init, "initialize_moe_position_ids"):
             model_for_init.initialize_moe_position_ids()
     elif cf.get("load_chkpt", {}).get("run_id", None):
@@ -159,6 +161,8 @@ def init_model_and_shard(
             logger.info(f"Loading checkpoint from id={run_id} at mini_epoch {mini_epoch}.")
         model = load_model(cf, model, device, run_id, mini_epoch)
         model_for_init = model.module if hasattr(model, "module") else model
+        # MoE position IDs are non-persistent buffers (not saved in the
+        # checkpoint), so they must be recomputed after loading.
         if hasattr(model_for_init, "initialize_moe_position_ids"):
             model_for_init.initialize_moe_position_ids()
     else:
@@ -168,6 +172,10 @@ def init_model_and_shard(
                 model.reset_parameters()
 
         model_for_init = model.module if hasattr(model, "module") else model
+        # Fresh run: initialise MoE spatial router embeddings from HEALPix
+        # coordinates *and* compute default position-ID buffers.  Both are
+        # handled by initialize_spatial_routers (which calls
+        # initialize_moe_position_ids internally).
         if hasattr(model_for_init, "initialize_spatial_routers"):
             model_for_init.initialize_spatial_routers()
 

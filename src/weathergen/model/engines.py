@@ -34,19 +34,41 @@ from weathergen.utils.utils import get_dtype
 
 
 def _moe_forward_wrapper_no_aux(block, x, position_ids=None, token_mask=None):
-    """Wrapper for checkpointing MoE blocks that return (output, aux_loss)."""
+    """Checkpoint-compatible wrapper for :class:`MoEBlock` without aux input.
+
+    :func:`torch.utils.checkpoint.checkpoint` expects a function whose return
+    value is a single tensor (or tuple of tensors to be saved).  MoEBlock
+    returns ``(output, aux_loss)``; we discard *aux_loss* here because it is
+    stored on the block as ``last_aux_loss`` and collected separately by the
+    trainer after the forward pass.
+    """
     output, _ = block(x, position_ids=position_ids, token_mask=token_mask)
     return output
 
 
 def _moe_forward_wrapper_with_aux(block, x, aux, position_ids=None, token_mask=None):
-    """Wrapper for checkpointing MoE blocks with auxiliary conditioning."""
+    """Checkpoint-compatible wrapper for :class:`MoEBlock` with aux conditioning.
+
+    Same rationale as :func:`_moe_forward_wrapper_no_aux` — the aux loss is
+    retrieved from ``block.last_aux_loss`` by the trainer, not from the return
+    value.
+    """
     output, _ = block(x, aux, position_ids=position_ids, token_mask=token_mask)
     return output
 
 
 @dataclasses.dataclass
 class MoEBlockConfig:
+    """Typed container for engine-specific MoE hyper-parameters.
+
+    Built by :func:`_get_moe_block_config` from the flat YAML config keys
+    (``ae_global_moe_*`` or ``fe_moe_*``) and passed to
+    :class:`~weathergen.model.layers.MoEBlock` at construction time.
+
+    See ``docs/moe_parameters_and_debugging.md`` for the meaning of each
+    field.
+    """
+
     num_experts: int
     top_k: int
     capacity_factor: float
@@ -63,6 +85,16 @@ class MoEBlockConfig:
 
 
 def _moe_block_enabled(cf: Config, use_key: str, blocks_key: str, block_idx: int) -> bool:
+    """Return whether block *block_idx* should be an MoE block.
+
+    Args:
+        cf: Global configuration.
+        use_key: Config key for the master on/off switch (e.g.
+            ``"ae_global_use_moe"``).
+        blocks_key: Config key whose value is ``"all"`` or a list of block
+            indices that should use MoE (e.g. ``"ae_global_moe_blocks"``).
+        block_idx: Zero-based index of the block being constructed.
+    """
     use_moe = cf.get(use_key, False)
     moe_blocks = cf.get(blocks_key, "all")
     return use_moe and (moe_blocks == "all" or block_idx in moe_blocks)
@@ -73,6 +105,17 @@ def _get_moe_block_config(
     prefix: str,
     default_hidden_factor: float,
 ) -> MoEBlockConfig:
+    """Read engine-specific MoE keys from *cf* and return a typed config.
+
+    Args:
+        cf: Global configuration.
+        prefix: Key prefix, e.g. ``"ae_global_moe"`` or ``"fe_moe"``.  Each
+            MoE parameter is read as ``{prefix}_{param}`` with a sensible
+            default.
+        default_hidden_factor: Fallback for ``{prefix}_expert_hidden_factor``
+            when the key is not present (typically the engine's MLP hidden
+            factor).
+    """
     return MoEBlockConfig(
         num_experts=cf.get(f"{prefix}_num_experts", 8),
         top_k=cf.get(f"{prefix}_top_k", 2),
@@ -97,6 +140,26 @@ def _build_global_position_ids(
     num_class_tokens: int,
     device: torch.device,
 ) -> torch.Tensor:
+    """Build a 1-D position-ID vector aligned with the global-token layout.
+
+    The global token sequence is structured as::
+
+        [register_0, ..., class_0, ..., cell_0_q0, cell_0_q1, ..., cell_N_qK]
+
+    Special tokens (register / class) are assigned ``-1`` so the spatial
+    router gives them a zero embedding.  Query tokens are labelled with
+    their parent HEALPix cell index (each cell has *num_queries* tokens).
+
+    Args:
+        num_cells: Number of HEALPix cells.
+        num_queries: Queries per cell (from ``ae_local_num_queries``).
+        num_register_tokens: Register token count (per query group).
+        num_class_tokens: Class token count (per query group).
+        device: Target device for the returned tensor.
+
+    Returns:
+        ``[T]`` long tensor of position IDs.
+    """
     special = (num_register_tokens + num_class_tokens) * num_queries
     cell_ids = torch.arange(num_cells, device=device, dtype=torch.long).repeat_interleave(num_queries)
     if special == 0:
@@ -565,11 +628,19 @@ class GlobalAssimilationEngine(torch.nn.Module):
         self.initialize_moe_position_ids()
 
     def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """Write sinusoidal HEALPix embeddings into every spatial MoE router
+        in this engine.  Must be called after the model is on device."""
         for block in self.ae_global_blocks:
             if isinstance(block, MoEBlock) and block.use_spatial_router:
                 block.router.initialize_from_coordinates(theta, phi)
 
     def initialize_moe_position_ids(self):
+        """(Re-)compute and register default per-token position IDs on all
+        MoE blocks in this engine.
+
+        Position IDs are non-persistent buffers, so this must run after every
+        checkpoint load, not only on first initialisation.
+        """
         device = next(self.parameters()).device
         num_queries = self.cf.ae_local_num_queries
         position_ids = _build_global_position_ids(
@@ -592,6 +663,8 @@ class GlobalAssimilationEngine(torch.nn.Module):
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:
+        """Return a list of scalar load-balancing losses, one per MoE block
+        that produced a non-``None`` auxiliary loss in its last forward pass."""
         aux_losses = []
         for block in self.ae_global_blocks:
             if isinstance(block, MoEBlock):
@@ -719,11 +792,19 @@ class ForecastingEngine(torch.nn.Module):
         self.initialize_moe_position_ids()
 
     def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        """Write sinusoidal HEALPix embeddings into every spatial MoE router
+        in the Forecasting Engine.  Must be called after the model is on device."""
         for block in self.fe_blocks:
             if isinstance(block, MoEBlock) and block.use_spatial_router:
                 block.router.initialize_from_coordinates(theta, phi)
 
     def initialize_moe_position_ids(self):
+        """(Re-)compute and register default per-token position IDs on all
+        MoE blocks in the Forecasting Engine.
+
+        Position IDs are non-persistent buffers, so this must run after every
+        checkpoint load, not only on first initialisation.
+        """
         device = next(self.parameters()).device
         num_queries = self.cf.ae_local_num_queries
         position_ids = _build_global_position_ids(
@@ -749,13 +830,18 @@ class ForecastingEngine(torch.nn.Module):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = block(tokens)
             elif isinstance(block, MoEBlock):
+                # MoE blocks return (output, aux_loss).  The wrapper discards
+                # aux_loss for checkpointing; it is stored on the block as
+                # `last_aux_loss` and collected by the trainer after forward.
+                # position_ids and token_mask are None here because the block
+                # reads its default position_ids buffer set during init.
                 tokens = checkpoint(
                     _moe_forward_wrapper_with_aux,
                     block,
                     tokens,
                     aux_info,
-                    None,
-                    None,
+                    None,  # position_ids — uses block default
+                    None,  # token_mask — no masking in FE
                     use_reentrant=False,
                 )
             else:
@@ -763,6 +849,8 @@ class ForecastingEngine(torch.nn.Module):
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:
+        """Return a list of scalar load-balancing losses, one per FE MoE block
+        that produced a non-``None`` auxiliary loss in its last forward pass."""
         aux_losses = []
         for block in self.fe_blocks:
             if isinstance(block, MoEBlock):
