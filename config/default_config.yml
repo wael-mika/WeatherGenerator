@@ -35,6 +35,22 @@ ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 ae_global_trailing_layer_norm: False
+# Optional MoE replacement for AE-global MLP blocks
+ae_global_use_moe: False
+ae_global_moe_blocks: "all"  # "all" or list of block indices, e.g. [0, 3]
+ae_global_moe_num_experts: 8
+ae_global_moe_top_k: 2
+ae_global_moe_capacity_factor: 1.25
+ae_global_moe_load_balance_weight: 0.01
+ae_global_moe_jitter_noise: 0.0
+ae_global_moe_router_bias: False
+ae_global_moe_renormalize_gates: True
+ae_global_moe_expert_hidden_factor: 2.0
+ae_global_moe_use_spatial_routing: False
+ae_global_moe_position_embed_dim: 128
+ae_global_moe_debug: False
+ae_global_moe_debug_interval: 100
+ae_global_moe_debug_top_experts: 3
 
 ae_aggregation_num_blocks: 0
 ae_aggregation_num_heads: 32
@@ -58,6 +74,22 @@ fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
 fe_impute_latent_noise_std: 0.0  # 1e-4
+# Optional MoE replacement for FE MLP blocks
+fe_use_moe: False
+fe_moe_blocks: "all"  # "all" or list of block indices, e.g. [0, 3]
+fe_moe_num_experts: 8
+fe_moe_top_k: 2
+fe_moe_capacity_factor: 1.25
+fe_moe_load_balance_weight: 0.01
+fe_moe_jitter_noise: 0.0
+fe_moe_router_bias: False
+fe_moe_renormalize_gates: True
+fe_moe_expert_hidden_factor: 2.0
+fe_moe_use_spatial_routing: False
+fe_moe_position_embed_dim: 128
+fe_moe_debug: False
+fe_moe_debug_interval: 100
+fe_moe_debug_top_experts: 3
 # currently fixed to 1.0 (due to limitations with flex_attention and triton)
 forecast_att_dense_rate: 1.0
 

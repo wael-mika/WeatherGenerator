@@ -589,6 +589,42 @@ class Model(torch.nn.Module):
 
         self.apply(_reset_params)
 
+    def initialize_spatial_routers(self):
+        """
+        Initialize spatial-router embeddings after model parameters are materialized on device.
+        """
+        use_global_router = self.cf.get("ae_global_moe_use_spatial_routing", False)
+        use_forecast_router = self.cf.get("fe_moe_use_spatial_routing", False)
+        if not (use_global_router or use_forecast_router):
+            # Still initialize MoE position ids for non-spatial routers.
+            self.initialize_moe_position_ids()
+            return
+
+        theta, phi = astropy_healpix.healpy.pix2ang(
+            nside=2**self.healpix_level,
+            ipix=np.arange(self.num_healpix_cells),
+        )
+        theta_tensor = torch.as_tensor(theta, dtype=torch.float32)
+        phi_tensor = torch.as_tensor(phi, dtype=torch.float32)
+
+        if use_global_router and self.encoder is not None:
+            self.encoder.ae_global_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+
+        if use_forecast_router and self.forecast_engine is not None:
+            self.forecast_engine.initialize_spatial_routers(theta_tensor, phi_tensor)
+
+        self.initialize_moe_position_ids()
+
+    def initialize_moe_position_ids(self):
+        """
+        Initialize per-token position ids for MoE blocks after parameters are materialized.
+        """
+        if self.encoder is not None and self.encoder.ae_global_engine is not None:
+            self.encoder.ae_global_engine.initialize_moe_position_ids()
+
+        if self.forecast_engine is not None:
+            self.forecast_engine.initialize_moe_position_ids()
+
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
 
