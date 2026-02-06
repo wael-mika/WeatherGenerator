@@ -53,7 +53,25 @@ class MLP(torch.nn.Module):
         norm_eps=1e-5,
         name: str | None = None,
     ):
-        """Constructor"""
+        """Multi-layer perceptron with optional pre-LayerNorm, residual connection,
+        and auxiliary-conditioned adaptive normalisation (AdaLayerNorm).
+
+        Args:
+            dim_in: Input feature dimension.
+            dim_out: Output feature dimension.
+            num_layers: Total linear layers (must be >= 2).
+            hidden_factor: Multiplier applied to *dim_in* to obtain hidden width.
+            pre_layer_norm: If ``True``, prepend a normalisation layer.
+            dropout_rate: Dropout probability after each activation.
+            nonlin: Activation constructor (default :class:`torch.nn.GELU`).
+            with_residual: Add a skip connection from input to output.
+            norm_type: ``"LayerNorm"`` or ``"RMSNorm"``.
+            dim_aux: If not ``None``, the first norm becomes an
+                :class:`AdaLayerNorm` conditioned on an auxiliary tensor of this
+                dimension.
+            norm_eps: Epsilon for the normalisation layer.
+            name: Optional name attached as an attribute for debugging.
+        """
 
         super(MLP, self).__init__()
 
@@ -88,11 +106,35 @@ class MLP(torch.nn.Module):
 
         self.layers.append(torch.nn.Linear(dim_hidden, dim_out))
 
-    def forward(self, *args):
-        x, x_in, aux = args[0], args[0], args[-1]
+    def forward(
+        self,
+        x: torch.Tensor,
+        *args,
+        aux: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Apply MLP to `x` with optional auxiliary conditioning.
+
+        Calling conventions kept for backward compatibility:
+        - `mlp(x)` for non-aux MLPs.
+        - `mlp(x, ..., aux_tensor)` for aux MLPs, where aux is passed as the last positional arg.
+        - `mlp(x, aux=aux_tensor)` for aux MLPs.
+        """
+        del kwargs
+        x_in = x
+
+        aux_value = aux
+        if self.with_aux and aux_value is None:
+            if len(args) == 0 or not torch.is_tensor(args[-1]):
+                raise ValueError(
+                    "MLP with aux conditioning expects a tensor `aux` as keyword "
+                    "argument or as the last positional argument."
+                )
+            aux_value = args[-1]
 
         for i, layer in enumerate(self.layers):
-            x = layer(x, aux) if (i == 0 and self.with_aux) else layer(x)
+            x = layer(x, aux_value) if (i == 0 and self.with_aux) else layer(x)
 
         if self.with_residual:
             if x.shape[-1] == x_in.shape[-1]:
@@ -105,11 +147,30 @@ class MLP(torch.nn.Module):
 
 
 class LoadBalancingLoss(torch.nn.Module):
-    """
-    Auxiliary load-balancing loss from Switch Transformers.
+    """Auxiliary load-balancing loss from Switch Transformers
+    (`Fedus et al., 2022 <https://arxiv.org/abs/2101.03961>`_).
+
+    The loss encourages uniform expert utilisation by penalising the
+    dot-product between two per-expert statistics:
+
+    * **mean router probability** — the average softmax score assigned to
+      each expert across all (valid) tokens.
+    * **mean assignment weight** — the average realised gate weight that each
+      expert received via top-k selection.
+
+    .. math::
+
+        L_{\\text{balance}} = N_E \\sum_{i=1}^{N_E} \\bar{p}_i \\cdot \\bar{w}_i
+
+    The final value is scaled by *weight* before being returned.
     """
 
     def __init__(self, num_experts: int, weight: float = 0.01):
+        """
+        Args:
+            num_experts: Number of experts (*E*).
+            weight: Scalar multiplier applied to the raw loss.
+        """
         super().__init__()
         self.num_experts = num_experts
         self.weight = weight
@@ -120,11 +181,17 @@ class LoadBalancingLoss(torch.nn.Module):
         assignment_weights: torch.Tensor,
         token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
+        """Compute the scaled load-balancing loss.
+
         Args:
-            router_probs: [N, E] router probabilities.
-            assignment_weights: [N, E] per-token expert assignment weights (sum to 1 per token).
-            token_mask: [N] optional mask for valid tokens.
+            router_probs: ``[N, E]`` softmax probabilities from the router.
+            assignment_weights: ``[N, E]`` per-token gate weights that were
+                realised through top-k selection (rows sum to 1 for each token).
+            token_mask: Optional ``[N]`` boolean mask.  When provided, only
+                ``True`` positions contribute to the per-expert averages.
+
+        Returns:
+            A scalar tensor: ``weight * N_E * sum(mean_prob * mean_assignment)``.
         """
         if router_probs.ndim != 2 or assignment_weights.ndim != 2:
             raise ValueError(
@@ -145,8 +212,12 @@ class LoadBalancingLoss(torch.nn.Module):
 
 
 class MoERouter(torch.nn.Module):
-    """
-    Top-k router for mixture-of-experts blocks.
+    """Dense top-k router for mixture-of-experts blocks.
+
+    Each token is projected to ``num_experts`` logits via a single linear
+    layer, followed by softmax and top-k selection.  An optional uniform
+    jitter noise can be added to the logits during training to encourage
+    exploration and discourage early hard collapse.
     """
 
     def __init__(
@@ -157,6 +228,15 @@ class MoERouter(torch.nn.Module):
         jitter_noise: float = 0.0,
         router_bias: bool = False,
     ):
+        """
+        Args:
+            dim_in: Token embedding dimension.
+            num_experts: Number of experts to score.
+            top_k: How many experts each token is routed to.
+            jitter_noise: Standard deviation of Gaussian noise added to
+                router logits during training (0 disables).
+            router_bias: Whether the router linear layer has a bias term.
+        """
         super().__init__()
         if top_k > num_experts:
             raise ValueError(f"top_k ({top_k}) must be <= num_experts ({num_experts})")
@@ -171,6 +251,22 @@ class MoERouter(torch.nn.Module):
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route each token to its top-k experts.
+
+        Args:
+            x: Token features ``[N, D]`` or ``[B, T, D]`` (flattened internally).
+            position_ids: Unused — accepted for interface compatibility with
+                :class:`SpatialMoERouter`.
+            token_mask: Optional ``[N]`` boolean mask.  Masked tokens receive
+                zero router probabilities and will not influence expert
+                selection.
+
+        Returns:
+            router_probs: ``[N, E]`` softmax probabilities over all experts.
+            expert_indices: ``[N, K]`` indices of the chosen experts per token.
+            expert_weights: ``[N, K]`` gate weights normalised to sum to 1
+                across the *K* selected experts for each token.
+        """
         del position_ids
         if x.ndim == 3:
             x = x.reshape(-1, x.shape[-1])
@@ -196,8 +292,21 @@ class MoERouter(torch.nn.Module):
 
 
 class SpatialMoERouter(torch.nn.Module):
-    """
-    Router that augments token features with learned spatial position embeddings.
+    """Top-k router that augments token features with learned spatial
+    position embeddings before computing expert scores.
+
+    Tokens carry a ``position_id`` that indexes into a learned
+    :class:`nn.Embedding` table.  The resulting position vector is
+    concatenated with the token features before the router linear
+    projection, giving the router access to spatial location information
+    (e.g. which HEALPix cell the token belongs to).
+
+    Special tokens (register / class tokens) use ``position_id = -1``
+    and receive a zero spatial embedding so they do not bias routing.
+
+    The embedding table can be initialised with sinusoidal features
+    derived from HEALPix ``(theta, phi)`` coordinates via
+    :meth:`initialize_from_coordinates`.
     """
 
     def __init__(
@@ -210,6 +319,20 @@ class SpatialMoERouter(torch.nn.Module):
         router_bias: bool = False,
         position_embed_dim: int = 128,
     ):
+        """
+        Args:
+            dim_in: Token embedding dimension (without position embedding).
+            num_experts: Number of experts to score.
+            num_positions: Size of the spatial embedding table (typically the
+                number of HEALPix cells).
+            top_k: How many experts each token is routed to.
+            jitter_noise: Standard deviation of Gaussian noise added to
+                router logits during training (0 disables).
+            router_bias: Whether the router linear layer has a bias term.
+            position_embed_dim: Dimension of each spatial position embedding.
+                The router projection operates on ``dim_in + position_embed_dim``
+                features.
+        """
         super().__init__()
         if top_k > num_experts:
             raise ValueError(f"top_k ({top_k}) must be <= num_experts ({num_experts})")
@@ -222,6 +345,24 @@ class SpatialMoERouter(torch.nn.Module):
         self.router_weights = nn.Linear(dim_in + position_embed_dim, num_experts, bias=router_bias)
 
     def initialize_from_coordinates(self, theta: torch.Tensor, phi: torch.Tensor):
+        """Initialise the embedding table with sinusoidal features derived
+        from HEALPix ``(theta, phi)`` coordinates.
+
+        The embedding vector for each cell is built as::
+
+            embed[:half]  = interleaved sin/cos of theta at log-spaced frequencies
+            embed[half:]  = interleaved sin/cos of phi   at log-spaced frequencies
+
+        This provides a smooth, continuous spatial signal so that
+        neighbouring cells receive similar router inputs.
+
+        Args:
+            theta: ``[num_positions]`` co-latitude angles (radians).
+            phi: ``[num_positions]`` longitude angles (radians).
+
+        Returns:
+            ``self``, for convenience chaining.
+        """
         assert len(theta) == self.num_positions, (len(theta), self.num_positions)
         assert len(phi) == self.num_positions, (len(phi), self.num_positions)
 
@@ -257,6 +398,22 @@ class SpatialMoERouter(torch.nn.Module):
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route tokens using concatenated token features and position embeddings.
+
+        Args:
+            x: Token features ``[N, D]`` or ``[B, T, D]`` (flattened internally).
+            position_ids: ``[N]`` integer IDs indexing the spatial embedding
+                table.  Negative values receive a zero embedding (used for
+                special tokens).  If ``None``, a sequential modular fallback
+                ``arange(N) % num_positions`` is used.
+            token_mask: Optional ``[N]`` boolean mask.  Masked tokens get
+                zero router probabilities.
+
+        Returns:
+            router_probs: ``[N, E]`` softmax probabilities over all experts.
+            expert_indices: ``[N, K]`` indices of the chosen experts per token.
+            expert_weights: ``[N, K]`` gate weights normalised per token.
+        """
         if x.ndim == 3:
             x = x.reshape(-1, x.shape[-1])
         elif x.ndim != 2:
@@ -308,8 +465,26 @@ class SpatialMoERouter(torch.nn.Module):
 
 
 class MoEBlock(torch.nn.Module):
-    """
-    General mixture-of-experts wrapper around any expert factory.
+    """Sparse mixture-of-experts block that wraps an arbitrary expert factory.
+
+    **Forward pass (high-level)**:
+
+    1. Flatten inputs to token-major ``[N, D]``.
+    2. Route every token to its *top_k* experts via a learned router.
+    3. Build an assignment edge list ``(token_idx, expert_idx, gate_weight)``.
+    4. Remove edges for masked-out tokens.
+    5. Enforce per-expert *capacity* — drop lowest-gate edges when an expert
+       receives more assignments than its budget.
+    6. Optionally re-normalise gate weights so that remaining edges per
+       token still sum to 1.
+    7. Dispatch routed tokens to each active expert and combine the
+       weighted outputs with :func:`index_add_`.
+    8. Add the residual connection (if enabled).
+    9. During training, compute an auxiliary load-balancing loss.
+
+    The block stores diagnostic tensors (``last_expert_indices``,
+    ``last_expert_weights``, ``last_aux_loss``) that can be inspected
+    after each forward pass for logging or debugging.
     """
 
     def __init__(
@@ -333,6 +508,37 @@ class MoEBlock(torch.nn.Module):
         debug_top_experts: int = 3,
         debug_name: str | None = None,
     ):
+        """
+        Args:
+            expert_fn: Zero-argument callable that returns a fresh expert
+                module.  Called ``num_experts`` times.
+            dim_in: Token embedding dimension (must match expert input dim).
+            num_experts: Number of expert copies to instantiate.
+            top_k: Experts selected per token.
+            capacity_factor: Per-expert capacity as a fraction of
+                ``valid_tokens / num_experts``.  Set to ``0`` or ``None`` to
+                disable capacity enforcement.  Note: this does **not** account
+                for *top_k*, so with ``top_k=2`` and ``capacity_factor=1.25``
+                about 37.5 % of assignment edges will be dropped even under
+                perfectly balanced routing.
+            jitter_noise: Noise std added to router logits during training.
+            router_bias: Whether the router projection has a bias term.
+            load_balance_weight: Scalar multiplier for the auxiliary
+                :class:`LoadBalancingLoss`.
+            renormalize_gates: If ``True``, re-normalise gate weights per
+                token after capacity-based edge dropping.
+            with_residual: If ``True``, add a skip connection ``output += x``.
+            name: Optional name attached as a module attribute.
+            use_spatial_router: Use :class:`SpatialMoERouter` instead of the
+                plain :class:`MoERouter`.
+            num_positions: Spatial embedding table size (required when
+                *use_spatial_router* is ``True``).
+            position_embed_dim: Dimension of the spatial position embedding.
+            debug_enabled: Emit periodic diagnostic log lines during training.
+            debug_interval: Log every *N*-th forward pass (rank 0 only).
+            debug_top_experts: Number of top experts shown in the log line.
+            debug_name: Label used in diagnostic log lines.
+        """
         super().__init__()
         if name is not None:
             self.name = name
@@ -382,6 +588,7 @@ class MoEBlock(torch.nn.Module):
         self.register_buffer("position_ids", torch.empty(0, dtype=torch.long), persistent=False)
 
     def _should_log_debug(self) -> bool:
+        """Return `True` when this forward pass should emit a debug line."""
         if not (self.debug_enabled and self.training):
             return False
         self._debug_forward_counter += 1
@@ -392,6 +599,7 @@ class MoEBlock(torch.nn.Module):
         return True
 
     def _format_top_experts(self, expert_indices_flat: torch.Tensor) -> str:
+        """Format the top expert usage fractions for compact logging."""
         if expert_indices_flat.numel() == 0:
             return "-"
 
@@ -413,6 +621,16 @@ class MoEBlock(torch.nn.Module):
         expert_weights: torch.Tensor,
         capacity: int | None,
     ) -> None:
+        """Emit one MoE diagnostic line for the current forward pass.
+
+        The output format is::
+
+            MoE[<name>] fwd=<step> valid_tokens=<v>/<n> cap=<c>
+            dropped=<d>(<pct>%) mean_top1_gate=<g>
+            experts_pre=<...> experts_post=<...> aux=<a>
+
+        See ``docs/moe_parameters_and_debugging.md`` for field definitions.
+        """
         valid_tokens = n_tokens if token_mask_flat is None else int(token_mask_flat.sum().item())
 
         top1_weights = expert_weights[:, 0]
@@ -451,6 +669,10 @@ class MoEBlock(torch.nn.Module):
         )
 
     def set_position_ids(self, position_ids: torch.Tensor | None) -> None:
+        """
+        Set default per-token position IDs used when `forward(..., position_ids=...)`
+        is not provided by the caller.
+        """
         if position_ids is None:
             self.position_ids = torch.empty(0, dtype=torch.long, device=self.position_ids.device)
         else:
@@ -469,6 +691,26 @@ class MoEBlock(torch.nn.Module):
         torch.Tensor | None,
         tuple[int, int, int] | None,
     ]:
+        """Flatten optional batched inputs to token-major ``[N, ...]`` format.
+
+        Handles both 2-D ``[N, D]`` (already flat) and 3-D ``[B, T, D]``
+        (batched) inputs.  Auxiliary tensors, position IDs, and token masks
+        are broadcast / reshaped to match.
+
+        Args:
+            x: Token features ``[N, D]`` or ``[B, T, D]``.
+            aux: Optional auxiliary conditioning ``[N, A]`` or ``[B, T, A]``.
+            position_ids: Optional ``[T]``, ``[N]``, or ``[B, T]`` position IDs.
+            token_mask: Optional ``[T]``, ``[N]``, or ``[B, T]`` boolean mask.
+
+        Returns:
+            x_flat: ``[N, D]``
+            aux_flat: ``[N, A]`` or ``None``
+            pos_ids_flat: ``[N]`` or ``None``
+            token_mask_flat: ``[N]`` or ``None``
+            shape_info: ``(B, T, D)`` tuple for un-flattening output, or
+                ``None`` when input was already 2-D.
+        """
         is_batched = x.ndim == 3
         if x.ndim == 2:
             n, dim = x.shape
@@ -529,6 +771,76 @@ class MoEBlock(torch.nn.Module):
             shape_info = (batch_size, seq_len, dim)
         return x, aux_flat, pos_ids_flat, token_mask_flat, shape_info
 
+    def _dispatch_to_experts(
+        self,
+        x_flat: torch.Tensor,
+        output: torch.Tensor,
+        token_indices: torch.Tensor,
+        expert_indices_flat: torch.Tensor,
+        expert_weights_flat: torch.Tensor,
+        aux_flat: torch.Tensor | None,
+        extra_args: tuple,
+        extra_kwargs: dict,
+    ) -> None:
+        """Dispatch routed tokens to experts and accumulate weighted outputs.
+
+        Rather than scanning the full assignment vector with a boolean mask
+        per expert (O(E * num_edges)), this method sorts edges by expert
+        index once and then slices contiguous groups, reducing Python-loop
+        overhead.
+
+        .. note::
+
+           Each expert is still called sequentially.  For higher throughput
+           at scale consider grouped-GEMM / Megablocks-style batching.
+
+        Args:
+            x_flat: ``[N, D]`` token embeddings.
+            output: ``[N, D]`` pre-allocated output tensor (modified in-place
+                via :func:`index_add_`).
+            token_indices: ``[A]`` token index for each assignment edge.
+            expert_indices_flat: ``[A]`` expert index for each assignment edge.
+            expert_weights_flat: ``[A]`` gate weight for each assignment edge.
+            aux_flat: Optional ``[N, Aux]`` auxiliary conditioning; matching
+                rows are gathered for each routed token.
+            extra_args: Additional positional args forwarded to the expert.
+            extra_kwargs: Additional keyword args forwarded to the expert.
+        """
+        if token_indices.numel() == 0:
+            return
+
+        # Group assignments by expert in one pass to reduce Python-side masking overhead.
+        sort_idx = torch.argsort(expert_indices_flat)
+        expert_sorted = expert_indices_flat[sort_idx]
+        token_sorted = token_indices[sort_idx]
+        weight_sorted = expert_weights_flat[sort_idx]
+
+        active_experts, counts = torch.unique_consecutive(expert_sorted, return_counts=True)
+        active_experts = active_experts.tolist()
+        offsets = counts.cumsum(0).tolist()
+
+        start = 0
+        for expert_idx, end in zip(active_experts, offsets, strict=True):
+            tok_idx = token_sorted[start:end]
+            expert_input = x_flat[tok_idx]
+            if aux_flat is not None:
+                expert_output = self.experts[expert_idx](
+                    expert_input,
+                    aux_flat[tok_idx],
+                    *extra_args,
+                    **extra_kwargs,
+                )
+            else:
+                expert_output = self.experts[expert_idx](
+                    expert_input,
+                    *extra_args,
+                    **extra_kwargs,
+                )
+
+            weighted = expert_output * weight_sorted[start:end].unsqueeze(-1)
+            output.index_add_(0, tok_idx, weighted)
+            start = end
+
     def forward(
         self,
         x: torch.Tensor,
@@ -538,6 +850,24 @@ class MoEBlock(torch.nn.Module):
         token_mask: torch.Tensor | None = None,
         **extra_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the full MoE forward: route, dispatch, combine, residual.
+
+        Args:
+            x: Token tensor ``[N, D]`` or ``[B, T, D]``.
+            aux: Optional per-token conditioning tensor whose leading
+                dimensions match *x*.  Passed through to each expert.
+            position_ids: Optional per-token position IDs for the spatial
+                router.  If ``None`` and default IDs have been registered
+                via :meth:`set_position_ids`, those are used instead.
+            token_mask: Optional boolean mask of valid tokens.  Masked
+                tokens are excluded from routing, capacity accounting, and
+                the auxiliary loss.
+
+        Returns:
+            output: Same shape as *x*.
+            aux_loss: Scalar load-balancing loss when in training mode,
+                ``None`` otherwise.
+        """
         x_in = x
         pos_ids = position_ids
         if pos_ids is None and self.position_ids.numel() > 0:
@@ -558,12 +888,15 @@ class MoEBlock(torch.nn.Module):
         token_indices = torch.arange(n_tokens, device=x_flat.device).repeat_interleave(self.top_k)
         expert_indices_flat = expert_indices.reshape(-1)
         expert_weights_flat = expert_weights.reshape(-1)
+        # Parallel arrays of length N*K: each entry is one assignment edge
+        # (token_idx, expert_idx, gate_weight) from the top-k selection.
 
         if token_mask_flat is not None:
             valid_assign = token_mask_flat[token_indices]
             token_indices = token_indices[valid_assign]
             expert_indices_flat = expert_indices_flat[valid_assign]
             expert_weights_flat = expert_weights_flat[valid_assign]
+        # Snapshot before capacity clipping (used for debug logging).
         expert_indices_pre_capacity = expert_indices_flat
 
         capacity = None
@@ -575,7 +908,12 @@ class MoEBlock(torch.nn.Module):
                 math.ceil(self.capacity_factor * max(num_tokens_for_capacity, 1) / self.num_experts)
             )
             capacity = max(capacity, 1)
+            # capacity = max number of assignment edges retained *per expert*.
+            # Note: this formula does NOT multiply by top_k, so with top_k=2
+            # and CF=1.25 the theoretical minimum drop rate is 37.5 %.
 
+        # --- Capacity enforcement: keep at most `capacity` edges per expert,
+        # preferring edges with the highest gate weights. ---
         if capacity is not None and token_indices.numel() > 0:
             keep_mask = torch.zeros_like(expert_indices_flat, dtype=torch.bool)
             for expert_idx in range(self.num_experts):
@@ -594,33 +932,21 @@ class MoEBlock(torch.nn.Module):
             expert_weights_flat = expert_weights_flat[keep_mask]
 
             if self.renormalize_gates and token_indices.numel() > 0:
+                # Re-normalize the remaining gate mass per token after dropping edges.
                 token_weight_sum = x_flat.new_zeros(n_tokens)
                 token_weight_sum.index_add_(0, token_indices, expert_weights_flat)
                 expert_weights_flat = expert_weights_flat / token_weight_sum[token_indices].clamp_min(1e-9)
 
-        if token_indices.numel() > 0:
-            for expert_idx in range(self.num_experts):
-                mask = expert_indices_flat == expert_idx
-                if not mask.any():
-                    continue
-                tok_idx = token_indices[mask]
-                expert_input = x_flat[tok_idx]
-                if aux_flat is not None:
-                    expert_output = self.experts[expert_idx](
-                        expert_input,
-                        aux_flat[tok_idx],
-                        *extra_args,
-                        **extra_kwargs,
-                    )
-                else:
-                    expert_output = self.experts[expert_idx](
-                        expert_input,
-                        *extra_args,
-                        **extra_kwargs,
-                    )
-
-                weighted = expert_output * expert_weights_flat[mask].unsqueeze(-1)
-                output.index_add_(0, tok_idx, weighted)
+        self._dispatch_to_experts(
+            x_flat,
+            output,
+            token_indices,
+            expert_indices_flat,
+            expert_weights_flat,
+            aux_flat,
+            extra_args,
+            extra_kwargs,
+        )
 
         if shape_info is not None:
             batch_size, seq_len, _ = shape_info
@@ -635,6 +961,9 @@ class MoEBlock(torch.nn.Module):
             self.last_expert_indices = expert_indices.detach()
             self.last_expert_weights = expert_weights.detach()
 
+        # --- Auxiliary load-balancing loss (training only). ---
+        # Uses the *original* router assignments (before capacity clipping) so
+        # that the loss penalises the router's raw routing decisions.
         self.last_aux_loss = None
         if self.training:
             assignment_weights = torch.zeros(
@@ -662,4 +991,6 @@ class MoEBlock(torch.nn.Module):
         return output, self.last_aux_loss
 
     def get_aux_loss(self) -> torch.Tensor | None:
+        """Return the auxiliary load-balancing loss from the most recent
+        forward pass, or ``None`` if the model was in eval mode."""
         return self.last_aux_loss

@@ -483,6 +483,13 @@ class Trainer(TrainerBase):
                     targets_and_aux=targets_and_auxs,
                     metadata=extract_batch_metadata(batch),
                 )
+                # Add MoE router load-balancing loss (if any MoE blocks are active).
+                # This must happen after compute_loss but before backward so that
+                # gradients flow through the router weights.
+                moe_aux_loss = self._collect_moe_aux_losses()
+                if moe_aux_loss is not None:
+                    loss = loss + moe_aux_loss
+                    self._record_moe_aux_loss(self.loss_calculator, moe_aux_loss)
                 moe_aux_loss = self._collect_moe_aux_losses()
                 if moe_aux_loss is not None:
                     loss = loss + moe_aux_loss
@@ -627,10 +634,7 @@ class Trainer(TrainerBase):
                         targets_and_aux=targets_and_auxs,
                         metadata=extract_batch_metadata(batch),
                     )
-                    moe_aux_loss = self._collect_moe_aux_losses()
-                    if moe_aux_loss is not None:
-                        loss = loss + moe_aux_loss
-                        self._record_moe_aux_loss(self.loss_calculator_val, moe_aux_loss)
+                    # MoE auxiliary router loss is training-only and is not applied in eval mode.
 
                     # log output
                     if bidx < num_samples_write:
@@ -803,6 +807,17 @@ class Trainer(TrainerBase):
             self.train_logger.log_metrics(stage, grad_norms)
 
     def _collect_moe_aux_losses(self) -> torch.Tensor | None:
+        """Walk every :class:`MoEBlock` in the model and sum their auxiliary
+        load-balancing losses from the most recent forward pass.
+
+        This traversal is safe to call even when no MoE blocks are present
+        (returns ``None``).  During evaluation, each block's
+        ``last_aux_loss`` is ``None``, so the result will also be ``None``.
+
+        Returns:
+            Summed scalar loss across all blocks, or ``None`` when no MoE
+            auxiliary loss was produced (e.g. no MoE blocks or eval mode).
+        """
         model_ref = self.model.module if hasattr(self.model, "module") else self.model
         moe_losses = []
         for module in model_ref.modules():
@@ -819,6 +834,13 @@ class Trainer(TrainerBase):
     def _record_moe_aux_loss(
         self, loss_calculator: LossCalculator, moe_aux_loss: torch.Tensor
     ) -> None:
+        """Inject the MoE auxiliary loss into the loss calculator's history.
+
+        This adds the detached loss value to the latest aggregated loss
+        entry (so it appears in validation/training loss curves) and records
+        it under the ``"moe_router"`` key in the per-component breakdown
+        for more granular monitoring.
+        """
         if len(loss_calculator.loss_hist) == 0:
             return
 
