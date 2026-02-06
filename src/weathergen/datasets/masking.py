@@ -45,6 +45,10 @@ class MaskData:
     def get_mask(self, idx: int) -> np.typing.NDArray:
         return self.masks[idx]
 
+    def get_params(self, idx: int) -> dict:
+        """Get the masking parameters for a specific mask."""
+        return self.metadata[idx].params
+
 
 def get_num_samples(config) -> np.typing.NDArray:
     """
@@ -337,7 +341,10 @@ class Masker:
                 # iterate sequentially through targets (to enable 1-to-1 correspondence when no
                 # target is specified)
                 target_idx += i_sample % target_num_samples[target_cfg_idx].item()
-
+                
+                # Get target metadata for relationships that need geometric info
+                target_metadata = target_masks.get_params(target_idx)
+                
                 # determine if forcing dataset => mask is empty
                 if is_stream_diagnostic(stream_cfg, self.stage):
                     source_mask, mask_params = torch.zeros(num_cells, dtype=torch.bool), {}
@@ -347,6 +354,7 @@ class Masker:
                         strategy=source_cfg.get("masking_strategy"),
                         masking_strategy_config=masking_config,
                         target_relationship_mask=(relationship, target_masks.get_mask(target_idx)),
+                        target_metadata=target_metadata,
                     )
 
                 corr = target_idx
@@ -367,6 +375,7 @@ class Masker:
         strategy: str,
         masking_strategy_config: dict,
         target_relationship_mask: (str, np.typing.NDArray),
+        target_metadata: dict | None = None,
     ) -> (np.typing.NDArray, dict):
         """Get effective mask, combining with target mask if specified.
 
@@ -413,21 +422,33 @@ class Masker:
         # handle cone distance relationship
         elif relationship == "cone_distance":
             assert target_mask is not None, "relationship 'cone_distance' requires target_mask"
+            assert target_metadata is not None, "relationship 'cone_distance' requires target_metadata"
 
-            # Get cone distance parameter
-            center_distance_degrees = masking_strategy_config.get("center_distance_degrees", None)
-            assert center_distance_degrees is not None, (
-                "relationship 'cone_distance' requires 'center_distance_degrees' in config"
+            # Get cone distance parameter - supports fixed value or random selection
+            center_distance_degrees_random = masking_strategy_config.get(
+                "center_distance_degrees_random", False
             )
+            if center_distance_degrees_random:
+                # Random selection from range with specified step (default: 0 to 90 in steps of 15)
+                min_dist = masking_strategy_config.get("center_distance_degrees_min", 0)
+                max_dist = masking_strategy_config.get("center_distance_degrees_max", 90)
+                step = masking_strategy_config.get("center_distance_degrees_step", 15)
+                possible_values = list(range(min_dist, max_dist + 1, step))
+                center_distance_degrees = float(self.rng.choice(possible_values))
+            else:
+                center_distance_degrees = masking_strategy_config.get("center_distance_degrees", None)
+                assert center_distance_degrees is not None, (
+                    "relationship 'cone_distance' requires 'center_distance_degrees' or "
+                    "'center_distance_degrees_random: true' in config"
+                )
 
-            # Get teacher center cell (stored during teacher mask creation)
-            teacher_center_cell = getattr(self, "_last_center_cell", None)
+            # Get teacher center cell from explicit metadata (not instance state)
+            teacher_center_cell = target_metadata.get("center_cell", None)
             assert teacher_center_cell is not None, (
-                "relationship 'cone_distance' requires teacher mask to be created with "
-                "cropping_healpix strategy first"
+                "relationship 'cone_distance' requires 'center_cell' in target_metadata"
             )
-            # Get teacher's hl_mask level
-            teacher_hl_mask = getattr(self, "_last_hl_mask", masking_strategy_config.get("hl_mask", 0))
+            # Get teacher's hl_mask level from metadata
+            teacher_hl_mask = target_metadata.get("hl_mask", masking_strategy_config.get("hl_mask", 0))
 
             # Create cone at specified distance from teacher
             mask, student_center_cell = self._create_cone_distance_mask(
