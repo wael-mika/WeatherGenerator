@@ -30,7 +30,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.ema import EMAModel
-from weathergen.model.layers import MLP
+from weathergen.model.layers import MLP, MoEBlock
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
 from weathergen.train.target_and_aux_module_base import PhysicalTargetAndAux
@@ -91,6 +91,7 @@ def init_model_and_shard(
         }
         modules_to_shard = (
             MLP,
+            MoEBlock,
             MultiSelfAttentionHeadLocal,
             MultiSelfAttentionHead,
             MultiCrossAttentionHeadVarlen,
@@ -152,17 +153,27 @@ def init_model_and_shard(
         if is_root():
             logger.info(f"Continuing run with id={run_id_contd} at mini_epoch {mini_epoch_contd}.")
         model = load_model(cf, model, device, run_id_contd, mini_epoch_contd)
+        model_for_init = model.module if hasattr(model, "module") else model
+        if hasattr(model_for_init, "initialize_moe_position_ids"):
+            model_for_init.initialize_moe_position_ids()
     elif cf.get("load_chkpt", {}).get("run_id", None):
         run_id = cf.load_chkpt.run_id
         mini_epoch = cf.load_chkpt.get("mini_epoch", -1)
         if is_root():
             logger.info(f"Loading checkpoint from id={run_id} at mini_epoch {mini_epoch}.")
         model = load_model(cf, model, device, run_id, mini_epoch)
+        model_for_init = model.module if hasattr(model, "module") else model
+        if hasattr(model_for_init, "initialize_moe_position_ids"):
+            model_for_init.initialize_moe_position_ids()
     else:
         if with_ddp and with_fsdp:
             model.to_empty(device="cuda")
             if with_fsdp:
                 model.reset_parameters()
+
+        model_for_init = model.module if hasattr(model, "module") else model
+        if hasattr(model_for_init, "initialize_spatial_routers"):
+            model_for_init.initialize_spatial_routers()
 
     # model params
     model_params = ModelParams(cf).create(cf)

@@ -91,8 +91,11 @@ class EncoderModule(torch.nn.Module):
                 .repeat((1, cf.ae_local_num_queries, 2))
             )
             theta, phi = healpy.pix2ang(
-                nside=2**self.healpix_level, ipix=torch.arange(self.num_healpix_cells)
+                nside=2**self.healpix_level,
+                ipix=torch.arange(self.num_healpix_cells, dtype=torch.int64).cpu().numpy(),
             )
+            theta = torch.as_tensor(theta, dtype=q_cells.dtype)
+            phi = torch.as_tensor(phi, dtype=q_cells.dtype)
             q_cells[:, :, -6:-3] = (
                 torch.cos(theta).unsqueeze(1).unsqueeze(1).repeat((1, cf.ae_local_num_queries, 3))
             )

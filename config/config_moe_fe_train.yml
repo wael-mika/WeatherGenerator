@@ -1,0 +1,55 @@
+# (C) Copyright 2026 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Override config for MoE training with Forecasting Engine (FE) enabled.
+# Use with the default base config or your own base config.
+
+general:
+  desc: "MoE training with FE enabled"
+
+# MoE in AE-global MLP blocks
+ae_global_use_moe: True
+ae_global_moe_blocks: "all"
+ae_global_moe_num_experts: 4
+ae_global_moe_top_k: 2
+ae_global_moe_capacity_factor: 1.25
+ae_global_moe_load_balance_weight: 0.001
+ae_global_moe_jitter_noise: 0.01
+ae_global_moe_router_bias: False
+ae_global_moe_renormalize_gates: True
+ae_global_moe_expert_hidden_factor: 1.0
+ae_global_moe_use_spatial_routing: True
+ae_global_moe_position_embed_dim: 128
+
+# MoE in Forecasting Engine (FE) MLP blocks
+fe_use_moe: True
+fe_moe_blocks: "all"
+fe_moe_num_experts: 4
+fe_moe_top_k: 2
+fe_moe_capacity_factor: 1.25
+fe_moe_load_balance_weight: 0.001
+fe_moe_jitter_noise: 0.0
+fe_moe_router_bias: False
+fe_moe_renormalize_gates: True
+fe_moe_expert_hidden_factor: 1.0
+fe_moe_use_spatial_routing: True
+fe_moe_position_embed_dim: 128
+
+# Ensure FE path is exercised in training.
+training_config:
+  training_mode: ["masking"]
+  model_input:
+    forecasting:
+      masking_strategy: "forecast"
+      num_steps_input: 1
+  forecast:
+    time_step: 06:00:00
+    num_steps: 2
+    offset: 1
+    policy: "fixed"

@@ -24,6 +24,7 @@ import weathergen.common.config as config
 from weathergen.common.config import Config, merge_configs
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
 from weathergen.model.ema import EMAModel
+from weathergen.model.layers import MoEBlock
 from weathergen.model.model_interface import (
     get_target_aux_calculator,
     init_model_and_shard,
@@ -445,6 +446,10 @@ class Trainer(TrainerBase):
                 targets_and_aux=targets_and_auxs,
                 metadata=extract_batch_metadata(batch),
             )
+            moe_aux_loss = self._collect_moe_aux_losses()
+            if moe_aux_loss is not None:
+                loss = loss + moe_aux_loss
+                self._record_moe_aux_loss(self.loss_calculator, moe_aux_loss)
 
             # TODO re-enable this, need to think on how to make it compatible with
             # student-teacher training
@@ -562,11 +567,15 @@ class Trainer(TrainerBase):
                                 self.model,
                             )
 
-                    _ = self.loss_calculator_val.compute_loss(
+                    loss = self.loss_calculator_val.compute_loss(
                         preds=preds,
                         targets_and_aux=targets_and_auxs,
                         metadata=extract_batch_metadata(batch),
                     )
+                    moe_aux_loss = self._collect_moe_aux_losses()
+                    if moe_aux_loss is not None:
+                        loss = loss + moe_aux_loss
+                        self._record_moe_aux_loss(self.loss_calculator_val, moe_aux_loss)
 
                     # log output
                     if bidx < num_samples_write:
@@ -733,6 +742,30 @@ class Trainer(TrainerBase):
 
         if is_root():
             self.train_logger.log_metrics(stage, grad_norms)
+
+    def _collect_moe_aux_losses(self) -> torch.Tensor | None:
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        moe_losses = []
+        for module in model_ref.modules():
+            if isinstance(module, MoEBlock):
+                aux_loss = module.get_aux_loss()
+                if aux_loss is not None:
+                    moe_losses.append(aux_loss)
+
+        if not moe_losses:
+            return None
+
+        return torch.stack(moe_losses).sum()
+
+    def _record_moe_aux_loss(
+        self, loss_calculator: LossCalculator, moe_aux_loss: torch.Tensor
+    ) -> None:
+        if len(loss_calculator.loss_hist) == 0:
+            return
+
+        moe_aux_detached = moe_aux_loss.detach()
+        loss_calculator.loss_hist[-1] = loss_calculator.loss_hist[-1] + moe_aux_detached
+        loss_calculator.losses_unweighted_hist[-1]["moe_router"] = {"loss_avg": moe_aux_detached}
 
     def _log_terminal(self, bidx: int, mini_epoch: int, stage: Stage):
         print_freq = self.train_log_freq.terminal
