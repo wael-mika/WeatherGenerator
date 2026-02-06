@@ -480,8 +480,13 @@ class Model(torch.nn.Module):
         self.apply(_reset_params)
 
     def initialize_spatial_routers(self):
-        """
-        Initialize spatial-router embeddings after model parameters are materialized on device.
+        """Initialise all MoE spatial-router embeddings from HEALPix geometry.
+
+        Must be called **after** model construction / FSDP sharding so that
+        parameters already reside on the correct device.  On fresh runs this
+        is the single entry-point; for resumed runs, spatial embeddings are
+        loaded from the checkpoint and only :meth:`initialize_moe_position_ids`
+        needs to be called (position IDs are non-persistent buffers).
         """
         use_global_router = self.cf.get("ae_global_moe_use_spatial_routing", False)
         use_forecast_router = self.cf.get("fe_moe_use_spatial_routing", False)
@@ -506,8 +511,12 @@ class Model(torch.nn.Module):
         self.initialize_moe_position_ids()
 
     def initialize_moe_position_ids(self):
-        """
-        Initialize per-token position ids for MoE blocks after parameters are materialized.
+        """(Re-)compute default per-token position IDs for every MoE block.
+
+        Kept separate from :meth:`initialize_spatial_routers` because
+        position IDs are **non-persistent buffers** — they are not saved in
+        checkpoints and must be reconstructed after every load, even for
+        non-spatial routers.
         """
         if self.encoder is not None and self.encoder.ae_global_engine is not None:
             self.encoder.ae_global_engine.initialize_moe_position_ids()
