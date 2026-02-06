@@ -20,7 +20,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
+ae_global_dim_embed: 1024
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -66,7 +66,7 @@ ae_global_use_moe: False
 
 # FE MoE: non-spatial routing.
 fe_use_moe: True
-fe_moe_blocks: "all"
+fe_moe_blocks: [0, 3, 7]  # Index starts at 0.
 fe_moe_num_experts: 4
 fe_moe_top_k: 2
 fe_moe_capacity_factor: 1.25
