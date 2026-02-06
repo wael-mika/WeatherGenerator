@@ -20,7 +20,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
+ae_global_dim_embed: 1024
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -66,7 +66,7 @@ ae_global_use_moe: False
 
 # FE MoE: spatial routing enabled.
 fe_use_moe: True
-fe_moe_blocks: "all"
+fe_moe_blocks: [0, 3, 7]  # Index starts at 0
 fe_moe_num_experts: 4
 fe_moe_top_k: 2
 fe_moe_capacity_factor: 1.25
@@ -76,7 +76,7 @@ fe_moe_router_bias: False
 fe_moe_renormalize_gates: True
 # Fairness setting: account for spatial embedding overhead while keeping FE params close to MLP.
 # 0.4765625 -> hidden size 976 when ae_global_dim_embed=2048.
-fe_moe_expert_hidden_factor: 0.4765625
+fe_moe_expert_hidden_factor: 1
 fe_moe_use_spatial_routing: True
 fe_moe_position_embed_dim: 64
 fe_moe_debug: False
@@ -135,7 +135,7 @@ train_log_freq:
 
 training_config:
   training_mode: ["masking"]
-  num_mini_epochs: 64
+  num_mini_epochs: 48
   samples_per_mini_epoch: 4096
   shuffle: True
   start_date: 1979-01-01T00:00
