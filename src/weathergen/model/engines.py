@@ -27,9 +27,81 @@ from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
 )
-from weathergen.model.layers import MLP
+from weathergen.model.layers import MLP, MoEBlock
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
+
+
+def _moe_forward_wrapper_no_aux(block, x, position_ids=None, token_mask=None):
+    """Wrapper for checkpointing MoE blocks that return (output, aux_loss)."""
+    output, _ = block(x, position_ids=position_ids, token_mask=token_mask)
+    return output
+
+
+def _moe_forward_wrapper_with_aux(block, x, aux, position_ids=None, token_mask=None):
+    """Wrapper for checkpointing MoE blocks with auxiliary conditioning."""
+    output, _ = block(x, aux, position_ids=position_ids, token_mask=token_mask)
+    return output
+
+
+@dataclasses.dataclass
+class MoEBlockConfig:
+    num_experts: int
+    top_k: int
+    capacity_factor: float
+    load_balance_weight: float
+    jitter_noise: float
+    expert_hidden_factor: float
+    router_bias: bool
+    renormalize_gates: bool
+    use_spatial_routing: bool
+    position_embed_dim: int
+    debug_enabled: bool
+    debug_interval: int
+    debug_top_experts: int
+
+
+def _moe_block_enabled(cf: Config, use_key: str, blocks_key: str, block_idx: int) -> bool:
+    use_moe = cf.get(use_key, False)
+    moe_blocks = cf.get(blocks_key, "all")
+    return use_moe and (moe_blocks == "all" or block_idx in moe_blocks)
+
+
+def _get_moe_block_config(
+    cf: Config,
+    prefix: str,
+    default_hidden_factor: float,
+) -> MoEBlockConfig:
+    return MoEBlockConfig(
+        num_experts=cf.get(f"{prefix}_num_experts", 8),
+        top_k=cf.get(f"{prefix}_top_k", 2),
+        capacity_factor=cf.get(f"{prefix}_capacity_factor", 1.25),
+        load_balance_weight=cf.get(f"{prefix}_load_balance_weight", 0.01),
+        jitter_noise=cf.get(f"{prefix}_jitter_noise", 0.0),
+        expert_hidden_factor=cf.get(f"{prefix}_expert_hidden_factor", default_hidden_factor),
+        router_bias=cf.get(f"{prefix}_router_bias", False),
+        renormalize_gates=cf.get(f"{prefix}_renormalize_gates", True),
+        use_spatial_routing=cf.get(f"{prefix}_use_spatial_routing", False),
+        position_embed_dim=cf.get(f"{prefix}_position_embed_dim", 128),
+        debug_enabled=cf.get(f"{prefix}_debug", False),
+        debug_interval=cf.get(f"{prefix}_debug_interval", 100),
+        debug_top_experts=cf.get(f"{prefix}_debug_top_experts", 3),
+    )
+
+
+def _build_global_position_ids(
+    num_cells: int,
+    num_queries: int,
+    num_register_tokens: int,
+    num_class_tokens: int,
+    device: torch.device,
+) -> torch.Tensor:
+    special = (num_register_tokens + num_class_tokens) * num_queries
+    cell_ids = torch.arange(num_cells, device=device, dtype=torch.long).repeat_interleave(num_queries)
+    if special == 0:
+        return cell_ids
+    special_ids = torch.full((special,), -1, device=device, dtype=torch.long)
+    return torch.cat([special_ids, cell_ids], dim=0)
 
 
 class EmbeddingEngine(torch.nn.Module):
@@ -362,27 +434,100 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                     )
                 )
-            # MLP block
-            self.ae_global_blocks.append(
-                MLP(
-                    self.cf.ae_global_dim_embed,
-                    self.cf.ae_global_dim_embed,
-                    with_residual=True,
-                    dropout_rate=self.cf.ae_global_dropout_rate,
-                    hidden_factor=self.cf.ae_global_mlp_hidden_factor,
-                    norm_type=self.cf.norm_type,
-                    norm_eps=self.cf.mlp_norm_eps,
-                )
+            should_use_moe = _moe_block_enabled(
+                self.cf, "ae_global_use_moe", "ae_global_moe_blocks", i
             )
+
+            if should_use_moe:
+                moe_cfg = _get_moe_block_config(
+                    self.cf,
+                    "ae_global_moe",
+                    self.cf.ae_global_mlp_hidden_factor,
+                )
+
+                self.ae_global_blocks.append(
+                    MoEBlock(
+                        expert_fn=lambda hidden_factor=moe_cfg.expert_hidden_factor: MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=False,
+                            dropout_rate=self.cf.ae_global_dropout_rate,
+                            hidden_factor=hidden_factor,
+                            norm_type=self.cf.norm_type,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        ),
+                        dim_in=self.cf.ae_global_dim_embed,
+                        num_experts=moe_cfg.num_experts,
+                        top_k=moe_cfg.top_k,
+                        capacity_factor=moe_cfg.capacity_factor,
+                        load_balance_weight=moe_cfg.load_balance_weight,
+                        jitter_noise=moe_cfg.jitter_noise,
+                        router_bias=moe_cfg.router_bias,
+                        renormalize_gates=moe_cfg.renormalize_gates,
+                        with_residual=True,
+                        use_spatial_router=moe_cfg.use_spatial_routing,
+                        num_positions=self.num_healpix_cells,
+                        position_embed_dim=moe_cfg.position_embed_dim,
+                        debug_enabled=moe_cfg.debug_enabled,
+                        debug_interval=moe_cfg.debug_interval,
+                        debug_top_experts=moe_cfg.debug_top_experts,
+                        debug_name=f"ae_global.block_{i}",
+                    )
+                )
+            else:
+                self.ae_global_blocks.append(
+                    MLP(
+                        self.cf.ae_global_dim_embed,
+                        self.cf.ae_global_dim_embed,
+                        with_residual=True,
+                        dropout_rate=self.cf.ae_global_dropout_rate,
+                        hidden_factor=self.cf.ae_global_mlp_hidden_factor,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.mlp_norm_eps,
+                    )
+                )
         if self.cf.get("ae_global_trailing_layer_norm", False):
             self.ae_global_blocks.append(
                 torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
             )
 
+        self.initialize_moe_position_ids()
+
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock) and block.use_spatial_router:
+                block.router.initialize_from_coordinates(theta, phi)
+
+    def initialize_moe_position_ids(self):
+        device = next(self.parameters()).device
+        num_queries = self.cf.ae_local_num_queries
+        position_ids = _build_global_position_ids(
+            self.num_healpix_cells,
+            num_queries,
+            self.cf.num_register_tokens,
+            self.cf.num_class_tokens,
+            device,
+        )
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock):
+                block.set_position_ids(position_ids)
+
     def forward(self, tokens):
         for block in self.ae_global_blocks:
-            tokens = block(tokens)
+            if isinstance(block, MoEBlock):
+                tokens, _ = block(tokens)
+            else:
+                tokens = block(tokens)
         return tokens
+
+    def get_moe_aux_losses(self) -> list[torch.Tensor]:
+        aux_losses = []
+        for block in self.ae_global_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
 
 
 class ForecastingEngine(torch.nn.Module):
@@ -434,18 +579,53 @@ class ForecastingEngine(torch.nn.Module):
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                         )
                     )
-                # Add MLP block
-                self.fe_blocks.append(
-                    MLP(
-                        self.cf.ae_global_dim_embed,
-                        self.cf.ae_global_dim_embed,
-                        with_residual=True,
-                        dropout_rate=self.cf.fe_dropout_rate,
-                        norm_type=self.cf.norm_type,
-                        dim_aux=dim_aux,
-                        norm_eps=self.cf.mlp_norm_eps,
+                should_use_moe = _moe_block_enabled(self.cf, "fe_use_moe", "fe_moe_blocks", i)
+
+                if should_use_moe:
+                    moe_cfg = _get_moe_block_config(self.cf, "fe_moe", 2.0)
+
+                    self.fe_blocks.append(
+                        MoEBlock(
+                            expert_fn=lambda hidden_factor=moe_cfg.expert_hidden_factor: MLP(
+                                self.cf.ae_global_dim_embed,
+                                self.cf.ae_global_dim_embed,
+                                with_residual=False,
+                                dropout_rate=self.cf.fe_dropout_rate,
+                                hidden_factor=hidden_factor,
+                                norm_type=self.cf.norm_type,
+                                dim_aux=dim_aux,
+                                norm_eps=self.cf.mlp_norm_eps,
+                            ),
+                            dim_in=self.cf.ae_global_dim_embed,
+                            num_experts=moe_cfg.num_experts,
+                            top_k=moe_cfg.top_k,
+                            capacity_factor=moe_cfg.capacity_factor,
+                            load_balance_weight=moe_cfg.load_balance_weight,
+                            jitter_noise=moe_cfg.jitter_noise,
+                            router_bias=moe_cfg.router_bias,
+                            renormalize_gates=moe_cfg.renormalize_gates,
+                            with_residual=True,
+                            use_spatial_router=moe_cfg.use_spatial_routing,
+                            num_positions=self.num_healpix_cells,
+                            position_embed_dim=moe_cfg.position_embed_dim,
+                            debug_enabled=moe_cfg.debug_enabled,
+                            debug_interval=moe_cfg.debug_interval,
+                            debug_top_experts=moe_cfg.debug_top_experts,
+                            debug_name=f"fe.block_{i}",
+                        )
                     )
-                )
+                else:
+                    self.fe_blocks.append(
+                        MLP(
+                            self.cf.ae_global_dim_embed,
+                            self.cf.ae_global_dim_embed,
+                            with_residual=True,
+                            dropout_rate=self.cf.fe_dropout_rate,
+                            norm_type=self.cf.norm_type,
+                            dim_aux=dim_aux,
+                            norm_eps=self.cf.mlp_norm_eps,
+                        )
+                    )
                 # Optionally, add LayerNorm after i-th layer
                 if i in self.cf.get("fe_layer_norm_after_blocks", []):
                     self.fe_blocks.append(
@@ -461,6 +641,27 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
+        self.initialize_moe_position_ids()
+
+    def initialize_spatial_routers(self, theta: torch.Tensor, phi: torch.Tensor):
+        for block in self.fe_blocks:
+            if isinstance(block, MoEBlock) and block.use_spatial_router:
+                block.router.initialize_from_coordinates(theta, phi)
+
+    def initialize_moe_position_ids(self):
+        device = next(self.parameters()).device
+        num_queries = self.cf.ae_local_num_queries
+        position_ids = _build_global_position_ids(
+            self.num_healpix_cells,
+            num_queries,
+            self.cf.num_register_tokens,
+            self.cf.num_class_tokens,
+            device,
+        )
+        for block in self.fe_blocks:
+            if isinstance(block, MoEBlock):
+                block.set_position_ids(position_ids)
+
     def forward(self, tokens, fstep):
         if self.training:
             # Impute noise to the latent state
@@ -472,9 +673,28 @@ class ForecastingEngine(torch.nn.Module):
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = block(tokens)
+            elif isinstance(block, MoEBlock):
+                tokens = checkpoint(
+                    _moe_forward_wrapper_with_aux,
+                    block,
+                    tokens,
+                    aux_info,
+                    None,
+                    None,
+                    use_reentrant=False,
+                )
             else:
                 tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
         return tokens
+
+    def get_moe_aux_losses(self) -> list[torch.Tensor]:
+        aux_losses = []
+        for block in self.fe_blocks:
+            if isinstance(block, MoEBlock):
+                aux_loss = block.get_aux_loss()
+                if aux_loss is not None:
+                    aux_losses.append(aux_loss)
+        return aux_losses
 
 
 class EnsPredictionHead(torch.nn.Module):
