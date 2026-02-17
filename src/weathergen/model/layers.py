@@ -789,6 +789,13 @@ class MoEBlock(torch.nn.Module):
         index once and then slices contiguous groups, reducing Python-loop
         overhead.
 
+        Experts that receive no routed tokens are called with a single
+        zero-weight dummy token so that their parameters participate in the
+        autograd graph.  This is essential for DDP: without it,
+        ``prepare_for_backward`` would never see these parameters, making
+        ``find_unused_parameters=True`` ineffective and causing an
+        allreduce deadlock.
+
         .. note::
 
            Each expert is still called sequentially.  For higher throughput
@@ -806,40 +813,65 @@ class MoEBlock(torch.nn.Module):
             extra_args: Additional positional args forwarded to the expert.
             extra_kwargs: Additional keyword args forwarded to the expert.
         """
-        if token_indices.numel() == 0:
-            return
+        # Determine which experts are active (received at least one token).
+        if token_indices.numel() > 0:
+            # Group assignments by expert in one pass to reduce Python-side masking overhead.
+            sort_idx = torch.argsort(expert_indices_flat)
+            expert_sorted = expert_indices_flat[sort_idx]
+            token_sorted = token_indices[sort_idx]
+            weight_sorted = expert_weights_flat[sort_idx]
 
-        # Group assignments by expert in one pass to reduce Python-side masking overhead.
-        sort_idx = torch.argsort(expert_indices_flat)
-        expert_sorted = expert_indices_flat[sort_idx]
-        token_sorted = token_indices[sort_idx]
-        weight_sorted = expert_weights_flat[sort_idx]
+            active_experts, counts = torch.unique_consecutive(expert_sorted, return_counts=True)
+            active_experts_set = set(active_experts.tolist())
+            offsets = counts.cumsum(0).tolist()
 
-        active_experts, counts = torch.unique_consecutive(expert_sorted, return_counts=True)
-        active_experts = active_experts.tolist()
-        offsets = counts.cumsum(0).tolist()
+            start = 0
+            for expert_idx, end in zip(active_experts.tolist(), offsets, strict=True):
+                tok_idx = token_sorted[start:end]
+                expert_input = x_flat[tok_idx]
+                if aux_flat is not None:
+                    expert_output = self.experts[expert_idx](
+                        expert_input,
+                        aux_flat[tok_idx],
+                        *extra_args,
+                        **extra_kwargs,
+                    )
+                else:
+                    expert_output = self.experts[expert_idx](
+                        expert_input,
+                        *extra_args,
+                        **extra_kwargs,
+                    )
 
-        start = 0
-        for expert_idx, end in zip(active_experts, offsets, strict=True):
-            tok_idx = token_sorted[start:end]
-            expert_input = x_flat[tok_idx]
-            if aux_flat is not None:
-                expert_output = self.experts[expert_idx](
-                    expert_input,
-                    aux_flat[tok_idx],
-                    *extra_args,
-                    **extra_kwargs,
-                )
-            else:
-                expert_output = self.experts[expert_idx](
-                    expert_input,
-                    *extra_args,
-                    **extra_kwargs,
-                )
+                weighted = expert_output * weight_sorted[start:end].unsqueeze(-1).to(expert_output.dtype)
+                output.index_add_(0, tok_idx, weighted.to(output.dtype))
+                start = end
+        else:
+            active_experts_set = set()
 
-            weighted = expert_output * weight_sorted[start:end].unsqueeze(-1)
-            output.index_add_(0, tok_idx, weighted)
-            start = end
+        # DDP safety: call idle experts with a dummy token so their
+        # parameters are in the autograd graph visible to
+        # prepare_for_backward.  The zero multiplier ensures no
+        # numerical contribution.
+        if self.training:
+            for expert_idx in range(self.num_experts):
+                if expert_idx not in active_experts_set:
+                    dummy_in = x_flat[:1].detach()
+                    if aux_flat is not None:
+                        dummy_out = self.experts[expert_idx](
+                            dummy_in,
+                            aux_flat[:1].detach(),
+                            *extra_args,
+                            **extra_kwargs,
+                        )
+                    else:
+                        dummy_out = self.experts[expert_idx](
+                            dummy_in,
+                            *extra_args,
+                            **extra_kwargs,
+                        )
+                    # Zero contribution — only creates the autograd edge.
+                    output[0] = output[0] + dummy_out.sum() * 0.0
 
     def forward(
         self,
@@ -933,7 +965,7 @@ class MoEBlock(torch.nn.Module):
 
             if self.renormalize_gates and token_indices.numel() > 0:
                 # Re-normalize the remaining gate mass per token after dropping edges.
-                token_weight_sum = x_flat.new_zeros(n_tokens)
+                token_weight_sum = torch.zeros(n_tokens, dtype=expert_weights_flat.dtype, device=expert_weights_flat.device)
                 token_weight_sum.index_add_(0, token_indices, expert_weights_flat)
                 expert_weights_flat = expert_weights_flat / token_weight_sum[token_indices].clamp_min(1e-9)
 
@@ -964,19 +996,24 @@ class MoEBlock(torch.nn.Module):
         # --- Auxiliary load-balancing loss (training only). ---
         # Uses the *original* router assignments (before capacity clipping) so
         # that the loss penalises the router's raw routing decisions.
-        self.last_aux_loss = None
+        # Accumulates across forecast steps; call reset_aux_loss() before each
+        # training step.
         if self.training:
             assignment_weights = torch.zeros(
                 (n_tokens, self.num_experts),
                 device=x_flat.device,
                 dtype=torch.float32,
             )
-            assignment_weights.scatter_add_(1, expert_indices, expert_weights)
-            self.last_aux_loss = self.load_balance_loss(
+            assignment_weights.scatter_add_(1, expert_indices, expert_weights.to(assignment_weights.dtype))
+            step_aux = self.load_balance_loss(
                 router_probs,
                 assignment_weights,
                 token_mask_flat,
             )
+            if self.last_aux_loss is not None:
+                self.last_aux_loss = self.last_aux_loss + step_aux
+            else:
+                self.last_aux_loss = step_aux
 
         if should_log_debug:
             self._log_debug_stats(
@@ -994,3 +1031,7 @@ class MoEBlock(torch.nn.Module):
         """Return the auxiliary load-balancing loss from the most recent
         forward pass, or ``None`` if the model was in eval mode."""
         return self.last_aux_loss
+
+    def reset_aux_loss(self) -> None:
+        """Reset the accumulated auxiliary loss. Call before each training step."""
+        self.last_aux_loss = None
