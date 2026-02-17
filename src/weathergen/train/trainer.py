@@ -424,6 +424,11 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
+                # Reset accumulated MoE aux losses before each forward pass.
+                for module in self.model.modules():
+                    if isinstance(module, MoEBlock):
+                        module.reset_aux_loss()
+
                 preds = self.model(
                     self.model_params,
                     batch.get_source_samples(),

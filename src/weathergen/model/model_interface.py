@@ -78,7 +78,7 @@ def init_model_and_shard(
         )
 
     elif with_ddp and with_fsdp:
-        # with DDP *and() FSDP
+        # with DDP *and* FSDP
         fsdp_kwargs = {
             "mp_policy": (
                 MixedPrecisionPolicy(
@@ -99,25 +99,30 @@ def init_model_and_shard(
             MultiSelfAttentionHeadVarlen,
         )
 
-        for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        def _shard_modules(root: torch.nn.Module, kwargs: dict) -> None:
+            """Apply fully_shard to matching modules, skipping descendants of
+            already-sharded modules.
 
-        for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+            This prevents double-sharding when a shardable type (e.g. MoEBlock)
+            contains children of another shardable type (e.g. MLP experts).
+            .modules() yields parents before children (pre-order), so once we
+            shard a module we must skip all of its descendants.
+            """
+            sharded_ids: set[int] = set()
+            for module in root.modules():
+                if id(module) in sharded_ids:
+                    continue
+                if isinstance(module, modules_to_shard):
+                    fully_shard(module, **kwargs)
+                    for child in module.modules():
+                        if child is not module:
+                            sharded_ids.add(id(child))
 
-        for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.forecast_engine.fe_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.latent_heads.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        _shard_modules(model.encoder.ae_local_engine.ae_local_blocks, fsdp_kwargs)
+        _shard_modules(model.encoder.ae_local_global_engine.ae_adapter, fsdp_kwargs)
+        _shard_modules(model.encoder.ae_global_engine.ae_global_blocks, fsdp_kwargs)
+        _shard_modules(model.forecast_engine.fe_blocks, fsdp_kwargs)
+        _shard_modules(model.latent_heads, fsdp_kwargs)
 
         full_precision_fsdp_kwargs = {
             "mp_policy": (
@@ -130,9 +135,7 @@ def init_model_and_shard(
             ),
         }
 
-        for module in model.target_token_engines.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
+        _shard_modules(model.target_token_engines, full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
         fully_shard(model)
