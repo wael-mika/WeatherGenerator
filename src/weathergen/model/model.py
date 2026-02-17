@@ -9,6 +9,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import dataclasses
 import logging
 import math
 import typing
@@ -47,9 +48,15 @@ logger = logging.getLogger(__name__)
 type StreamName = str
 
 
+@dataclasses.dataclass(init=False)
 class ModelOutput:
-    """
-    Representation of model output
+    """Representation of model output.
+
+    This class is a ``@dataclass`` so that PyTorch DDP's ``_find_tensors()``
+    can discover all tensors it contains.  Without the decorator,
+    ``_find_tensors`` returns ``[]`` for custom classes, making
+    ``find_unused_parameters=True`` ineffective and causing allreduce
+    deadlocks with sparse MoE.
     """
 
     physical: list[dict[StreamName, torch.Tensor]]

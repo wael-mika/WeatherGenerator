@@ -461,6 +461,11 @@ class Trainer(TrainerBase):
                     dtype=self.mixed_precision_dtype,
                     enabled=cf.with_mixed_precision,
                 ):
+                    # Reset accumulated MoE aux losses before each forward pass.
+                    for module in self.model.modules():
+                        if isinstance(module, MoEBlock):
+                            module.reset_aux_loss()
+
                     preds = self.model(
                         model_params=self.model_params,
                         batch=batch.get_source_samples(),
@@ -486,10 +491,6 @@ class Trainer(TrainerBase):
                 # Add MoE router load-balancing loss (if any MoE blocks are active).
                 # This must happen after compute_loss but before backward so that
                 # gradients flow through the router weights.
-                moe_aux_loss = self._collect_moe_aux_losses()
-                if moe_aux_loss is not None:
-                    loss = loss + moe_aux_loss
-                    self._record_moe_aux_loss(self.loss_calculator, moe_aux_loss)
                 moe_aux_loss = self._collect_moe_aux_losses()
                 if moe_aux_loss is not None:
                     loss = loss + moe_aux_loss
