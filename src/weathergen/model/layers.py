@@ -366,29 +366,48 @@ class SpatialMoERouter(torch.nn.Module):
         assert len(theta) == self.num_positions, (len(theta), self.num_positions)
         assert len(phi) == self.num_positions, (len(phi), self.num_positions)
 
-        device = self.position_embed.weight.device
-        theta = theta.to(device)
-        phi = phi.to(device)
-
         with torch.no_grad():
             embed_dim = self.position_embed_dim
-            embeddings = torch.zeros(self.num_positions, embed_dim, device=device)
+            # Build the full embedding table on CPU to avoid device-specific issues.
+            embeddings = torch.zeros(self.num_positions, embed_dim)
             half_dim = embed_dim // 2
 
+            theta_cpu = theta.cpu().float()
+            phi_cpu = phi.cpu().float()
+
             freqs_theta = torch.exp(
-                torch.arange(0, half_dim, 2, device=device).float()
+                torch.arange(0, half_dim, 2).float()
                 * -(np.log(10000.0) / max(half_dim, 1))
             )
-            embeddings[:, 0:half_dim:2] = torch.sin(theta.unsqueeze(1) * freqs_theta)
-            embeddings[:, 1:half_dim:2] = torch.cos(theta.unsqueeze(1) * freqs_theta)
+            embeddings[:, 0:half_dim:2] = torch.sin(theta_cpu.unsqueeze(1) * freqs_theta)
+            embeddings[:, 1:half_dim:2] = torch.cos(theta_cpu.unsqueeze(1) * freqs_theta)
 
             freqs_phi = torch.exp(
-                torch.arange(0, half_dim, 2, device=device).float()
+                torch.arange(0, half_dim, 2).float()
                 * -(np.log(10000.0) / max(half_dim, 1))
             )
-            embeddings[:, half_dim + 0 :: 2] = torch.sin(phi.unsqueeze(1) * freqs_phi)
-            embeddings[:, half_dim + 1 :: 2] = torch.cos(phi.unsqueeze(1) * freqs_phi)
-            self.position_embed.weight.copy_(embeddings)
+            embeddings[:, half_dim + 0 :: 2] = torch.sin(phi_cpu.unsqueeze(1) * freqs_phi)
+            embeddings[:, half_dim + 1 :: 2] = torch.cos(phi_cpu.unsqueeze(1) * freqs_phi)
+
+            weight = self.position_embed.weight
+            if hasattr(weight, "to_local"):
+                # FSDP2 DTensor with Shard(0) placement: write directly to the
+                # local shard to avoid a Replicated→Shard(0) redistribution,
+                # which triggers a collective (scatter) and can deadlock outside
+                # of FSDP2's forward hooks.
+                local_w = weight.to_local()
+                local_rows = local_w.shape[0]
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                world = dist.get_world_size() if dist.is_initialized() else 1
+                chunk = math.ceil(self.num_positions / world)
+                start = rank * chunk
+                local_w.copy_(
+                    embeddings[start : start + local_rows].to(
+                        device=local_w.device, dtype=local_w.dtype
+                    )
+                )
+            else:
+                weight.copy_(embeddings.to(device=weight.device, dtype=weight.dtype))
 
         return self
 
