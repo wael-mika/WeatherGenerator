@@ -1,0 +1,265 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+
+# =======================================
+# EXP 01 - RANDOM HIGH MASK | INDEPENDENT
+# =======================================
+# Base: config_jepa_from_forecast.yml (same architecture, optimizer, EMATeacher)
+#
+# Masking: Random, student keeps 40% of tokens (vs 60% in base config)
+# Target:  Full global view (forecast - all tokens)
+# Correspondence: independent
+#
+# Rationale: More aggressive masking forces the student to predict global teacher
+# representations from a harder, sparser context. Tests whether difficulty scaling
+# improves representation quality (analogous to high mask ratio in MAE).
+
+embed_orientation: "channels"
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 2048
+ae_local_num_blocks: 0
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 4
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 0
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+num_class_tokens: 0
+num_register_tokens: 0
+
+fe_num_blocks: 0
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+ddp_find_unused_parameters: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: { run_id: "aev85iny", mini_epoch: -1}
+
+norm_type: "LayerNorm"
+zarr_store: "zip"
+
+#####################################
+
+streams_directory: "./config/streams/era5_1deg_forecasting/"
+streams: ???
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: ""
+  run_id: ???
+  run_history: []
+
+train_log_freq:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+data_loading:
+  num_workers: 12
+  rng_seed: ???
+
+training_config:
+
+  training_mode: ["student_teacher"]
+
+  collapse_monitoring:
+    enabled: true
+    compute_frequency: 100
+    log_frequency: 100
+    metrics:
+      effective_rank:
+        enabled: true
+        tensor_source: "both"
+        sample_size: 2048
+      singular_values:
+        enabled: true
+        tensor_source: "both"
+        sample_size: 2048
+      dimension_variance:
+        enabled: true
+        tensor_source: "both"
+      prototype_entropy:
+        enabled: true
+      ema_beta:
+        enabled: true
+
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  start_date: 1979-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  window_offset_prediction: 0
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 1e-6
+    lr_final: 0.0
+    num_steps_warmup: 4096
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    type: "muon_adamw"
+    grad_clip: 1.0
+    weight_decay: 0.05
+    log_grad_norms: False
+    adamw:
+      beta1: 0.99
+      beta2: 0.99
+      eps: 2e-06
+    muon:
+      lr_multiplier: 30.0
+      momentum: 0.95
+      nesterov: true
+      weight_decay: 0.05
+
+  losses: {
+    "student-teacher": {
+        enabled: True,
+        type: LossLatentSSLStudentTeacher,
+        weight: 1.0,
+        loss_fcts: {
+          "JEPA": {
+            'weight': 4, "loss_extra_args": {}, "out_dim": 2048, "head": transformer,
+            "num_blocks": 6, "num_heads": 12, "with_qk_lnorm": True, "intermediate_dim": 768,
+            "dropout_rate": 0.1,
+            # independent: student mask generated without reference to teacher mask
+            target_source_correspondence: {0 : {0 : "independent"} },
+          },
+        },
+        target_and_aux_calc: { "EMATeacher" :
+          { ema_ramp_up_ratio : null,
+            ema_halflife_in_thousands: 1e-1,
+            teacher_run_id: "aev85iny",
+            teacher_mini_epoch: -1,
+            model_param_overrides : {
+              training_config: { losses: { student-teacher:{ loss_fcts :{ JEPA: {head: identity} }}}}
+            },
+          }
+        }
+      }
+  }
+
+  # Student sees only 40% of tokens (harder task, vs 60% in base config)
+  model_input: {
+    "student_high_mask" : {
+      masking_strategy: "random",
+      num_samples: 1,
+      num_steps_input: 1,
+      masking_strategy_config : {
+        rate : 0.4,          # 40% kept - harder masking than base (60%)
+        rate_sampling: False,
+      },
+    },
+  }
+
+  # Teacher sees all tokens (full global view)
+  target_input: {
+    "teacher_full" : {
+      masking_strategy: "forecast",
+      num_samples: 1,
+      masking_strategy_config : { },
+    },
+  }
+
+  forecast:
+    time_step: 00:00:00
+    num_steps: 0
+    policy: null
+
+
+validation_config:
+
+  samples_per_mini_epoch: 256
+  shuffle: False
+
+  start_date: 2023-10-01T00:00
+  end_date: 2023-12-31T00:00
+
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+  }
+
+  validate_before_training: False
+
+
+wgtags:
+  org: null
+  issue: null
+  exp: "jepa_fc_masking_ablation"
+  masking_type: "random_high_mask"
+  correspondence: "independent"
+  grid: null
