@@ -32,8 +32,8 @@ evaluation:
   # baseline: "ar40mckx"
 
 run_ids :
-  htws1gl3:
-    label: "baseline model"
+  m3nco4mb:
+    label: "v1"
     results_base_dir : "./results/"
     mini_epoch: 0
     rank: 0
@@ -52,8 +52,8 @@ run_ids :
           plot_histograms: true
           plot_animations: true
 
-  ql5zw4r2:
-    label: "baseline_extreme_eval"
+  pnq6gich:
+    label: "v2"
     results_base_dir : "./results/"
     mini_epoch: 0
     rank: 0
@@ -72,6 +72,65 @@ run_ids :
           plot_histograms: true
           plot_animations: true
 
+  zpftrigb:
+    label: "v3"
+    results_base_dir : "./results/"
+    mini_epoch: 0
+    rank: 0
+    streams:
+      IMERG_ANEMOI:
+        channels: ["tp_imerg_0"]
+        evaluation:
+          forecast_step: "all"
+          sample: "all"
+          ensemble: "all" #supported: "all", "mean", [0,1,2]
+        plotting:
+          sample: [1, 3]
+          forecast_step: [1,2]
+          plot_maps: true
+          plot_target: true
+          plot_histograms: true
+          plot_animations: true
+
+  htws1gl3:
+    label: "No MoE, OLD"
+    results_base_dir : "./results/"
+    mini_epoch: 0
+    rank: 0
+    streams:
+      IMERG_ANEMOI:
+        channels: ["tp_imerg_0"]
+        evaluation:
+          forecast_step: "all"
+          sample: "all"
+          ensemble: "all" #supported: "all", "mean", [0,1,2]
+        plotting:
+          sample: [1, 3]
+          forecast_step: [1,2]
+          plot_maps: true
+          plot_target: true
+          plot_histograms: true
+          plot_animations: true
+
+  uey6jcgb:
+    label: "WITH MoE, OLD"
+    results_base_dir : "./results/"
+    mini_epoch: 0
+    rank: 0
+    streams:
+      IMERG_ANEMOI:
+        channels: ["tp_imerg_0"]
+        evaluation:
+          forecast_step: "all"
+          sample: "all"
+          ensemble: "all" #supported: "all", "mean", [0,1,2]
+        plotting:
+          sample: [1, 3]
+          forecast_step: [1,2]
+          plot_maps: true
+          plot_target: true
+          plot_histograms: true
+          plot_animations: true
   # xowec7mu:
   #   label: "MoE with spatial routing"
   #   results_base_dir : "./results/"
