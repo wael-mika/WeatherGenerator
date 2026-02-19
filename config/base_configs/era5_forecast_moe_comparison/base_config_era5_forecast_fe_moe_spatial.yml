@@ -135,7 +135,7 @@ train_log_freq:
 
 training_config:
   training_mode: ["masking"]
-  num_mini_epochs: 48
+  num_mini_epochs: 64
   samples_per_mini_epoch: 4096
   shuffle: True
   start_date: 1979-01-01T00:00
