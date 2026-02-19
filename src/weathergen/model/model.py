@@ -479,7 +479,7 @@ class Model(torch.nn.Module):
 
     def reset_parameters(self):
         def _reset_params(module):
-            if isinstance(module, nn.Linear | nn.LayerNorm | nn.Embedding):
+            if isinstance(module, nn.Linear | nn.LayerNorm):
                 module.reset_parameters()
             else:
                 pass

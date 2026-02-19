@@ -341,7 +341,17 @@ class SpatialMoERouter(torch.nn.Module):
         self.top_k = top_k
         self.jitter_noise = jitter_noise
         self.position_embed_dim = position_embed_dim
-        self.position_embed = nn.Embedding(num_positions, position_embed_dim)
+        # Non-trainable replicated buffer instead of nn.Embedding (nn.Parameter).
+        # nn.Embedding weight is sharded as a DTensor by FSDP2, and F.embedding
+        # with a DTensor weight does NOT unwrap the output the way F.linear does.
+        # This means every forward call triggers an implicit full_tensor() all-gather
+        # on the embedding OUTPUT, which is catastrophically slow and eventually
+        # deadlocks.  As a buffer the table stays replicated on each rank and
+        # F.embedding returns a plain local tensor.  The sinusoidal spatial signal
+        # is fixed geometry; router_weights learns to use it.
+        self.register_buffer(
+            "position_embed_weight", torch.zeros(num_positions, position_embed_dim)
+        )
         self.router_weights = nn.Linear(dim_in + position_embed_dim, num_experts, bias=router_bias)
 
     def initialize_from_coordinates(self, theta: torch.Tensor, phi: torch.Tensor):
@@ -389,25 +399,14 @@ class SpatialMoERouter(torch.nn.Module):
             embeddings[:, half_dim + 0 :: 2] = torch.sin(phi_cpu.unsqueeze(1) * freqs_phi)
             embeddings[:, half_dim + 1 :: 2] = torch.cos(phi_cpu.unsqueeze(1) * freqs_phi)
 
-            weight = self.position_embed.weight
-            if hasattr(weight, "to_local"):
-                # FSDP2 DTensor with Shard(0) placement: write directly to the
-                # local shard to avoid a Replicated→Shard(0) redistribution,
-                # which triggers a collective (scatter) and can deadlock outside
-                # of FSDP2's forward hooks.
-                local_w = weight.to_local()
-                local_rows = local_w.shape[0]
-                rank = dist.get_rank() if dist.is_initialized() else 0
-                world = dist.get_world_size() if dist.is_initialized() else 1
-                chunk = math.ceil(self.num_positions / world)
-                start = rank * chunk
-                local_w.copy_(
-                    embeddings[start : start + local_rows].to(
-                        device=local_w.device, dtype=local_w.dtype
-                    )
+            # position_embed_weight is a replicated buffer (not an FSDP2-sharded
+            # parameter), so a plain copy is safe on all ranks.
+            self.position_embed_weight.copy_(
+                embeddings.to(
+                    device=self.position_embed_weight.device,
+                    dtype=self.position_embed_weight.dtype,
                 )
-            else:
-                weight.copy_(embeddings.to(device=weight.device, dtype=weight.dtype))
+            )
 
         return self
 
@@ -455,12 +454,14 @@ class SpatialMoERouter(torch.nn.Module):
                 )
             position_ids = position_ids.to(device=x.device, dtype=torch.long)
 
-        pos_embed = torch.zeros(
-            (num_tokens, self.position_embed_dim), device=x.device, dtype=x.dtype
-        )
-        valid_pos = position_ids >= 0
-        if valid_pos.any():
-            pos_embed[valid_pos] = self.position_embed(position_ids[valid_pos] % self.num_positions)
+        # Clamp to valid range before lookup; zero out special tokens (id < 0)
+        # via elementwise multiply instead of boolean scatter — avoids any
+        # GPU-CPU sync and the DTensor issues that arise when nn.Embedding weight
+        # is FSDP2-sharded.  The multiply is a no-op for the common case where
+        # all position_ids are non-negative (FE has no special tokens in practice).
+        clipped_ids = position_ids.clamp(min=0) % self.num_positions
+        pos_embed = F.embedding(clipped_ids, self.position_embed_weight).to(dtype=x.dtype)
+        pos_embed = pos_embed * (position_ids >= 0).to(dtype=x.dtype).unsqueeze(-1)
 
         x_with_pos = torch.cat([x, pos_embed], dim=-1)
 
