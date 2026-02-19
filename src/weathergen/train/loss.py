@@ -512,6 +512,228 @@ def centroid_shift(
 centroid_shift.requires_coords = True
 
 
+def fss_loss(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    coords: torch.Tensor | None,
+):
+    """
+    Differentiable Fractions Skill Score (FSS) loss.
+
+    Approximates FSS pooling with a Gaussian kernel on the sphere. For each threshold
+    and Gaussian scale (sigma_km), computes MSE between the pooled soft-exceedance
+    fraction fields of target and prediction. This directly minimises the FSS
+    numerator at multiple spatial scales simultaneously.
+
+    Pairwise distance matrix is O(N²) in memory; set max_pairwise_points to skip
+    gracefully on very large patches (returns zero, no gradient).
+
+    Config options (via loss_config.fss):
+        thresholds_mm: thresholds in mm (converted to model space)
+        threshold_weights: per-threshold weights
+        scales_km: Gaussian sigma values in km, e.g. [50, 200]
+        scale_weights: per-scale weights (same length as scales_km)
+        temperature: sigmoid temperature for soft exceedance (default 1.0)
+        earth_radius_km: earth radius for distance calc (default 6371)
+        max_pairwise_points: skip if N > this to avoid OOM (default 8000)
+        transform_*: optional transform parameters for thresholds
+    """
+    cfg = _get_loss_cfg("fss")
+    temperature = float(cfg.get("temperature", 1.0))
+    earth_r = float(cfg.get("earth_radius_km", 6371.0))
+    scales_km = cfg.get("scales_km", [50.0, 200.0])
+    scale_weights_list = cfg.get("scale_weights", [1.0] * len(scales_km))
+    max_pts = int(cfg.get("max_pairwise_points", 8000))
+
+    thresholds = _get_thresholds_tensor(target, cfg)
+    threshold_weights_list = cfg.get("threshold_weights", None)
+    if threshold_weights_list is not None:
+        threshold_weights = torch.tensor(
+            threshold_weights_list, device=target.device, dtype=target.dtype
+        )
+    else:
+        threshold_weights = None
+
+    n_ch = target.shape[-1]
+    loss_chs = torch.zeros(n_ch, device=target.device, dtype=target.dtype)
+
+    if coords is None or coords.numel() == 0 or target.shape[0] > max_pts:
+        loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+        return loss, loss_chs
+
+    mask_nan = ~torch.isnan(target)
+    pred_mean = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    target_filled = torch.where(mask_nan, target, 0.0)
+    pred_filled = torch.where(mask_nan, pred_mean, 0.0)
+
+    # Convert lat/lon to 3D unit vectors on the unit sphere
+    coords = coords.to(device=target.device, dtype=target.dtype)
+    lat = coords[:, 0] * (np.pi / 180.0)
+    lon = coords[:, 1] * (np.pi / 180.0)
+    vec = torch.stack(
+        [
+            torch.cos(lat) * torch.cos(lon),
+            torch.cos(lat) * torch.sin(lon),
+            torch.sin(lat),
+        ],
+        dim=-1,
+    )  # [N, 3]
+
+    # Pairwise great-circle distances [N, N] in km — computed once, reused per threshold/scale
+    dots = torch.mm(vec, vec.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+    dist_km = earth_r * torch.acos(dots)  # [N, N]
+
+    total_weight = 0.0
+    for i_thr, thr in enumerate(thresholds):
+        w_thr = threshold_weights[i_thr].item() if threshold_weights is not None else 1.0
+
+        # Soft exceedance fractions [N, C]
+        exc_t = torch.sigmoid((target_filled - thr) / temperature)
+        exc_p = torch.sigmoid((pred_filled - thr) / temperature)
+
+        if weights_points is not None:
+            exc_t = (exc_t.T * weights_points).T
+            exc_p = (exc_p.T * weights_points).T
+
+        for sigma_km, w_scale in zip(scales_km, scale_weights_list):
+            w = w_thr * float(w_scale)
+            total_weight += w
+
+            # Gaussian kernel normalised per row → weighted average of neighbours
+            kernel = torch.exp(-dist_km.pow(2) / (2.0 * float(sigma_km) ** 2))  # [N, N]
+            kernel = kernel / (kernel.sum(dim=1, keepdim=True) + 1e-8)           # [N, N]
+
+            frac_t = torch.mm(kernel, exc_t)  # [N, C]
+            frac_p = torch.mm(kernel, exc_p)  # [N, C]
+
+            loss_chs = loss_chs + w * (frac_t - frac_p).pow(2).mean(0)
+
+    if total_weight > 0:
+        loss_chs = loss_chs / total_weight
+
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
+# Signals to the loss calculator that coords are required.
+fss_loss.requires_coords = True
+
+
+def extreme_mae(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Conditional intensity loss: asymmetric pinball MAE computed only on cells
+    where target >= threshold.
+
+    Unlike quantile_upper (which operates over all cells and averages the tail
+    error in with the rest), this loss focuses exclusively on the extreme cells
+    themselves, giving a direct gradient signal on underestimated peak magnitudes.
+
+    Config options (via loss_config.extreme_mae):
+        thresholds_mm: thresholds in mm (converted to model space)
+        threshold_weights: per-threshold weights
+        alpha: pinball asymmetry (>0.5 penalises underprediction more, default 0.8)
+        transform_*: optional transform parameters for thresholds
+    """
+    cfg = _get_loss_cfg("extreme_mae")
+    thresholds = _get_thresholds_tensor(target, cfg)
+    alpha = float(cfg.get("alpha", 0.8))
+
+    threshold_weights_list = cfg.get("threshold_weights", None)
+    if threshold_weights_list is not None:
+        threshold_weights = torch.tensor(
+            threshold_weights_list, device=target.device, dtype=target.dtype
+        )
+    else:
+        threshold_weights = None
+
+    mask_nan = ~torch.isnan(target)
+    pred_mean = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    target_filled = torch.where(mask_nan, target, 0.0)
+    pred_filled = torch.where(mask_nan, pred_mean, 0.0)
+
+    n_ch = target.shape[-1]
+    loss_chs = torch.zeros(n_ch, device=target.device, dtype=target.dtype)
+    total_weight = 0.0
+
+    for i_thr, thr in enumerate(thresholds):
+        w_thr = threshold_weights[i_thr].item() if threshold_weights is not None else 1.0
+        total_weight += w_thr
+
+        for c in range(n_ch):
+            t = target_filled[:, c]
+            p = pred_filled[:, c]
+            extreme_mask = mask_nan[:, c] & (t >= thr)
+            if extreme_mask.sum() == 0:
+                continue
+
+            diff = t[extreme_mask] - p[extreme_mask]
+            pinball = alpha * torch.clamp(diff, min=0.0) + (1.0 - alpha) * torch.clamp(-diff, min=0.0)
+
+            if weights_points is not None:
+                wp = weights_points[extreme_mask]
+                denom = wp.sum().clamp(min=1e-8)
+                loss_chs[c] = loss_chs[c] + w_thr * (pinball * wp).sum() / denom
+            else:
+                loss_chs[c] = loss_chs[c] + w_thr * pinball.mean()
+
+    if total_weight > 0:
+        loss_chs = loss_chs / total_weight
+
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
+def no_rain_l1(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Dry-area sparsity penalty: one-sided L1 on positive predictions where
+    target < dry_threshold.
+
+    Unlike soft_exceedance at a low threshold (which saturates as pred falls
+    below the threshold), this loss has a constant gradient for all positive
+    predictions in dry cells, making it more aggressive at eliminating drizzle.
+    It complements soft_exceedance: BCE at 0.1 mm handles the probability of
+    occurrence; L1 here directly shrinks spurious positive values toward zero.
+
+    Config options (via loss_config.no_rain_l1):
+        thresholds_mm: single-element list; cells with target < threshold are
+                       treated as dry (default [0.1])
+        transform_*: optional transform parameters for the threshold
+    """
+    cfg = _get_loss_cfg("no_rain_l1")
+    thresholds = _get_thresholds_tensor(target, cfg)
+    dry_thr = thresholds[0]  # single threshold expected
+
+    mask_nan = ~torch.isnan(target)
+    pred_mean = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    target_filled = torch.where(mask_nan, target, 0.0)
+    pred_filled = torch.where(mask_nan, pred_mean, 0.0)
+
+    # Dry mask: valid cells where target is below the dry threshold
+    dry_mask = mask_nan & (target_filled < dry_thr)
+
+    # One-sided L1: penalise any positive prediction in dry cells
+    penalty = torch.clamp(pred_filled, min=0.0) * dry_mask.float()
+
+    if weights_points is not None:
+        penalty = (penalty.T * weights_points).T
+
+    loss_chs = penalty.mean(0)
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
 def cosine_latitude(stream_data, forecast_offset, fstep, min_value=1e-3, max_value=1.0):
     latitudes_radian = stream_data.target_coords_raw[forecast_offset + fstep][:, 0] * np.pi / 180
     return (max_value - min_value) * np.cos(latitudes_radian) + min_value

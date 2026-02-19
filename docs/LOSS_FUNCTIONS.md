@@ -162,14 +162,100 @@ The loss is only applied if **both** target and prediction have at least
 
 ---
 
+### 6) Differentiable FSS loss (name: `fss_loss`)
+Implementation: `fss_loss` (requires coords).
+
+Directly minimises the FSS numerator at multiple spatial scales. For each
+threshold \(t\) and Gaussian scale \(\sigma\) (km):
+
+1) Compute soft exceedance fractions using a sigmoid:
+   \[
+   e_i = \sigma\Big(\frac{y_i - t}{T}\Big), \quad
+   \hat{e}_i = \sigma\Big(\frac{\hat{y}_i - t}{T}\Big)
+   \]
+2) Pool over the neighbourhood of each point via a Gaussian kernel on the sphere:
+   \[
+   k_{ij} = \exp\!\Big(-\tfrac{d_{ij}^2}{2\sigma^2}\Big), \quad
+   F_i = \frac{\sum_j k_{ij} e_j}{\sum_j k_{ij}}
+   \]
+3) Minimise MSE between pooled fractions:
+   \[
+   L = \text{MSE}(F, \hat{F})
+   \]
+
+This is equivalent to minimising \(1 - \text{FSS}\) (without the reference
+normalisation), and directly targets the `fss_t20_Xkm` evaluation metrics.
+A pairwise \(N \times N\) distance matrix is built once per forward pass; for
+\(N > \texttt{max\_pairwise\_points}\) the loss returns zero gracefully.
+
+**Parameters** (`loss_config.fss`)
+- `thresholds_mm`: thresholds in mm
+- `threshold_weights`: per-threshold weights
+- `scales_km`: Gaussian sigma values in km (e.g. `[50, 200]`)
+- `scale_weights`: per-scale weights
+- `temperature`: sigmoid temperature
+- `earth_radius_km`: earth radius (default 6371)
+- `max_pairwise_points`: skip if \(N\) exceeds this (default 8000)
+
+---
+
+### 7) Conditional intensity loss (name: `extreme_mae`)
+Implementation: `extreme_mae`.
+
+Asymmetric pinball MAE computed **only on cells where target ≥ threshold**.
+Unlike `quantile_upper` (which averages the tail error across *all* cells),
+this loss focuses exclusively on the extreme cells themselves, giving a direct
+gradient to correct underestimated peak magnitudes.
+
+For each threshold \(t\), let \(\mathcal{E} = \{i : y_i \ge t\}\):
+
+\[
+L = \alpha \cdot \mathbb{E}_{i \in \mathcal{E}}\!\left[\max(y_i - \hat{y}_i, 0)\right]
+  + (1-\alpha) \cdot \mathbb{E}_{i \in \mathcal{E}}\!\left[\max(\hat{y}_i - y_i, 0)\right]
+\]
+
+**Parameters** (`loss_config.extreme_mae`)
+- `thresholds_mm`: thresholds in mm
+- `threshold_weights`: per-threshold weights
+- `alpha`: asymmetry factor; \(> 0.5\) penalises under-prediction more (default 0.8)
+
+---
+
+### 8) Dry-area sparsity penalty (name: `no_rain_l1`)
+Implementation: `no_rain_l1`.
+
+One-sided L1 penalty on positive predictions in cells where the target is below
+a dry threshold. Complements `soft_exceedance` at low thresholds: BCE saturates
+when the prediction is already slightly below the threshold; this L1 term has a
+**constant gradient** for all positive predictions in dry cells, making it
+more aggressive at eliminating drizzle artefacts.
+
+\[
+L = \mathbb{E}\!\left[\max(\hat{y}, 0) \cdot \mathbf{1}(y < t_{\text{dry}})\right]
+\]
+
+**Parameters** (`loss_config.no_rain_l1`)
+- `thresholds_mm`: single-element list; cells with \(y < t\) are treated as dry
+  (default `[0.1]`)
+
+---
+
 ## Notes on scientific interpretation
 
 1) **Intensity-weighted MSE** and **soft exceedance** improve detection but
-   often increase FAR.  
-2) **Quantile loss** reduces under-prediction in the tail but can bias means.  
+   often increase FAR.
+2) **Quantile loss** reduces under-prediction in the tail but can bias means.
 3) **Centroid-shift** directly targets location error and should improve
    peak/centroid metrics at high thresholds; it may slightly worsen RMSE/MAE if
    overweighted.
+4) **FSS loss** directly targets spatial skill at user-specified scales; expect
+   improvements in `fss_t20_50km` and `fss_t20_200km` with little impact on
+   point-wise metrics.
+5) **Extreme MAE** targets peak magnitude; expect reduced underestimation at
+   the 99th percentile and above, with a possible slight increase in bias.
+6) **No-rain L1** suppresses drizzle artefacts; expect reduced FAR and positive
+   bias, with a small risk of reducing POD if weighted too heavily.
 
-Recommended practice: keep `centroid_shift` weight small (e.g., 0.02-0.05) and
-verify improvements with bootstrapped confidence intervals.
+Recommended practice: keep `centroid_shift` weight small (≤ 0.06) and
+`fss_loss` moderate (0.03–0.06); verify improvements with bootstrapped
+confidence intervals.
