@@ -1,0 +1,343 @@
+# Two-stage v2 — Stage 2: forecasting-engine location training
+#
+# STRATEGY:
+#   Stage 2 continues from the Stage 1 checkpoint. The AE enters with good
+#   field-quality representations; Stage 2 now trains the Forecasting Engine
+#   (FE) to propagate the latent state correctly 6 hours forward.
+#
+#   The FE's unique failure mode is LOCATION ERROR: it places the event in
+#   the right regime but in the wrong spatial position. Stage 2 therefore
+#   adds the two strongest localization signals:
+#     1. centroid_shift at 10mm + 20mm — direct geodesic centroid penalty
+#     2. fss_loss at 50km + 200km — both local and regional density must match
+#        (200km is new vs Stage 1, targeting the ~3200km centroid shift in v2)
+#
+#   Magnitude losses are CARRIED OVER at scaled weights (×1.6 for 8-function
+#   normalisation) to prevent the FE from reintroducing underestimation.
+#   extreme_mae weight is DOUBLED (0.04→0.08) because the FE introduces new
+#   regression-to-mean after the AE's magnitude calibration.
+#   no_rain_l1 weight is INCREASED (0.03→0.05) because the FE tends to smear
+#   predictions, worsening the drizzle artefact.
+#
+# LOSS NORMALISATION:
+#   8 loss functions → loss_calculator divides by ctr_loss_fcts=8.
+#   All v5-equivalent weights are ×1.6 (vs 5-function baseline) to maintain
+#   the same effective gradient scale.
+#   centroid_shift and fss_loss are set at 0.12 — the strongest localization
+#   signal in the suite, reflecting their primary role in Stage 2.
+
+streams_directory: "./config/streams/era5_imerg_precip_ablate"
+
+embed_orientation: "channels"
+embed_local_coords: True
+embed_centroids_local_coords: False
+embed_size_centroids: 0
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+target_cell_local_prediction: True
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 1024
+ae_global_num_blocks: 8
+ae_global_num_heads: 16
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+
+# MoE Configuration for Global Assimilation Engine - DISABLED
+ae_global_use_moe: False
+ae_global_moe_blocks: [0, 3]
+ae_global_moe_num_experts: 4
+ae_global_moe_top_k: 2
+ae_global_moe_load_balance_weight: 0.001
+ae_global_moe_jitter_noise: 0.0
+ae_global_moe_expert_hidden_factor: 1.0
+
+ae_global_moe_use_spatial_routing: False
+ae_global_moe_position_embed_dim: 128
+ae_global_moe_router_feature: "none"
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+
+# 1-step forecast: aligned with evaluation; FE trains on exactly the 6-hr lead
+forecast_offset: 1
+forecast_delta_hrs: 0
+forecast_steps: 1
+forecast_policy: "fixed"
+forecast_att_dense_rate: 1.0
+fe_num_blocks: 4
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+impute_latent_noise_std: 0.0
+
+# MoE Configuration for Forecasting Engine - DISABLED
+fe_use_moe: False
+fe_moe_blocks: "all"
+fe_moe_num_experts: 8
+fe_moe_top_k: 2
+fe_moe_load_balance_weight: 0.001
+fe_moe_jitter_noise: 0.0
+fe_moe_expert_hidden_factor: 2.0
+
+fe_moe_use_spatial_routing: False
+fe_moe_position_embed_dim: 128
+fe_moe_router_feature: "none"
+fe_moe_router_feature_dim: 0
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+attention_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+enable_shape_logging: False
+shape_logging_interval: 10
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+# 8 loss functions — field quality (from Stage 1) + localization (new in Stage 2)
+#
+# Compared to Stage 1:
+#   - centroid_shift ADDED (0.12) — primary localization signal for the FE
+#   - fss_loss upgraded to 50km+200km (0.12) — regional density matching
+#   - extreme_mae DOUBLED (0.04→0.08) — FE reintroduces magnitude regression
+#   - no_rain_l1 INCREASED (0.03→0.05) — FE smears predictions
+#   - mse ADDED (0.10) — general stability anchor for FE training
+#   - All carried-over weights ×1.6 for 8-function ctr normalisation
+loss_fcts:
+  -
+    - "mse_intensity_weighted"
+    - 1.6                # v5-equivalent after 8-function normalisation scaling
+  -
+    - "soft_exceedance"
+    - 0.16               # drizzle BCE at 0.1mm + exceedance at higher thresholds
+  -
+    - "extreme_mae"
+    - 0.08               # doubled from Stage 1 — FE tends to underestimate peaks
+  -
+    - "quantile_upper"
+    - 0.065              # tail distribution
+  -
+    - "no_rain_l1"
+    - 0.05               # increased — FE smearing worsens drizzle
+  -
+    - "fss_loss"
+    - 0.12               # KEY Stage 2 signal: 50km (local) + 200km (regional)
+  -
+    - "centroid_shift"
+    - 0.12               # KEY Stage 2 signal: direct geodesic centroid penalty
+  -
+    - "mse"
+    - 0.10               # general-purpose stability anchor for FE
+
+loss_fcts_val:
+  -
+    - "mse_intensity_weighted"
+    - 1.6
+  -
+    - "soft_exceedance"
+    - 0.16
+  -
+    - "extreme_mae"
+    - 0.08
+  -
+    - "quantile_upper"
+    - 0.065
+  -
+    - "no_rain_l1"
+    - 0.05
+  -
+    - "fss_loss"
+    - 0.12
+  -
+    - "centroid_shift"
+    - 0.12
+  -
+    - "mse"
+    - 0.10
+
+loss_config:
+  intensity_weighted_mse:
+    mode: "log1p"
+    alpha: 0.9
+    power: 1.0
+    scale: 1.0
+    min_weight: 1.0
+    max_weight: 12.0
+
+  soft_exceedance:
+    thresholds_mm: [0.1, 1.0, 5.0, 10.0, 20.0]
+    threshold_weights: [1.5, 0.5, 1.0, 1.8, 3.5]
+    temperature: 1.0
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+
+  quantile_upper:
+    quantiles: [0.9, 0.95, 0.99]
+    weights: [1.0, 1.5, 2.8]
+
+  extreme_mae:
+    thresholds_mm: [20.0]
+    threshold_weights: [1.0]
+    alpha: 0.8
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+
+  fss:
+    # Both scales active: 50km (field quality, carried from Stage 1) +
+    # 200km (regional positioning, new — this is the FE's primary spatial challenge)
+    thresholds_mm: [10.0, 20.0]
+    threshold_weights: [0.5, 1.0]
+    scales_km: [50.0, 200.0]
+    scale_weights: [1.0, 0.8]      # slight emphasis on local clustering
+    temperature: 1.0
+    earth_radius_km: 6371.0
+    max_pairwise_points: 8000
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+
+  centroid_shift:
+    # 10mm + 20mm: more gradient signal even when 20mm events are rare in a batch
+    # temperature 1.2 (sharper than original 2.0) → centroid computed from genuine extremes
+    thresholds_mm: [10.0, 20.0]
+    threshold_weights: [0.4, 1.0]
+    temperature: 1.2
+    min_points: 5
+    scale_km: 1000.0
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+
+  no_rain_l1:
+    thresholds_mm: [0.1]
+    transform_type: "none"
+    transform_alpha: 0.15
+    transform_eps: 2.39e-7
+    transform_offset: 1.0
+    transform_mu: null
+    transform_sigma: null
+
+batch_size_per_gpu: 1
+batch_size_validation_per_gpu: 1
+
+freeze_modules: ""
+
+validate_with_ema: True
+ema_ramp_up_ratio: 0.09
+ema_halflife_in_thousands: 1e-3
+
+training_mode: "forecast"
+masking_rate: 0.6
+masking_rate_sampling: True
+sampling_rate_target: 1.0
+masking_strategy: "random"
+
+extreme_sampling:
+  enabled: true
+  mode: "weight"
+  stream_name: "IMERG_ANEMOI"
+  threshold_mm: 20.0
+  extreme_weight: 1.7             # slightly lower than Stage 1 (2.0) — AE already calibrated
+  non_extreme_weight: 1.0
+  non_extreme_keep_prob: 0.35
+  max_tries: 50
+  transform_type: "none"
+  transform_alpha: 0.15
+  transform_eps: 2.39e-7
+  transform_offset: 1.0
+  transform_mu: null
+  transform_sigma: null
+
+# Standard length: total training is Stage1(40) + Stage2(48) = 88 mini-epochs
+# vs 48 for single-stage, providing ~1.8x more compute for a fair comparison.
+num_mini_epochs: 48
+samples_per_mini_epoch: 4096
+samples_per_validation: 512
+shuffle: True
+
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 5e-5
+lr_final_decay: 1e-6
+lr_final: 0.0
+lr_steps_warmup: 512
+lr_steps_cooldown: 512
+lr_policy_warmup: "cosine"
+lr_policy_decay: "constant"
+lr_policy_cooldown: "linear"
+
+grad_clip: 1.0
+weight_decay: 0.1
+norm_type: "LayerNorm"
+nn_module: "te"
+log_grad_norms: False
+
+start_date: 199801010000
+end_date: 202012310000
+start_date_val: 202101010000
+end_date_val: 202201010000
+len_hrs: 6
+step_hrs: 6
+input_window_steps: 1
+
+val_initial: False
+
+loader_num_workers: 8
+log_validation: 0
+streams_output: ["IMERG_ANEMOI"]
+
+istep: 0
+run_history: []
+
+desc: "Two-stage v2 Stage2: FE location training (centroid + 50+200km FSS + magnitude carry-over)"
+data_loader_rng_seed: ???
+run_id: ???
+
+train_log_freq:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
