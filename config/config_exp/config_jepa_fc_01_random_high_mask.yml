@@ -11,10 +11,7 @@
 # Masking: Random, student keeps 40% of tokens (vs 60% in base config)
 # Target:  Full global view (forecast - all tokens)
 # Correspondence: independent
-#
-# Rationale: More aggressive masking forces the student to predict global teacher
-# representations from a harder, sparser context. Tests whether difficulty scaling
-# improves representation quality (analogous to high mask ratio in MAE).
+
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"

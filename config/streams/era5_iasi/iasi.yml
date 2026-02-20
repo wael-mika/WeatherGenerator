@@ -11,7 +11,7 @@
 METOPB-IASI :
   type : obs
   stream_id : 1
-  filenames : ['observations-ea-ofb-0001-2013-2023-metop-b-iasi-radiances-v1.zarr']
+  filenames : ['observations-ea-ofb-0001-2013-2023-metop-b-iasi-radiances-v1-copy.zarr']
   loss_weight : 1.0
   diagnostic: True   # decoded only; not encoded (encoder was pretrained on ERA5 only)
   token_size : 32

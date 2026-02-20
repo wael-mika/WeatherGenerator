@@ -90,7 +90,7 @@ zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 #####################################
 
 # streams_directory: "./config/streams/era5_1deg/"
-streams_directory: "./config/streams/era5_synop_finetuning/"
+streams_directory: "./config/streams/era5_iasi/"
 streams: ???
 
 general:
@@ -133,7 +133,7 @@ training_config:
   # training_mode: ["student_teacher"]
   training_mode: ["masking"]
 
-  num_mini_epochs: 32
+  num_mini_epochs: 8
   samples_per_mini_epoch: 4096
   shuffle: True
 
@@ -269,7 +269,7 @@ validation_config:
     # write samples in normalized model space
     normalized_samples: False,
     # output streams to write; default all
-    streams: ["SurfaceCombined", "NPPATMS"],
+    # streams: ["SurfaceCombined", "NPPATMS"],
   }
 
   # run validation before training starts (mainly for model development)

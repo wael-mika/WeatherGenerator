@@ -13,6 +13,7 @@ NPPATMS :
   stream_id : 1
   filenames : ['observations-ea-ofb-0001-2012-2023-npp-atms-radiances-v2.zarr']
   loss_weight : 1.0
+  source: []
   diagnostic: True   # decoded only; not encoded (encoder was pretrained on ERA5 only)
   token_size : 32
   max_num_targets: -1
