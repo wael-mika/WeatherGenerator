@@ -627,7 +627,13 @@ class Trainer(TrainerBase):
         if self.cf.with_ddp and self.cf.with_fsdp:
             cpu_state_dict = {}
             for param_name, sharded_param in maybe_sharded_sd.items():
-                full_param = sharded_param.full_tensor()
+                if isinstance(sharded_param, DTensor):
+                    # FSDP2-sharded DTensor parameter: all-gather to full tensor.
+                    # All ranks must call this together (it's a collective).
+                    full_param = sharded_param.full_tensor()
+                else:
+                    # Replicated buffer (regular tensor): already full on every rank.
+                    full_param = sharded_param
                 if is_root():
                     cpu_state_dict[param_name] = full_param.cpu()
                 else:
