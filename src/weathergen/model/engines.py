@@ -775,7 +775,7 @@ class ForecastingEngine(torch.nn.Module):
                     use_reentrant=False,
                 )
             else:
-                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:
