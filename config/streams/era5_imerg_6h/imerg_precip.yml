@@ -1,0 +1,60 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# IMERG precipitation as a PREDICTION TARGET at 6h / O96 (1°) resolution.
+# Same grid and cadence as ERA5 — no spatial or temporal downscaling required.
+#
+# Based on: config/streams/downscaling/imerg_anemoi.yml
+# Key change: source→[], target→['tp'], loss_weight→1.0
+# This makes IMERG a pure output stream: the model must predict precipitation
+# from ERA5 atmospheric dynamics (source: [] = not given as encoder input).
+#
+# The arcsinh transform handles the heavy-tailed precipitation distribution.
+# arcsinh(x * scale / alpha) with scale=1000 (m→mm), alpha=0.15
+#
+# Usage: streams=[ERA5, IMERG_PRECIP]
+# Data: imerg-nasa-grib-o96-1998-2024-6h-v1.zarr (available on cluster)
+
+IMERG_PRECIP:
+  type: anemoi_transform
+  filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
+
+  # Not given as model input — the model predicts precipitation from ERA5 only
+  source: []
+  source_exclude: []
+
+  # Precipitation is the sole prediction target
+  target: ['tp']
+  target_exclude: []
+
+  # arcsinh transform for heavy-tailed precip distribution
+  transform_type: arcsinh
+  transform_scale: 1000.0  # m → mm
+  transform_alpha: 0.15
+
+  loss_weight: 1.0
+  masking_rate: 0.0       # target-only: always fully visible as target
+  masking_rate_none: 0.0
+  max_num_targets: -1     # use all O96 grid points
+
+  # Same grid as ERA5 → same token_size
+  token_size: 8
+  tokenize_spacetime: True
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1

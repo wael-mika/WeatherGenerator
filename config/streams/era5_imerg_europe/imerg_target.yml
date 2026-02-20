@@ -1,0 +1,62 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# IMERG as a diagnostic/target-only stream for downscaling experiments.
+# Used in Phase 0 (baseline) and Phase 1 (JEPA single-stage) as the
+# prediction target. The model is NOT given IMERG as input context —
+# it must infer precipitation structure from ERA5 atmospheric dynamics alone.
+#
+# Usage: streams=[ERA5, IMERG_TARGET]
+#
+# Temporal alignment: IMERG native 30-min cadence; the multi-stream sampler
+# aligns to the ERA5 6h timestamp by nearest-neighbour lookup.
+
+IMERG_TARGET:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+
+  # Target-only: IMERG is never encoded as model input
+  source: []
+  target: ['precipitation']
+  source_exclude: []
+  target_exclude: []
+
+  # Europe bounding box [lat_min, lat_max, lon_min, lon_max]
+  spatial_bbox: [35.0, 70.0, -10.0, 40.0]
+  # stride=2 → ~81K points from 325K (memory-efficient, still 5× finer than ERA5)
+  spatial_stride: 2
+
+  # diagnostic=True: this stream contributes only targets, not encoder tokens
+  diagnostic: True
+
+  loss_weight: 1.0
+
+  # No masking needed on a diagnostic-only target stream
+  masking_rate: 0.0
+  masking_rate_none: 0.0
+
+  # Sub-sample target locations per batch to manage memory (10% = ~8K points)
+  sampling_rate_target: 0.1
+
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'  # point-valued observation (not area-averaged like ERA5)
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1

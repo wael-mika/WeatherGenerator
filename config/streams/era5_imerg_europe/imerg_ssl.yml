@@ -1,0 +1,62 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# IMERG as a bidirectional (source + target) stream for SSL / JEPA experiments.
+# Used in Phase 1 (single-stage JEPA) where IMERG participates in both the
+# encoder input (visible patches) and the JEPA prediction objective (masked patches).
+#
+# Usage: streams=[ERA5, IMERG_SSL]
+#
+# Role in JEPA:
+#   - visible IMERG patches → concatenated with ERA5 latents as context
+#   - masked IMERG patches → predicted by the JEPA head in latent space
+#   - physical loss applied to IMERG targets at rate loss_weight
+#
+# Heavy masking (0.75) forces the model to rely on ERA5 dynamics for IMERG context.
+
+IMERG_SSL:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+
+  # Both source and target: IMERG is encoded AND predicted
+  source: ['precipitation']
+  target: ['precipitation']
+  source_exclude: []
+  target_exclude: []
+
+  # Europe bounding box [lat_min, lat_max, lon_min, lon_max]
+  spatial_bbox: [35.0, 70.0, -10.0, 40.0]
+  spatial_stride: 2  # ~81K points after bbox
+
+  # Heavy masking: JEPA context comes predominantly from ERA5, not visible IMERG
+  masking_rate: 0.75
+  masking_rate_none: 0.02
+
+  # Sub-sample targets per batch (10% of ~81K ≈ 8K points)
+  sampling_rate_target: 0.1
+
+  # Downweight physical IMERG loss relative to ERA5; JEPA loss carries primary signal
+  loss_weight: 0.5
+
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
