@@ -31,7 +31,7 @@ IMERG_PRECIP:
   target_exclude: []
 
   # arcsinh transform for heavy-tailed precip distribution
-  transform_type: arcsinh
+  transform_type: log10
   transform_scale: 1000.0  # m → mm
   transform_alpha: 0.15
 
