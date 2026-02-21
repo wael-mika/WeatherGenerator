@@ -214,6 +214,26 @@ class OutputDataset:
     channels: list[str]
     geoinfo_channels: list[str]
 
+    @staticmethod
+    def _fallback_source_interval(arrays: dict[str, ArrayType]) -> TimeRange:
+        """Infer a minimal interval from times when metadata is missing."""
+        times = arrays.get("times", None)
+        if times is not None:
+            try:
+                n_times = int(times.shape[0])
+                if n_times > 0:
+                    start = np.datetime64(times[0], "ns")
+                    end = np.datetime64(times[n_times - 1], "ns")
+                    if end <= start:
+                        end = start + np.timedelta64(1, "ns")
+                    return TimeRange(start, end)
+            except (TypeError, ValueError, KeyError, IndexError):
+                pass
+
+        start = np.datetime64("1970-01-01T00:00:00", "ns")
+        end = start + np.timedelta64(1, "ns")
+        return TimeRange(start, end)
+
     @classmethod
     def create(
         cls, name: str, key: ItemKey, arrays: dict[str, ArrayType], attrs: dict[str, typing.Any]
@@ -227,9 +247,11 @@ class OutputDataset:
             arrays: Data and Coordinate arrays.
             attrs: Additional metadata.
         """
-        assert "source_interval" in attrs, "missing expected attribute 'source_interval'"
-
-        source_interval = TimeRange(**attrs.pop("source_interval"))
+        source_interval_meta = attrs.pop("source_interval", None)
+        if source_interval_meta is None:
+            source_interval = cls._fallback_source_interval(arrays)
+        else:
+            source_interval = TimeRange(**source_interval_meta)
         return cls(name, key, source_interval, **arrays, **attrs)
 
     @functools.cached_property
@@ -397,17 +419,41 @@ class ZarrIO:
         )
         group.create_dataset(name, data=array, chunks=chunks)
 
+    @staticmethod
+    def _sorted_step_keys(step_keys: list[typing.Any]) -> list[typing.Any]:
+        """Sort forecast-step keys numerically whenever possible."""
+
+        def _key(step: typing.Any):
+            try:
+                return (0, int(step))
+            except (TypeError, ValueError):
+                return (1, str(step))
+
+        return sorted(step_keys, key=_key)
+
+    @staticmethod
+    def _contains_fstep0(step_keys: list[typing.Any]) -> bool:
+        return any(str(step) == "0" for step in step_keys)
+
     @functools.cached_property
     def forecast_offset(self) -> int:
-        fstep0_datasets = self._get_datasets(self.example_key)
-        return ItemKey._infer_forecast_offset(fstep0_datasets)
+        # infer from fstep 0 if present; otherwise do not assume a hidden
+        # source-only step exists in sparse stores.
+        sample, example_sample = next(self.data_root.groups())
+        stream, example_stream = next(example_sample.groups())
+        step_keys = list(example_stream.group_keys())
+        if self._contains_fstep0(step_keys):
+            fstep0_datasets = self._get_datasets(ItemKey(sample, 0, stream))
+            return ItemKey._infer_forecast_offset(fstep0_datasets)
+        return 0
 
     @functools.cached_property
     def example_key(self) -> ItemKey:
         try:
             sample, example_sample = next(self.data_root.groups())
             stream, example_stream = next(example_sample.groups())
-            fstep = 0
+            step_keys = list(example_stream.group_keys())
+            fstep = self._sorted_step_keys(step_keys)[0]
         except StopIteration as e:
             msg = f"Data store at: {self._store_path} is empty."
             raise FileNotFoundError(msg) from e
@@ -433,9 +479,9 @@ class ZarrIO:
         _, example_sample = next(self.data_root.groups())
         _, example_stream = next(example_sample.groups())
 
-        all_steps = sorted(list(example_stream.group_keys()))
-        if self.forecast_offset == 1:
-            return all_steps[1:]  # exclude fstep with no targets/preds
+        all_steps = self._sorted_step_keys(list(example_stream.group_keys()))
+        if self.forecast_offset == 1 and self._contains_fstep0(all_steps):
+            return [step for step in all_steps if str(step) != "0"]
         else:
             return all_steps
 
