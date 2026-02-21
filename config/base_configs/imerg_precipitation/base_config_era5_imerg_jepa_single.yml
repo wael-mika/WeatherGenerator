@@ -69,8 +69,8 @@ pred_self_attention: True
 pred_dyadic_dims: False
 pred_mlp_adaln: True
 # Class + register tokens improve JEPA (provide global summary of field state)
-num_class_tokens: 1
-num_register_tokens: 7
+num_class_tokens: 0
+num_register_tokens: 0
 
 # Forecasting engine: dense MLP (same capacity as E0a for fair comparison)
 fe_num_blocks: 8
@@ -182,9 +182,9 @@ training_config:
       loss_fcts:
         mse:
           weight: 1.0
-          # target_source_correspondence: applies MSE to masked complement
+          # target_source_correspondence: source (t=0, forecast) is independent of target (t+6h)
           target_source_correspondence:
-            0: {0: "complement"}   # ERA5: predict masked from visible
+            0: {0: "independent"}   # ERA5: forecasting, source and target at different times
       target_and_aux_calc: "Physical"
 
     # JEPA latent SSL loss — EMA teacher provides target representations
@@ -203,11 +203,11 @@ training_config:
           with_qk_lnorm: True
           intermediate_dim: 512
           dropout_rate: 0.1
-          # Streams that participate in JEPA:
-          #   0 = ERA5 (predict masked ERA5 latents from visible context)
-          #   1 = IMERG_SSL (predict masked IMERG latents from ERA5+IMERG context)
+          # JEPA predicts masked IMERG latents (target 1) from source 1 (input_jepa).
+          # ERA5 (target 0) is excluded: source 0 is already used by the physical
+          # loss with "complement", and the code requires each source to map to
+          # exactly one target. ERA5 latents are trained via the physical loss.
           target_source_correspondence:
-            0: {0: "subset"}
             1: {1: "subset"}
       target_and_aux_calc:
         EMATeacher:

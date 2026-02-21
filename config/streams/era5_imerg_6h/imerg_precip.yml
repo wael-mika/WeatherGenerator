@@ -19,7 +19,8 @@
 
 IMERG_PRECIP:
   type: anemoi_transform
-  filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
+  filenames: ['nasa-imerg-grib-n320-1998-2024-6h-v1.zarr']
+  stream_id: 1
 
   # Not given as model input — the model predicts precipitation from ERA5 only
   source: []

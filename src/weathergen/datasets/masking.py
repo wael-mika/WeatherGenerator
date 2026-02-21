@@ -210,12 +210,11 @@ class Masker:
 
         # check that all target/sources indices are ints; conf can have type mismatches due to
         # conf merging
-        are_ints = np.array(
-            [
-                [type(k) is int and type(next(iter(v.keys()))) is int for k, v in corr.items()]
-                for corr in corrs
-            ]
-        ).all()
+        are_ints = all(
+            type(k) is int and type(next(iter(v.keys()))) is int
+            for corr in corrs
+            for k, v in corr.items()
+        )
         assert are_ints, "error parsing correspondence, all indices must be int"
 
         # merge correspondences

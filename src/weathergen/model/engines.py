@@ -586,10 +586,12 @@ class GlobalAssimilationEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 block.set_position_ids(position_ids)
 
-    def forward(self, tokens):
+    def forward(self, tokens, coords=None):
         for block in self.ae_global_blocks:
             if isinstance(block, MoEBlock):
                 tokens, _ = block(tokens)
+            elif isinstance(block, (MultiSelfAttentionHead, MultiSelfAttentionHeadLocal)):
+                tokens = block(tokens, coords)
             else:
                 tokens = block(tokens)
         return tokens
@@ -748,7 +750,7 @@ class ForecastingEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 block.set_position_ids(position_ids)
 
-    def forward(self, tokens, fstep):
+    def forward(self, tokens, fstep, coords=None):
         if self.training:
             # Impute noise to the latent state
             noise_std = self.cf.get("fe_impute_latent_noise_std", 0.0)
@@ -775,7 +777,7 @@ class ForecastingEngine(torch.nn.Module):
                     use_reentrant=False,
                 )
             else:
-                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:

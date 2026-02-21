@@ -104,7 +104,6 @@ latent_noise_deterministic_latents: True
 
 freeze_modules: ""
 load_chkpt: {}
-
 norm_type: "LayerNorm"
 nn_module: "te"
 
