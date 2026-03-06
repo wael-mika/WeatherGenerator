@@ -69,6 +69,7 @@ fe_impute_latent_noise_std: 0.0
 forecast_att_dense_rate: 1.0
 
 healpix_level: 5
+rope_2D: False
 
 with_mixed_precision: True
 with_flash_attention: True
@@ -86,6 +87,7 @@ latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
 
 freeze_modules: ""
+load_chkpt: {}
 
 norm_type: "LayerNorm"
 zarr_store: "zip"
@@ -104,10 +106,11 @@ general:
   run_id: ???
   run_history: []
 
-train_log_freq:
+train_logging:
   terminal: 10
   metrics: 20
   checkpoint: 250
+  log_grad_norms: False
 
 data_loading:
   num_workers: 12
