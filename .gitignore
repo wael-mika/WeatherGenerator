@@ -200,6 +200,7 @@ bar
 *.zarr/
 ~$images.pptx
 test.py
+CLAUDE.md
 cutout.png
 *.out
 
