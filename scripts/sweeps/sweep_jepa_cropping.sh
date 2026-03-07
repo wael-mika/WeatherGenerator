@@ -130,31 +130,28 @@ print(f'{run_id},{lr:.2e},{mask:.2f}')
 }
 
 # --- Write per-experiment YAML overlay ---
+# The overlay is merged on top of base config via OmegaConf.merge().
+# Only include keys that need overriding — no _base_ or model_path.
 write_exp_config() {
     local exp_num="$1"
     local lr="$2"
     local mask="$3"
     local out="${SCRIPT_DIR}/config_exp_${STRATEGY}_${exp_num}.yml"
 
-    python3 -c "
-import yaml
+    cat > "$out" << YAML_EOF
+# Auto-generated overlay for experiment ${exp_num} (${STRATEGY})
+training_config:
+  learning_rate_scheduling:
+    lr_max: ${lr}
+  model_input:
+    student_cropping:
+      masking_strategy_config:
+        rate: ${mask}
+wgtags:
+  exp: "jepa_cropping_${STRATEGY}_sweep"
+YAML_EOF
 
-cfg = {
-    '_base_': '${BASE_CONFIG}',
-    'model_path': './models',
-    'training_config': {
-        'learning_rate_scheduling': {'lr_max': float('${lr}')},
-        'model_input': {
-            'student_cropping': {
-                'masking_strategy_config': {'rate': float('${mask}')}
-            }
-        }
-    },
-    'wgtags': {'exp': 'jepa_cropping_${STRATEGY}_sweep'},
-}
-print(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
-" > "$out"
-
+    log "Generated overlay config at $out"
     echo "$out"
 }
 
