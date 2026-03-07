@@ -36,6 +36,22 @@
 
 set -euo pipefail
 
+# --- Logging ---
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+SWEEP_LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logs"
+mkdir -p "$SWEEP_LOG_DIR"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
+}
+
+log "=== Sweep script started ==="
+log "Working directory: $(pwd)"
+log "Script: ${BASH_SOURCE[0]}"
+log "Args: $*"
+log "Python3: $(which python3 2>&1 || echo 'NOT FOUND')"
+log "Python3 version: $(python3 --version 2>&1 || echo 'FAILED')"
+
 # --- Args ---
 STRATEGY="${1:?Usage: $0 <contained|cone_distance|disjoint> [NUM_EXPERIMENTS]}"
 NUM_EXPERIMENTS="${2:-10}"
@@ -71,10 +87,30 @@ BASE_CONFIG="${REPO_ROOT}/config/${CONFIG}.yml"
 FINETUNE_CONFIG_PATH="${REPO_ROOT}/config/${FINETUNE_CONFIG}.yml"
 LOG_FILE="${SCRIPT_DIR}/sweep_cropping_${STRATEGY}_log.csv"
 
+log "Strategy: $STRATEGY"
+log "SCRIPT_DIR: $SCRIPT_DIR"
+log "REPO_ROOT: $REPO_ROOT"
+log "PROJECT_ROOT: $PROJECT_ROOT"
+log "LAUNCHER: $LAUNCHER"
+log "BASE_CONFIG: $BASE_CONFIG"
+log "FINETUNE_CONFIG_PATH: $FINETUNE_CONFIG_PATH"
+
 # --- Validate ---
-[[ -f "$LAUNCHER" ]] || { echo "ERROR: launch-slurm-multi.py not found at $LAUNCHER"; exit 1; }
-[[ -f "$BASE_CONFIG" ]] || { echo "ERROR: base config not found at $BASE_CONFIG"; exit 1; }
-[[ -f "$FINETUNE_CONFIG_PATH" ]] || { echo "ERROR: finetuning config not found at $FINETUNE_CONFIG_PATH"; exit 1; }
+if [[ ! -f "$LAUNCHER" ]]; then
+    log "ERROR: launch-slurm-multi.py not found at $LAUNCHER"
+    log "Contents of $PROJECT_ROOT: $(ls "$PROJECT_ROOT" 2>&1 || echo 'DIR NOT FOUND')"
+    exit 1
+fi
+if [[ ! -f "$BASE_CONFIG" ]]; then
+    log "ERROR: base config not found at $BASE_CONFIG"
+    log "Config dir contents: $(ls "$REPO_ROOT/config/"config_jepa_frozen_cropping* 2>&1 || echo 'NO MATCHES')"
+    exit 1
+fi
+if [[ ! -f "$FINETUNE_CONFIG_PATH" ]]; then
+    log "ERROR: finetuning config not found at $FINETUNE_CONFIG_PATH"
+    exit 1
+fi
+log "All files validated OK"
 
 # --- CSV log header ---
 echo "run_id,lr_max,mask_rate,strategy" > "$LOG_FILE"
@@ -123,14 +159,15 @@ print(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
 }
 
 # --- Main ---
-echo "========================================="
-echo " JEPA Cropping Masking Sweep"
-echo " Strategy    : $STRATEGY"
-echo " Experiments : $NUM_EXPERIMENTS"
-echo " Base config : $BASE_CONFIG"
-echo " Finetune    : $FINETUNE_CONFIG_PATH"
-echo " Log file    : $LOG_FILE"
-echo "========================================="
+log "========================================="
+log " JEPA Cropping Masking Sweep"
+log " Strategy    : $STRATEGY"
+log " Experiments : $NUM_EXPERIMENTS"
+log " Base config : $BASE_CONFIG"
+log " Finetune    : $FINETUNE_CONFIG_PATH"
+log " Log file    : $LOG_FILE"
+log " Debug log   : ${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
+log "========================================="
 echo ""
 
 for i in $(seq 1 "$NUM_EXPERIMENTS"); do
@@ -139,26 +176,43 @@ for i in $(seq 1 "$NUM_EXPERIMENTS"); do
 
     EXP_CONFIG=$(write_exp_config "$i" "$LR_MAX" "$MASK_RATE")
 
-    echo "--- Experiment $i/$NUM_EXPERIMENTS [$RUN_ID] ---"
-    echo "  lr_max         = $LR_MAX"
-    echo "  mask_rate      = $MASK_RATE (fraction kept)"
-    echo "  strategy       = $STRATEGY"
-    echo "  config         = $EXP_CONFIG"
+    log "--- Experiment $i/$NUM_EXPERIMENTS [$RUN_ID] ---"
+    log "  lr_max         = $LR_MAX"
+    log "  mask_rate      = $MASK_RATE (fraction kept)"
+    log "  strategy       = $STRATEGY"
+    log "  config         = $EXP_CONFIG"
+
+    # Verify generated config is valid YAML
+    if [[ ! -f "$EXP_CONFIG" ]]; then
+        log "ERROR: Generated config file not found at $EXP_CONFIG"
+        continue
+    fi
+    log "  config size    = $(wc -c < "$EXP_CONFIG") bytes"
+    log "  config content:"
+    cat "$EXP_CONFIG" >> "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
 
     echo "$RUN_ID,$LR_MAX,$MASK_RATE,$STRATEGY" >> "$LOG_FILE"
 
-    "$LAUNCHER" \
+    log "Launching: $LAUNCHER --run-id $RUN_ID --chain-jobs 1 1 --base-config $BASE_CONFIG --config $EXP_CONFIG $FINETUNE_CONFIG_PATH --nodes 1"
+
+    if ! "$LAUNCHER" \
         --run-id "$RUN_ID" \
         --chain-jobs 1 1 \
         --base-config "$BASE_CONFIG" \
         --config "$EXP_CONFIG" "$FINETUNE_CONFIG_PATH" \
-        --nodes 1
+        --nodes 1 2>&1 | tee -a "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"; then
+        log "ERROR: Launcher failed for experiment $i [$RUN_ID] (exit code: ${PIPESTATUS[0]})"
+        log "Continuing to next experiment..."
+    else
+        log "Experiment $i [$RUN_ID] submitted successfully"
+    fi
 
     echo ""
 done
 
-echo "========================================="
-echo " All $NUM_EXPERIMENTS experiments submitted"
-echo " Strategy: $STRATEGY"
-echo " Parameters logged to: $LOG_FILE"
-echo "========================================="
+log "========================================="
+log " All $NUM_EXPERIMENTS experiments submitted"
+log " Strategy: $STRATEGY"
+log " Parameters logged to: $LOG_FILE"
+log " Debug log: ${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
+log "========================================="
