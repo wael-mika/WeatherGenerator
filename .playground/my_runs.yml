@@ -1,0 +1,11 @@
+train:
+  plot:
+    cbr3zci8:
+      slurm_id: 12345678
+      description: "random_high"
+    ocltdai4:
+      slurm_id: 12345678
+      description: "cropping_geodesic_independent"
+    a3u1qfge:
+      slurm_id: 12345678
+      description: "cone_random"

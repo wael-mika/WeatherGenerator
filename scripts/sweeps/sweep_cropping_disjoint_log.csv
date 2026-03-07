@@ -1,0 +1,9 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,strategy
+24djxrwf,1.02e-05,0.33,0.38,disjoint
+qmkcy9ug,4.38e-05,0.39,0.42,disjoint
+pi4eaawc,4.08e-06,0.27,0.40,disjoint
+5tuzh4rn,1.98e-05,0.23,0.64,disjoint
+beenyu8u,2.08e-06,0.45,0.50,disjoint
+1eqeutwd,5.58e-06,0.31,0.43,disjoint
+qm0mcu9e,5.54e-06,0.30,0.46,disjoint
+f5kj6je5,1.75e-05,0.36,0.57,disjoint

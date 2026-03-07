@@ -1,0 +1,11 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,strategy
+fyb30hbg,1.34e-06,0.83,0.97,cone_distance
+6eqi6qyh,2.86e-05,0.42,0.77,cone_distance
+bb6gxwww,1.37e-06,0.37,0.51,cone_distance
+56j25c77,2.02e-05,0.46,0.87,cone_distance
+w0ldjd64,1.65e-05,0.32,0.55,cone_distance
+rgxilnps,1.16e-05,0.79,0.87,cone_distance
+fj8o2gsg,3.10e-06,0.47,0.57,cone_distance
+37d4s8zg,1.12e-05,0.82,0.97,cone_distance
+k05xi0h0,3.06e-06,0.65,0.96,cone_distance
+d0r9yh73,2.47e-05,0.35,0.55,cone_distance

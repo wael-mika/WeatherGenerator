@@ -1,0 +1,10 @@
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_1.yml ./config/sweep_runs/finetune_cone_distance_1.yml --run-id u7uexb5g --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_2.yml ./config/sweep_runs/finetune_cone_distance_2.yml --run-id pzvtnch6 --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_3.yml ./config/sweep_runs/finetune_cone_distance_3.yml --run-id 6ozd00p9 --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_4.yml ./config/sweep_runs/finetune_cone_distance_4.yml --run-id iykl6c4t --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_5.yml ./config/sweep_runs/finetune_cone_distance_5.yml --run-id y993hlzr --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_6.yml ./config/sweep_runs/finetune_cone_distance_6.yml --run-id 7ec0xsvf --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_7.yml ./config/sweep_runs/finetune_cone_distance_7.yml --run-id kfhk4c4i --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_8.yml ./config/sweep_runs/finetune_cone_distance_8.yml --run-id rew8lqz3 --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_9.yml ./config/sweep_runs/finetune_cone_distance_9.yml --run-id 95p3chjk --nodes 1
+../WeatherGenerator-private/hpc/launch-slurm-multi.py --chain-jobs 1 1 --config ./config/sweep_runs/pretrain_cone_distance_10.yml ./config/sweep_runs/finetune_cone_distance_10.yml --run-id vq07jvei --nodes 1
