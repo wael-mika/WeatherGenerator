@@ -1,0 +1,25 @@
+# Plot config for sweep_cropping_cone_distance_log.csv (auto-generated)
+train:
+  plot:
+    glnabf9m-stage2:
+      slurm_id: 0
+      description: "Reproduction: lr: 1.01e-5, mask: 0.22"      
+    j0vb6dum-stage2:
+      slurm_id: 0
+      description: "Sophie's: lr: 1.01e-5, mask: 0.22" 
+    37d4s8zg-stage2-fn-:
+      slurm_id: 0
+      description: "s2 lr=1.12e-05 mr_s=0.82 mr_t=0.97 str=cone_distance"   
+    beenyu8u-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.08e-06 mr_s=0.45 mr_t=0.50 str=disjoint"  
+    26mrg1vi-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.02e-06 mr_s=0.75 mr_t=0.97 str=contained"
+    bf9est8a:
+      slurm_id: 0
+      description: "MTM baseline"
+    i4e3vxp5:
+      slurm_id: 0
+      description: "Forecast baseline"
+    

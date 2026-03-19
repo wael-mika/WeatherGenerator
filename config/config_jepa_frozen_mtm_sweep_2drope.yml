@@ -92,11 +92,11 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 qk_norm_type: "RMSNorm"
 # type of zarr_store
-zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
+zarr_store: "zip" # "zarr" for LocalStore, "zip" for 
 
 #####################################
 
-streams_directory: "./config/streams/era5_1deg/"
+streams_directory: "./config/streams/era5_1deg_abl/"
 streams: ???
 
 general:
@@ -214,7 +214,7 @@ training_config:
         },
         },
         target_and_aux_calc: { "FrozenTeacher" : 
-            {teacher_run_id: "p43hxwic",      # run ID of the pre-trained model
+            {teacher_run_id: "npzix8s4",      # run ID of the pre-trained model
             teacher_mini_epoch: -1            # -1 = latest checkpoint
           },
         }

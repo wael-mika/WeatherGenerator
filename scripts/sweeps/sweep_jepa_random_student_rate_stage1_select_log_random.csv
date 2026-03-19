@@ -1,0 +1,11 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name,stage1_config
+h4fa61gs,1.37e-05,0.74,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+pckllyys,1.02e-06,0.58,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+wvy33vlr,1.33e-06,0.55,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+agu7r3d2,2.76e-06,0.83,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+7baism07,1.45e-06,0.62,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+h24te6kq,8.21e-06,0.15,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+dbs1q8lf,3.92e-06,0.68,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+yunj3q8e,2.01e-05,0.69,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+0tqmjvo3,9.65e-06,0.34,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml
+ygqv6mwz,9.16e-06,0.63,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_random.yml

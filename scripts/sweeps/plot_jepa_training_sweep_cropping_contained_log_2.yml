@@ -1,0 +1,33 @@
+# Plot config for sweep_cropping_contained_log.csv (auto-generated)
+train:
+  plot:
+    y308i9wf-stage2:
+      slurm_id: 0
+      description: "s1 lr=2.76e-06 mr=0.17 str=contained"
+    y308i9wf-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.76e-06 mr=0.17 str=contained"
+    qkbqjg76-stage2:
+      slurm_id: 0
+      description: "s1 lr=2.51e-06 mr=0.16 str=contained"
+    qkbqjg76-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.51e-06 mr=0.16 str=contained"
+    osz5n030-stage2:
+      slurm_id: 0
+      description: "s1 lr=3.79e-06 mr=0.56 str=contained"
+    osz5n030-stage2:
+      slurm_id: 0
+      description: "s2 lr=3.79e-06 mr=0.56 str=contained"
+    ryy7cnoi-stage2:
+      slurm_id: 0
+      description: "s1 lr=3.82e-06 mr=0.55 str=contained"
+    ryy7cnoi-stage2:
+      slurm_id: 0
+      description: "s2 lr=3.82e-06 mr=0.55 str=contained"
+    yqaho5uc-stage2:
+      slurm_id: 0
+      description: "s1 lr=8.67e-06 mr=0.17 str=contained"
+    yqaho5uc-stage2:
+      slurm_id: 0
+      description: "s2 lr=8.67e-06 mr=0.17 str=contained"

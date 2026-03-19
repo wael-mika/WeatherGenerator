@@ -7,15 +7,6 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-# =======================================
-# FROZEN TEACHER JEPA - CROPPING CONE DISTANCE - 2D RoPE
-# =======================================
-# Based on config_jepa_frozen_mtm_sweep_2drope.yml
-# Replaces random/healpix masking with cropping_healpix (geodesic_disk).
-# Student disk placed at random angular distance from teacher disk (cone_distance).
-# Variable overlap forces encoder to handle diverse spatial relationships.
-# Rate = fraction of cells KEPT (not masked).
-
 embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
@@ -92,19 +83,21 @@ norm_eps: 1e-4
 
 latent_noise_kl_weight: 0.0 # 1e-5
 latent_noise_gamma: 2.0
-latent_noise_saturate_encodings: 5
+latent_noise_saturate_encodings: 5 
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
 
 freeze_modules: ""
 
 norm_type: "LayerNorm"
+# Use RMSNorm specifically for Q/K normalization in attention.
+qk_norm_type: "RMSNorm"
 # type of zarr_store
 zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 
 #####################################
 
-streams_directory: "./config/streams/era5_1deg/"
+streams_directory: "./config/streams/era5_1deg_abl/"
 streams: ???
 
 general:
@@ -114,11 +107,11 @@ general:
   rank: ???
   world_size: ???
 
-  # local_rank,
+  # local_rank, 
   # with_ddp,
-  # data_path_*,
-  # model_path,
-  # run_path,
+  # data_path_*, 
+  # model_path, 
+  # run_path, 
   # path_shared_
 
   multiprocessing_method: "fork"
@@ -187,7 +180,7 @@ training_config:
   time_window_len: 06:00:00
 
   window_offset_prediction : 0
-
+  
   learning_rate_scheduling :
     lr_start: 5e-7
     lr_max: 5e-5
@@ -218,47 +211,39 @@ training_config:
           "JEPA": {
             'weight': 4, "loss_extra_args": {}, "out_dim": 2048, "head": mlp,
             "dropout_rate": 0.2, "num_layers": 2, "hidden_factor":2, "with_residual":True,
-            target_source_correspondence: {0 : {0 : "cone_distance"} },
+            target_source_correspondence: {0 : {0 : "subset"} },
         },
         },
-        target_and_aux_calc: { "FrozenTeacher" :
-            {teacher_run_id: "p43hxwic",      # run ID of the pre-trained model
-            teacher_mini_epoch: -1            # -1 = latest checkpoint
-          },
+        target_and_aux_calc: { "EMATeacher" :
+          { ema_ramp_up_ratio : null,
+            ema_halflife_in_thousands: 1e+5,
+            model_param_overrides : {
+              training_config: { losses: { student-teacher:{ loss_fcts :{JEPA: {head: identity} }}}}
+            },
+          }
         }
       }
   }
-
+  
   model_input: {
-    "student_cropping" : {
-      masking_strategy: "cropping_healpix",
+    "random_easy" : {
+      # masking strategy: "healpix", "forecast"
+      masking_strategy: "healpix",
       num_samples: 1,
       num_steps_input: 1,
       masking_strategy_config : {
-        hl_mask: 3,
         rate : 0.2,
-        method: "geodesic_disk",
-        rate_sampling: False,
-        # Random center distance from teacher (0 to 90 degrees in 15 degree steps)
-        center_distance_degrees_random: true,
-        center_distance_degrees_min: 0,
-        center_distance_degrees_max: 90,
-        center_distance_degrees_step: 15,
+        hl_mask: 0,
+        rate_sampling: False
       },
-      relationship: "cone_distance",
     },
   }
 
   target_input: {
-    "teacher_cropping" : {
-      masking_strategy: "cropping_healpix",
+    "random_easy_target" : {
+      masking_strategy: "healpix",
       num_samples: 1,
-      masking_strategy_config : {
-        hl_mask: 3,
-        rate : 0.8,
-        method: "geodesic_disk",
-        rate_sampling: False,
-      },
+      masking_strategy_config : { rate : 1.0, hl_mask: 0, rate_sampling: False },
     },
   }
 
@@ -269,16 +254,16 @@ training_config:
 
 
 # validation config; full validation config is merge of training and validation config
-validation_config:
+validation_config: 
 
   samples_per_mini_epoch: 256
   shuffle: False
 
   start_date: 2022-10-01T00:00
   end_date: 2022-12-31T00:00
-
+  
   # whether to track the exponential moving average of weights for validation
-  validate_with_ema:
+  validate_with_ema: 
     enabled : False
     ema_ramp_up_ratio: 0.09
     ema_halflife_in_thousands: 1e-3
@@ -295,14 +280,34 @@ validation_config:
 
   # run validation before training starts (mainly for model development)
   validate_before_training: False
-
+  
 # test config; full test config is merge of validation and test config
 # test config is used by default when running inference
 
 # Tags for experiment tracking
+# These tags will be logged in MLFlow along with completed runs for train, eval, val
+# The tags are free-form, with the following rules:
+# - tags should be primitive types (strings, numbers, booleans). NO lists or dictionaries
+# - tags should not duplicate existing config entries.
+# - try to reuse existing tags where possible. MLFlow does not like having too many unique tags
+# - do not use long strings in values (less than 20 characters is a good rule of thumb, we may enforce this in the future)
 wgtags:
+  # The name of the organization of the person running the experiment.
+  # This may be autofilled in the future. Expected values are lowercase strings 
+  # e.g. "ecmwf", "cmcc", "metnor", "jsc", "escience"
   org: null
+  # The Github issue corresponding to this run (number such as 1234)
+  # Github issues are the central point when running experiment and contain 
+  # links to hedgedocs, code branches, pull requests etc.
+  # It is recommended to associate a run with a Github issue.
   issue: null
-  exp: "frozen_cropping_cone_distance"
-  masking_type: "cropping_healpix"
+  # The name of the experiment. This is a distinctive codename for the experiment campaign being run.
+  # This is expected to be the primary tag for comparing experiments in MLFlow, along with the
+  # issue number.
+  # Expected values are lowercase strings with no spaces, just underscores:
+  # Examples: "rollout_ablation_grid"  
+  exp: null
+  # *** Experiment-specific tags ***
+  # All extra tags (including lists, dictionaries, etc.) are treated 
+  # as strings by mlflow, so treat all extra tags as simple string key: value pairs.
   grid: null

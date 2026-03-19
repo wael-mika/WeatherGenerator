@@ -1,0 +1,28 @@
+# Plot config for sweep_cropping_disjoint_log.csv (auto-generated)
+train:
+  plot:
+    24djxrwf-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.02e-05 mr_s=0.33 mr_t=0.38 str=disjoint"
+    qmkcy9ug-stage1:
+      slurm_id: 0
+      description: "s1 lr=4.38e-05 mr_s=0.39 mr_t=0.42 str=disjoint"
+    pi4eaawc-stage1:
+      slurm_id: 0
+      description: "s1 lr=4.08e-06 mr_s=0.27 mr_t=0.40 str=disjoint"
+    5tuzh4rn-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.98e-05 mr_s=0.23 mr_t=0.64 str=disjoint"
+    beenyu8u-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.08e-06 mr_s=0.45 mr_t=0.50 str=disjoint"
+    1eqeutwd-stage1:
+      slurm_id: 0
+      description: "s1 lr=5.58e-06 mr_s=0.31 mr_t=0.43 str=disjoint"
+    qm0mcu9e-stage1:
+      slurm_id: 0
+      description: "s1 lr=5.54e-06 mr_s=0.30 mr_t=0.46 str=disjoint"
+    f5kj6je5-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.75e-05 mr_s=0.36 mr_t=0.57 str=disjoint"
+

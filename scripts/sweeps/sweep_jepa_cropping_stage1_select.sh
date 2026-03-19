@@ -7,23 +7,38 @@
 # setup where the teacher always sees the full field.
 #
 # Usage:
-#   bash sweep_jepa_cropping.sh [NUM_EXPERIMENTS]
+#   bash sweep_jepa_cropping_stage1_select.sh [NUM_EXPERIMENTS] [--stage1-config PATH]
+#   bash sweep_jepa_cropping_stage1_select.sh --stage1-config PATH [NUM_EXPERIMENTS]
 #
 #   NUM_EXPERIMENTS: default 10
+#   --stage1-config PATH:
+#       Optional Stage 1 base config to pass to launch-slurm-multi.py
+#       Default: config/config_jepa_frozen_q200_2drope_qkrms.yml
 #
 # Swept parameters:
 #   lr_max              log-uniform [1e-6, 5e-5]
 #   student mask_rate   uniform     [0.10, 0.90]   (fraction of cells kept)
 #
 # Fixed design choices:
-#   - Stage 1 config: config/config_jepa_frozen_q200_2drope_qkrms.yml
 #   - Stage 2 config: config/config_jepa_finetuning.yml
 #   - teacher mask_rate: 1.0 (full field)
-#   - rope_2D: True (from stage 1 base config)
 #
 # =============================================================================
 
 set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage:
+  bash sweep_jepa_cropping_stage1_select.sh [NUM_EXPERIMENTS] [--stage1-config PATH]
+  bash sweep_jepa_cropping_stage1_select.sh --stage1-config PATH [NUM_EXPERIMENTS]
+
+Options:
+  --stage1-config PATH   Stage 1 base config passed to launch-slurm-multi.py
+                         Default: config/config_jepa_frozen_q200_2drope_qkrms.yml
+  -h, --help             Show this help message
+EOF
+}
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SWEEP_NAME="jepa_random_student_rate"
@@ -34,36 +49,120 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
+LAUNCHER="${PROJECT_ROOT}/WeatherGenerator-private/hpc/launch-slurm-multi.py"
+DEFAULT_STAGE1_CONFIG="config/config_jepa_frozen_q200_2drope_qkrms.yml"
+STAGE1_CONFIG_INPUT="$DEFAULT_STAGE1_CONFIG"
+FINETUNE_CONFIG_PATH="${REPO_ROOT}/config/config_jepa_finetuning.yml"
+CONFIG_RUNS_DIR="${REPO_ROOT}/config/sweep_runs"
+LOG_FILE_STEM="sweep_jepa_random_student_rate_stage1_select_log_${TIMESTAMP}"
+
+NUM_EXPERIMENTS="10"
+NUM_EXPERIMENTS_SET=0
+ORIGINAL_ARGS=("$@")
+
+resolve_file_path() {
+    local input="$1"
+    local candidate
+    local resolved_dir
+
+    for candidate in "$input" "${REPO_ROOT}/${input}"; do
+        if [[ -f "$candidate" ]]; then
+            resolved_dir="$(cd "$(dirname "$candidate")" >/dev/null 2>&1 && pwd)"
+            printf '%s/%s\n' "$resolved_dir" "$(basename "$candidate")"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+launcher_config_arg() {
+    local path="$1"
+
+    if [[ "$path" == "$REPO_ROOT/"* ]]; then
+        printf './%s\n' "${path#"$REPO_ROOT/"}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+resolve_unique_log_file() {
+    local candidate="${SCRIPT_DIR}/${LOG_FILE_STEM}.csv"
+    local suffix=1
+
+    while [[ -e "$candidate" ]]; do
+        candidate="${SCRIPT_DIR}/${LOG_FILE_STEM}_$(printf '%02d' "$suffix").csv"
+        suffix=$((suffix + 1))
+    done
+
+    printf '%s\n' "$candidate"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --stage1-config)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --stage1-config requires a path argument" >&2
+                usage >&2
+                exit 1
+            fi
+            STAGE1_CONFIG_INPUT="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: Unknown option '$1'" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            if [[ "$NUM_EXPERIMENTS_SET" -eq 1 ]]; then
+                echo "ERROR: Unexpected extra positional argument '$1'" >&2
+                usage >&2
+                exit 1
+            fi
+            NUM_EXPERIMENTS="$1"
+            NUM_EXPERIMENTS_SET=1
+            shift
+            ;;
+    esac
+done
+
+if ! [[ "$NUM_EXPERIMENTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NUM_EXPERIMENTS must be a positive integer, got '$NUM_EXPERIMENTS'" >&2
+    exit 1
+fi
+
+if ! BASE_CONFIG=$(resolve_file_path "$STAGE1_CONFIG_INPUT"); then
+    echo "ERROR: Stage 1 config not found at '$STAGE1_CONFIG_INPUT'" >&2
+    exit 1
+fi
+BASE_CONFIG_LAUNCH_ARG="$(launcher_config_arg "$BASE_CONFIG")"
+FINETUNE_CONFIG_LAUNCH_ARG="$(launcher_config_arg "$FINETUNE_CONFIG_PATH")"
+LOG_FILE="$(resolve_unique_log_file)"
+
+mkdir -p "$CONFIG_RUNS_DIR"
+export UV_CACHE_DIR="${HOME}/.cache/uv"
+mkdir -p "$UV_CACHE_DIR"
+
 log "=== Sweep script started ==="
 log "Working directory: $(pwd)"
 log "Script: ${BASH_SOURCE[0]}"
-log "Args: $*"
+log "Args: ${ORIGINAL_ARGS[*]}"
 log "Python3: $(which python3 2>&1 || echo 'NOT FOUND')"
 log "Python3 version: $(python3 --version 2>&1 || echo 'FAILED')"
-
-NUM_EXPERIMENTS="${1:-10}"
-if ! [[ "$NUM_EXPERIMENTS" =~ ^[1-9][0-9]*$ ]]; then
-    log "ERROR: NUM_EXPERIMENTS must be a positive integer, got '$NUM_EXPERIMENTS'"
-    exit 1
-fi
 
 LR_MIN="1e-6"
 LR_MAX_CAP="5e-5"
 STUDENT_MASK_MIN="0.10"
 STUDENT_MASK_MAX="0.90"
 TEACHER_MASK_RATE="1.0"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PROJECT_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
-LAUNCHER="${PROJECT_ROOT}/WeatherGenerator-private/hpc/launch-slurm-multi.py"
-BASE_CONFIG="${REPO_ROOT}/config/config_jepa_frozen_q200_2drope_qkrms.yml"
-FINETUNE_CONFIG_PATH="${REPO_ROOT}/config/config_jepa_finetuning.yml"
-LOG_FILE="${SCRIPT_DIR}/sweep_jepa_random_student_rate_log.csv"
-CONFIG_RUNS_DIR="${REPO_ROOT}/config/sweep_runs"
-mkdir -p "$CONFIG_RUNS_DIR"
-export UV_CACHE_DIR="${HOME}/.cache/uv"
-mkdir -p "$UV_CACHE_DIR"
 
 log "SWEEP_NAME: $SWEEP_NAME"
 log "SCRIPT_DIR: $SCRIPT_DIR"
@@ -93,7 +192,7 @@ if [[ ! -f "$FINETUNE_CONFIG_PATH" ]]; then
 fi
 log "All files validated OK"
 
-echo "run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name" > "$LOG_FILE"
+echo "run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name,stage1_config" > "$LOG_FILE"
 
 sample_params() {
     LR_MIN="$LR_MIN" \
@@ -149,7 +248,7 @@ YAML_EOF
 log "========================================="
 log " JEPA Random Student Masking Sweep"
 log " Experiments : $NUM_EXPERIMENTS"
-log " Base config : $BASE_CONFIG"
+log " Stage 1 cfg : $BASE_CONFIG"
 log " Finetune    : $FINETUNE_CONFIG_PATH"
 log " Log file    : $LOG_FILE"
 log " Debug log   : ${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
@@ -161,16 +260,15 @@ for i in $(seq 1 "$NUM_EXPERIMENTS"); do
     IFS=',' read -r RUN_ID LR_MAX STUDENT_MASK_RATE <<< "$PARAMS"
 
     EXP_CONFIG=$(write_exp_config "$i" "$RUN_ID" "$LR_MAX" "$STUDENT_MASK_RATE")
-    EXP_CONFIG_REL="./${EXP_CONFIG#"$REPO_ROOT/"}"
-    FINETUNE_CONFIG_REL="./${FINETUNE_CONFIG_PATH#"$REPO_ROOT/"}"
-    BASE_CONFIG_REL="./${BASE_CONFIG#"$REPO_ROOT/"}"
+    EXP_CONFIG_LAUNCH_ARG="$(launcher_config_arg "$EXP_CONFIG")"
 
     log "--- Experiment $i/$NUM_EXPERIMENTS [$RUN_ID] ---"
     log "  lr_max         = $LR_MAX"
     log "  student_rate   = $STUDENT_MASK_RATE (fraction kept)"
     log "  teacher_rate   = $TEACHER_MASK_RATE (full field)"
-    log "  pretrain ovl   = $EXP_CONFIG_REL"
-    log "  finetune cfg   = $FINETUNE_CONFIG_REL"
+    log "  stage1 cfg     = $BASE_CONFIG_LAUNCH_ARG"
+    log "  pretrain ovl   = $EXP_CONFIG_LAUNCH_ARG"
+    log "  finetune cfg   = $FINETUNE_CONFIG_LAUNCH_ARG"
 
     if [[ ! -f "$EXP_CONFIG" ]]; then
         log "ERROR: Generated config file not found at $EXP_CONFIG"
@@ -180,15 +278,15 @@ for i in $(seq 1 "$NUM_EXPERIMENTS"); do
     log "  config content:"
     cat "$EXP_CONFIG" >> "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"
 
-    echo "$RUN_ID,$LR_MAX,$STUDENT_MASK_RATE,$TEACHER_MASK_RATE,$SWEEP_NAME" >> "$LOG_FILE"
+    echo "$RUN_ID,$LR_MAX,$STUDENT_MASK_RATE,$TEACHER_MASK_RATE,$SWEEP_NAME,$BASE_CONFIG_LAUNCH_ARG" >> "$LOG_FILE"
 
-    log "Launching: $LAUNCHER --run-id $RUN_ID --chain-jobs 1 1 --base-config $BASE_CONFIG_REL --config $EXP_CONFIG_REL $FINETUNE_CONFIG_REL --nodes 1"
+    log "Launching: $LAUNCHER --run-id $RUN_ID --chain-jobs 1 1 --base-config $BASE_CONFIG_LAUNCH_ARG --config $EXP_CONFIG_LAUNCH_ARG $FINETUNE_CONFIG_LAUNCH_ARG --nodes 1"
 
     if ! "$LAUNCHER" \
         --run-id "$RUN_ID" \
         --chain-jobs 1 1 \
-        --base-config "$BASE_CONFIG_REL" \
-        --config "$EXP_CONFIG_REL" "$FINETUNE_CONFIG_REL" \
+        --base-config "$BASE_CONFIG_LAUNCH_ARG" \
+        --config "$EXP_CONFIG_LAUNCH_ARG" "$FINETUNE_CONFIG_LAUNCH_ARG" \
         --nodes 1 2>&1 | tee -a "${SWEEP_LOG_DIR}/sweep_${TIMESTAMP}.log"; then
         log "ERROR: Launcher failed for experiment $i [$RUN_ID] (exit code: ${PIPESTATUS[0]})"
         log "Continuing to next experiment..."

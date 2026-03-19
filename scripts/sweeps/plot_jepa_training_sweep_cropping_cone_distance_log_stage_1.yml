@@ -1,0 +1,33 @@
+# Plot config for sweep_cropping_cone_distance_log.csv (auto-generated)
+train:
+  plot:
+    fyb30hbg-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.34e-06 mr_s=0.83 mr_t=0.97 str=cone_distance"
+    6eqi6qyh-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.86e-05 mr_s=0.42 mr_t=0.77 str=cone_distance"
+    bb6gxwww-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.37e-06 mr_s=0.37 mr_t=0.51 str=cone_distance"
+    56j25c77-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.02e-05 mr_s=0.46 mr_t=0.87 str=cone_distance"
+    w0ldjd64-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.65e-05 mr_s=0.32 mr_t=0.55 str=cone_distance"
+    rgxilnps-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.16e-05 mr_s=0.79 mr_t=0.87 str=cone_distance"
+    fj8o2gsg-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.10e-06 mr_s=0.47 mr_t=0.57 str=cone_distance"
+    37d4s8zg-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.12e-05 mr_s=0.82 mr_t=0.97 str=cone_distance"
+    k05xi0h0-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.06e-06 mr_s=0.65 mr_t=0.96 str=cone_distance"
+    d0r9yh73-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.47e-05 mr_s=0.35 mr_t=0.55 str=cone_distance"

@@ -1,0 +1,16 @@
+# Auto-generated overlay for experiment 2
+streams_directory: "./config/streams/era5_1deg_abl/"
+training_config:
+  learning_rate_scheduling:
+    lr_max: 3.27e-06
+  model_input:
+    random_easy:
+      masking_strategy_config:
+        rate: 0.86
+  target_input:
+    random_easy_target:
+      masking_strategy_config:
+        rate: 1.0
+wgtags:
+  exp: "jepa_random_student_rate"
+  stream_family: "q"

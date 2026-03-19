@@ -1,0 +1,11 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name,stage1_config
+wakyxoi7,8.07e-06,0.90,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+kytru2ru,8.17e-06,0.43,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+sgtst9tw,3.95e-06,0.51,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+iar1vgr4,1.41e-06,0.55,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+twj3gr94,2.73e-05,0.60,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+8kerb5s3,1.68e-06,0.76,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+elt0z1z8,4.94e-06,0.38,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+fu0wu6ik,1.95e-06,0.62,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+48xqti94,1.50e-05,0.54,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml
+a7u6r2a3,2.13e-05,0.63,1.0,jepa_random_student_rate,./config/config_jepa_frozen_2drope_qkrms_student_healpix.yml

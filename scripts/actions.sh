@@ -3,6 +3,11 @@
 # TODO: this is the root weathergenerator directory, rename the variable.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 
+# Work around an invalid upstream git tag in anemoi-datasets
+# (`v0.0.1-special-zarr3`) that newer packaging/setuptools_scm rejects.
+# This keeps uv sync/build working when the dependency is installed from git.
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ANEMOI_DATASETS="0.5.30.dev12+gecfcc984d"
+
 case "$1" in
   sync)
     (

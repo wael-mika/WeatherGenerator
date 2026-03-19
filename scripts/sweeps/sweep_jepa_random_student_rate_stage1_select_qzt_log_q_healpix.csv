@@ -1,0 +1,5 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name,stage1_config
+a84eyrht,5.41e-06,0.88,1.0,jepa_random_student_rate,./config/config_jepa_ema_2drope_qkrms_student_healpix.yml
+esr3lc5s,1.03e-06,0.67,1.0,jepa_random_student_rate,./config/config_jepa_ema_2drope_qkrms_student_healpix.yml
+xd2hlkjg,2.36e-06,0.48,1.0,jepa_random_student_rate,./config/config_jepa_ema_2drope_qkrms_student_healpix.yml
+efrg07hr,1.53e-05,0.38,1.0,jepa_random_student_rate,./config/config_jepa_ema_2drope_qkrms_student_healpix.yml

@@ -1,0 +1,14 @@
+# Auto-generated overlay for experiment 4
+training_config:
+  learning_rate_scheduling:
+    lr_max: 1.41e-06
+  model_input:
+    random_easy:
+      masking_strategy_config:
+        rate: 0.55
+  target_input:
+    random_easy_target:
+      masking_strategy_config:
+        rate: 1.0
+wgtags:
+  exp: "jepa_random_student_rate"

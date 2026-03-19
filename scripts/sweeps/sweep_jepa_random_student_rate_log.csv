@@ -1,0 +1,2 @@
+run_id,lr_max,student_mask_rate,teacher_mask_rate,sweep_name
+s623k33u,7.06e-06,0.30,1.0,jepa_random_student_rate

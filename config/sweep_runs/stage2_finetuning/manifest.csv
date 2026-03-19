@@ -1,0 +1,11 @@
+base_run_id,source_run_id,target_run_id,strategy,source_files,finetune_config
+fyb30hbg,fyb30hbg-stage1,fyb30hbg-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+6eqi6qyh,6eqi6qyh-stage1,6eqi6qyh-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+bb6gxwww,bb6gxwww-stage1,bb6gxwww-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+56j25c77,56j25c77-stage1,56j25c77-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+w0ldjd64,w0ldjd64-stage1,w0ldjd64-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+rgxilnps,rgxilnps-stage1,rgxilnps-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+fj8o2gsg,fj8o2gsg-stage1,fj8o2gsg-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+37d4s8zg,37d4s8zg-stage1,37d4s8zg-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+k05xi0h0,k05xi0h0-stage1,k05xi0h0-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
+d0r9yh73,d0r9yh73-stage1,d0r9yh73-stage2-fn-,cone_distance,sweep_cropping_cone_distance_log.csv,/users/walmikae/weathergen/WeatherGenerator/config/config_jepa_finetuning.yml
