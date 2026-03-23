@@ -6,6 +6,7 @@
 # In applying this licence, ECMWF does not waive the privileges and immunities
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
+streams_directory: "./config/streams/raina/"
 
 freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
 
@@ -35,9 +36,9 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 16
+  num_mini_epochs: 32
 
-  start_date: 2014-01-01T00:00
+  start_date: 2000-01-01T00:00
   end_date: 2022-12-31T00:00
   
   learning_rate_scheduling :
@@ -55,6 +56,6 @@ training_config:
   forecast :
       time_step: 06:00:00
       offset: 1
-      num_steps: 8
+      num_steps: 1
       policy: "fixed"
 
