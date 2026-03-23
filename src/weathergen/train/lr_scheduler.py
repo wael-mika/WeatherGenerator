@@ -84,14 +84,26 @@ class LearningRateScheduler:
         self.policy_warmup = lr_cfg.policy_warmup
         self.policy_decay = lr_cfg.policy_decay
         self.policy_cooldown = lr_cfg.policy_cooldown
+        self.effective_policy_warmup = self.policy_warmup
 
         self.step_contd = istep
 
         # create learning rate schedulers
+        self.scheduler_warmup = None
+        self.scheduler_decay = None
+        self.scheduler_cooldown = None
 
         # warmup
 
-        if self.policy_warmup == "linear":
+        if self.policy_warmup == "cosine" and self.n_steps_warmup <= 1:
+            self.effective_policy_warmup = "linear"
+            if is_root():
+                logger.warning(
+                    "Falling back from cosine to linear warmup because "
+                    f"n_steps_warmup={self.n_steps_warmup} is too small for OneCycleLR."
+                )
+
+        if self.effective_policy_warmup == "linear" and self.n_steps_warmup > 0:
             self.scheduler_warmup = LinearLR(
                 optimizer,
                 start_factor=lr_cfg.lr_start / self.lr_max_scaled,
@@ -99,7 +111,7 @@ class LearningRateScheduler:
                 total_iters=self.n_steps_warmup,
             )
 
-        elif self.policy_warmup == "cosine":
+        elif self.effective_policy_warmup == "cosine":
             n_steps = self.n_steps_warmup + self.n_steps_decay + 1
             pct_start = self.n_steps_warmup / n_steps
             self.scheduler_warmup = OneCycleLR(
@@ -149,7 +161,7 @@ class LearningRateScheduler:
 
         # cool down
 
-        if self.policy_cooldown == "linear":
+        if self.policy_cooldown == "linear" and self.n_steps_cooldown > 0:
             self.scheduler_cooldown = LinearLR(
                 optimizer,
                 start_factor=lr_cfg.lr_start / self.lr_max_scaled,
@@ -179,7 +191,10 @@ class LearningRateScheduler:
 
         # explicitly track steps to be able to switch between optimizers
         self.i_step = 0
-        self.lr = self.cur_scheduler.get_last_lr()
+        if self.cur_scheduler is not None:
+            self.lr = self.cur_scheduler.get_last_lr()[0]
+        else:
+            self.lr = self.optimizer.param_groups[0]["lr"]
 
         # advance manually to step_contd (last_mini_epoch parameter for schedulers is not working
         # and this is also more brittle with the different phases)
@@ -217,9 +232,11 @@ class LearningRateScheduler:
             if cur_lr < self.lr:
                 for g in self.optimizer.param_groups:
                     g["lr"] = self.lr
-        else:
+        elif self.cur_scheduler is not None:
             self.cur_scheduler.step()
             self.lr = self.cur_scheduler.get_last_lr()[0]
+        else:
+            self.lr = self.optimizer.param_groups[0]["lr"]
 
         # switch scheduler when learning rate regime completed
         if self.i_step == self.n_steps_warmup:

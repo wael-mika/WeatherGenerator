@@ -1,0 +1,15 @@
+# Plot config for sweep_jepa_random_student_rate_stage1_select_qzt_log_q_random.csv (stage 1 runs)
+train:
+  plot:
+    74irtwrk-stage1:
+      slurm_id: 0
+      description: "lr=4.57e-06 s=0.50"
+    neo4najl-stage1:
+      slurm_id: 0
+      description: "lr=9.48e-06 s=0.89"
+    w4qhr4f8-stage1:
+      slurm_id: 0
+      description: "lr=3.34e-05 s=0.74"
+    scqfy77t-stage1:
+      slurm_id: 0
+      description: "lr=4.55e-05 s=0.66"

@@ -1,0 +1,15 @@
+# Plot config for sweep_jepa_random_student_rate_stage1_select_qzt_log_q_healpix.csv (non-empty finetuning runs)
+train:
+  plot:
+    a84eyrht-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "ft lr=5.41e-06 s=0.88"
+    esr3lc5s-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "ft lr=1.03e-06 s=0.67"
+    xd2hlkjg-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "ft lr=2.36e-06 s=0.48"
+    efrg07hr-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "ft lr=1.53e-05 s=0.38"

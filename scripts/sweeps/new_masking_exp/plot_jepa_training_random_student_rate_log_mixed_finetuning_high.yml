@@ -1,0 +1,19 @@
+# Mixed finetuning plot config for high student mask rates across masking strategies
+train:
+  plot:
+    6fyxobrt-stage2-fn-fixed:
+      slurm_id: 0
+      description: "cropping lr=3.49e-06 s=0.73"
+    8kerb5s3-stage2-fn-fixed:
+      slurm_id: 0
+      description: "healpix lr=1.68e-06 s=0.76"
+    h4fa61gs-stage2-fn-fixed:
+      slurm_id: 0
+      description: "random lr=1.37e-05 s=0.74"
+    bf9est8a:
+      slurm_id: 0
+      description: "MTM baseline"
+    i4e3vxp5:
+      slurm_id: 0
+      description: "Forecast baseline"
+    

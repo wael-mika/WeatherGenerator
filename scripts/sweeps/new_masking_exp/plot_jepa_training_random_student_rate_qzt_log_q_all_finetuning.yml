@@ -1,0 +1,45 @@
+# Plot config for q-only finetuning runs across all masking strategies
+train:
+  plot:
+    st8zgih3-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "cropping ft lr=1.57e-06 s=0.77"
+    i7zspy9z-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "cropping ft lr=3.27e-06 s=0.86"
+    sm7j4d6q-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "cropping ft lr=4.08e-05 s=0.17"
+    k6nou8h5-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "cropping ft lr=1.03e-05 s=0.35"
+    a84eyrht-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "healpix ft lr=5.41e-06 s=0.88"
+    esr3lc5s-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "healpix ft lr=1.03e-06 s=0.67"
+    xd2hlkjg-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "healpix ft lr=2.36e-06 s=0.48"
+    efrg07hr-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "healpix ft lr=1.53e-05 s=0.38"
+    74irtwrk-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "random ft lr=4.57e-06 s=0.50"
+    neo4najl-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "random ft lr=9.48e-06 s=0.89"
+    w4qhr4f8-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "random ft lr=3.34e-05 s=0.74"
+    scqfy77t-stage2-q-fn-fixed:
+      slurm_id: 0
+      description: "random ft lr=4.55e-05 s=0.66"
+    bf9est8a:
+      slurm_id: 0
+      description: "MTM baseline"
+    i4e3vxp5:
+      slurm_id: 0
+      description: "Forecast baseline"

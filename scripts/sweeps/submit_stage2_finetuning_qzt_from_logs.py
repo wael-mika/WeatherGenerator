@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-"""Submit Stage 2 finetuning jobs from Stage 1 sweep CSV logs.
+"""Submit q-only Stage 2 finetuning jobs from qzt Stage 1 sweep CSV logs.
 
 Common usage:
 
-  Dry run using the default three CSV logs:
-    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py
+  Dry run using the default qzt q-only CSV logs:
+    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py
 
-  Dry run only the healpix sweep:
-    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \
-      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_healpix.csv
+  Dry run only the q healpix sweep:
+    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \
+      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_healpix.csv
 
   Try the first 3 runs from one CSV:
-    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \
-      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_random.csv \
+    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \
+      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_random.csv \
       --limit 3
 
   Try a hand-picked subset from one CSV:
-    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \
-      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_cropping.csv \
-      --run-id fgomoie3 ykc5xtj5 6fyxobrt
+    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \
+      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_cropping.csv \
+      --run-id st8zgih3 i7zspy9z
 
   Actually submit:
-    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py --submit
+    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py --submit
 
 Notes:
   - By default the script only prepares jobs whose Stage 1 artifacts are present.
+  - The default finetuning config is q-only and uses `era5_iasi_finetuning_q_abl`.
   - `--limit` keeps the first N jobs after filtering.
   - `--run-id` filters by base run id or by the full `<run_id>-stage1` name.
   - Extra unknown CLI args are forwarded to `launch-slurm.py`.
@@ -41,12 +42,12 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 
 DEFAULT_SWEEP_LOGS = (
-    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_cropping.csv",
-    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_healpix.csv",
-    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_random.csv",
+    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_cropping.csv",
+    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_healpix.csv",
+    "scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_random.csv",
 )
 DEFAULT_SOURCE_SUFFIX = "-stage1"
-DEFAULT_TARGET_SUFFIX = "-stage2-fn-fixed"
+DEFAULT_TARGET_SUFFIX = "-stage2-q-fn-fixed"
 
 
 class FinetuneJob(NamedTuple):
@@ -71,11 +72,11 @@ def _platform_env_script(repo_root: Path) -> Path:
 
 
 def _default_finetune_config(repo_root: Path) -> Path:
-    return repo_root / "config" / "config_jepa_finetuning.yml"
+    return repo_root / "config" / "config_jepa_finetuning_q_abl_stage2.yml"
 
 
 def _default_output_dir(repo_root: Path) -> Path:
-    return repo_root / "config" / "sweep_runs" / "stage2_finetuning"
+    return repo_root / "config" / "sweep_runs" / "stage2_finetuning_qzt_q"
 
 
 def _shell_join(parts: List[str]) -> str:
@@ -130,24 +131,25 @@ def _parse_args() -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Submit JEPA finetuning jobs for completed Stage 1 runs listed in the sweep CSV "
-            "logs. Each source model is treated as <run_id>-stage1 and each new finetuning "
-            "run is submitted with a configurable suffix using launch-slurm.py --from-run-id."
+            "Submit q-only JEPA finetuning jobs for completed qzt Stage 1 runs listed in the "
+            "sweep CSV logs. Each source model is treated as <run_id>-stage1 and each new "
+            "finetuning run is submitted with a configurable suffix using launch-slurm.py "
+            "--from-run-id."
         ),
         epilog=(
             "Examples:\n"
             "  Dry run the defaults:\n"
-            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py\n\n"
+            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py\n\n"
             "  Restrict to one CSV:\n"
-            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \\\n"
-            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_healpix.csv\n\n"
+            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \\\n"
+            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_healpix.csv\n\n"
             "  Restrict to a few specific runs:\n"
-            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \\\n"
-            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_random.csv \\\n"
-            "      --run-id h4fa61gs pckllyys wvy33vlr\n\n"
+            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \\\n"
+            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_random.csv \\\n"
+            "      --run-id neo4najl w4qhr4f8 scqfy77t\n\n"
             "  Submit only the first 2 matching runs:\n"
-            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_from_logs.py \\\n"
-            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_log_cropping.csv \\\n"
+            "    ./.venv/bin/python scripts/sweeps/submit_stage2_finetuning_qzt_from_logs.py \\\n"
+            "      --csv scripts/sweeps/sweep_jepa_random_student_rate_stage1_select_qzt_log_q_cropping.csv \\\n"
             "      --limit 2 --submit\n"
         ),
     )
