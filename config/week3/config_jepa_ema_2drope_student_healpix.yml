@@ -211,13 +211,16 @@ training_config:
           "JEPA": {
             'weight': 4, "loss_extra_args": {}, "out_dim": 2048, "head": mlp,
             "dropout_rate": 0.2, "num_layers": 2, "hidden_factor":2, "with_residual":True,
-            target_source_correspondence: {0 : {0 : "subset"} },
+            target_source_correspondence: {0 : {0 : "independent"} },
         },
         },
-        target_and_aux_calc: { "FrozenTeacher" : 
-            {teacher_run_id: "npzix8s4",      # run ID of the pre-trained model
-            teacher_mini_epoch: -1            # -1 = latest checkpoint
-          },
+        target_and_aux_calc: { "EMATeacher" :
+          { ema_ramp_up_ratio : null,
+            ema_halflife_in_thousands: 1e+5,
+            model_param_overrides : {
+              training_config: { losses: { student-teacher:{ loss_fcts :{JEPA: {head: identity} }}}}
+            },
+          }
         }
       }
   }
@@ -230,7 +233,7 @@ training_config:
       num_steps_input: 1,
       masking_strategy_config : {
         rate : 0.2,
-        hl_mask: 0,
+        hl_mask: 1,
         rate_sampling: False
       },
     },

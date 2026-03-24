@@ -1,0 +1,17 @@
+# Auto-generated Stage 1 overlay for the unified pretrain+finetune sweep.
+
+training_config:
+  learning_rate_scheduling:
+    lr_max: 4.510354803978176e-06
+  model_input:
+    random_easy:
+      masking_strategy_config:
+        rate: 0.13
+        hl_mask: 2
+  target_input:
+    random_easy_target:
+      masking_strategy_config:
+        rate: 1.0
+wgtags:
+  exp: 'jepa_pretrain_finetune'
+  sweep_script: 'sweep_jepa_pretrain_finetune.py'
