@@ -105,6 +105,12 @@ class Masker:
                     e.g. masking_strategy_config = {"hl_mask": 1}
                     with hl_mask the level for masking that we want to apply
                     e.g. level 1 very large cells masked
+        "observation_healpix" - HEALPix masking with observation-inspired geometry.
+                    Selects cells nearest to one or more swath centerlines, then
+                    optionally applies scan-line thinning and latitude-dependent
+                    sampling to resemble orbital coverage patterns.
+                    e.g. masking_strategy_config = {"rate": 0.2, "hl_mask": 3,
+                    "num_swaths": 2, "scanline_spacing_degrees": 8.0}
         "cropping_healpix" - spatial cropping that keeps spatially contiguous regions
                     and masks everything else. Uses neighbor relationships or geodesic
                     distance to ensure spatial contiguity. For DINO/JEPA/IBOT.
@@ -126,6 +132,9 @@ class Masker:
         self.healpix_level_data = healpix_level
         self.healpix_num_cells = 12 * (4**healpix_level)
         self._hp_cache = {}
+        self._hp_lonlat_cache = {}
+        self._hp_observation_cache = {}
+        self._observation_backfill_warning_cache = set()
 
         self.stage = stage
 
@@ -657,6 +666,26 @@ class Masker:
                 mask = np.zeros(num_cells, dtype=bool)
                 mask[child_indices] = True
 
+        elif strategy == "observation_healpix":
+            keep_rate = self._get_sampling_rate(masking_strategy_config)
+            hl_mask, _, num_children_per_parent, num_parents_to_keep = (
+                self._prepare_healpix_based_masking(masking_strategy_config, keep_rate)
+            )
+
+            if num_parents_to_keep == 0:
+                mask = np.zeros(num_cells, dtype=bool)
+            else:
+                mask, geometry_params = self._select_observation_geometry_cells(
+                    healpix_level=hl_mask,
+                    num_cells=num_cells,
+                    num_cells_to_select=num_parents_to_keep,
+                    num_children_per_parent=num_children_per_parent,
+                    masking_strategy_config=masking_strategy_config,
+                )
+                masking_params.update(geometry_params)
+                masking_params["hl_mask"] = hl_mask
+                masking_params["rate"] = keep_rate
+
         # Spatial healpix based cropping, select contiguous region
         elif strategy == "cropping_healpix":
             # prepare healpix-based masking
@@ -902,6 +931,279 @@ class Masker:
         num_parents_to_keep = int(np.round(keep_rate * num_parent_cells))
 
         return hl_mask, num_parent_cells, num_children_per_parent, num_parents_to_keep
+
+    def _get_healpix_lonlat_degrees(self, healpix_level: int) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Get cached HEALPix cell-center longitudes/latitudes in degrees.
+        """
+
+        if healpix_level not in self._hp_lonlat_cache:
+            num_total_cells = 12 * (4**healpix_level)
+            nside = 2**healpix_level
+            lonlat = hp.healpix_to_lonlat(np.arange(num_total_cells), nside, order="nested")
+            lons_deg = np.asarray(
+                lonlat[0].to_value(u.deg) if hasattr(lonlat[0], "to_value") else lonlat[0],
+                dtype=np.float64,
+            )
+            lats_deg = np.asarray(
+                lonlat[1].to_value(u.deg) if hasattr(lonlat[1], "to_value") else lonlat[1],
+                dtype=np.float64,
+            )
+            self._hp_lonlat_cache[healpix_level] = (lons_deg, lats_deg)
+
+        return self._hp_lonlat_cache[healpix_level]
+
+    def _get_healpix_observation_geometry(
+        self, healpix_level: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get cached HEALPix geometry arrays used by observation-style masking.
+        """
+
+        if healpix_level not in self._hp_observation_cache:
+            lons_deg, lats_deg = self._get_healpix_lonlat_degrees(healpix_level)
+            sin_lat = np.sin(np.radians(lats_deg))
+            self._hp_observation_cache[healpix_level] = (lons_deg, lats_deg, sin_lat)
+
+        return self._hp_observation_cache[healpix_level]
+
+    @staticmethod
+    def _wrap_longitude_difference_degrees(
+        lon_deg: np.ndarray, ref_lon_deg: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute wrapped longitude differences in degrees in the interval [-180, 180].
+        """
+
+        return ((lon_deg - ref_lon_deg + 180.0) % 360.0) - 180.0
+
+    def _resolve_observation_parameter_array(
+        self, value, num_values: int, param_name: str, default_sampler
+    ) -> np.ndarray:
+        """
+        Resolve a config value into a float array of the requested length.
+        """
+
+        if value is None:
+            return np.asarray(default_sampler(num_values), dtype=np.float64)
+
+        if isinstance(value, omegaconf.listconfig.ListConfig):
+            arr = np.asarray(list(value), dtype=np.float64)
+        else:
+            arr = np.atleast_1d(np.asarray(value, dtype=np.float64))
+
+        if arr.size == 1 and num_values > 1:
+            arr = np.repeat(arr.item(), num_values)
+
+        assert arr.size == num_values, (
+            f"Expected {num_values} values for '{param_name}', received {arr.size}."
+        )
+
+        return arr.astype(np.float64, copy=False)
+
+    def _latitudinal_sampling_probabilities(
+        self, lats_deg: np.ndarray, mode: str, strength: float
+    ) -> np.ndarray:
+        """
+        Convert a latitude-based sampling mode into keep probabilities.
+        """
+
+        strength = float(np.clip(strength, 0.0, 1.0))
+        if strength == 0.0 or mode == "uniform":
+            return np.ones_like(lats_deg, dtype=np.float64)
+
+        sin_abs = np.abs(np.sin(np.radians(lats_deg)))
+        if mode == "polar_dense":
+            feature = sin_abs
+        elif mode == "equatorial_dense":
+            feature = 1.0 - sin_abs
+        elif mode == "cosine_latitude":
+            feature = np.clip(np.cos(np.radians(lats_deg)), 0.0, 1.0)
+        else:
+            raise ValueError(
+                "latitudinal_sampling_mode must be one of "
+                "'uniform', 'polar_dense', 'equatorial_dense', or 'cosine_latitude'."
+            )
+
+        return np.clip((1.0 - strength) + strength * feature, 0.0, 1.0)
+
+    @staticmethod
+    def _select_nearest_indices(
+        candidate_indices: np.ndarray, distances: np.ndarray, count: int
+    ) -> np.ndarray:
+        """
+        Select the nearest candidates without fully sorting the candidate pool.
+        """
+
+        if count <= 0 or candidate_indices.size == 0:
+            return np.empty(0, dtype=np.int64)
+
+        if count >= candidate_indices.size:
+            return candidate_indices
+
+        candidate_distances = distances[candidate_indices]
+        nearest_positions = np.argpartition(candidate_distances, count - 1)[:count]
+        return candidate_indices[nearest_positions]
+
+    def _build_observation_structure_mask(
+        self, lats_deg: np.ndarray, masking_strategy_config: dict
+    ) -> tuple[np.ndarray, dict]:
+        """
+        Build structured keep flags to emulate scan-lines and latitude-dependent sampling.
+        """
+
+        keep = np.ones_like(lats_deg, dtype=bool)
+        params = {}
+
+        spacing_deg = float(masking_strategy_config.get("scanline_spacing_degrees", 0.0))
+        if spacing_deg > 0.0:
+            fill_fraction = float(masking_strategy_config.get("scanline_fill_fraction", 1.0))
+            retain_rate = float(masking_strategy_config.get("scanline_retain_rate", 1.0))
+            assert 0.0 < fill_fraction <= 1.0, "scanline_fill_fraction must be in (0, 1]."
+            assert 0.0 < retain_rate <= 1.0, "scanline_retain_rate must be in (0, 1]."
+
+            phase_deg = float(
+                masking_strategy_config.get(
+                    "scanline_phase_degrees", self.rng.uniform(0.0, spacing_deg)
+                )
+            )
+            shifted_lats = lats_deg + 90.0 + phase_deg
+            keep &= np.mod(shifted_lats, spacing_deg) < (spacing_deg * fill_fraction)
+
+            if retain_rate < 1.0:
+                line_ids = np.floor(shifted_lats / spacing_deg).astype(np.int32)
+                line_ids -= line_ids.min()
+                retained_lines = self.rng.uniform(0.0, 1.0, line_ids.max() + 1) < retain_rate
+                keep &= retained_lines[line_ids]
+
+            params.update(
+                {
+                    "scanline_spacing_degrees": spacing_deg,
+                    "scanline_fill_fraction": fill_fraction,
+                    "scanline_retain_rate": retain_rate,
+                    "scanline_phase_degrees": phase_deg,
+                }
+            )
+
+        lat_mode = str(masking_strategy_config.get("latitudinal_sampling_mode", "uniform"))
+        lat_strength = float(masking_strategy_config.get("latitudinal_sampling_strength", 0.0))
+        lat_probs = self._latitudinal_sampling_probabilities(lats_deg, lat_mode, lat_strength)
+        if not np.allclose(lat_probs, 1.0):
+            keep &= self.rng.uniform(0.0, 1.0, lats_deg.shape[0]) < lat_probs
+
+        params.update(
+            {
+                "latitudinal_sampling_mode": lat_mode,
+                "latitudinal_sampling_strength": lat_strength,
+            }
+        )
+
+        return keep, params
+
+    def _select_observation_geometry_cells(
+        self,
+        healpix_level: int,
+        num_cells: int,
+        num_cells_to_select: int,
+        num_children_per_parent: int,
+        masking_strategy_config: dict,
+    ) -> tuple[np.ndarray, dict]:
+        """
+        Select HEALPix cells using observation-inspired swaths and structured thinning.
+        """
+
+        num_total_cells = 12 * (4**healpix_level)
+        assert num_cells_to_select <= num_total_cells
+
+        lons_deg, lats_deg, sin_lat = self._get_healpix_observation_geometry(healpix_level)
+
+        num_swaths = int(masking_strategy_config.get("num_swaths", 1))
+        assert num_swaths > 0, "num_swaths must be greater than zero."
+
+        center_lons_deg = self._resolve_observation_parameter_array(
+            masking_strategy_config.get("swath_center_longitudes"),
+            num_swaths,
+            "swath_center_longitudes",
+            lambda size: self.rng.uniform(-180.0, 180.0, size),
+        )
+
+        tilt_cfg = masking_strategy_config.get("swath_tilt_degrees", 15.0)
+        tilt_random = bool(masking_strategy_config.get("swath_tilt_degrees_random", True))
+        if tilt_random:
+            tilt_max = self._resolve_observation_parameter_array(
+                tilt_cfg,
+                num_swaths,
+                "swath_tilt_degrees",
+                lambda size: np.full(size, 15.0),
+            )
+            swath_tilts_deg = self.rng.uniform(-np.abs(tilt_max), np.abs(tilt_max))
+        else:
+            swath_tilts_deg = self._resolve_observation_parameter_array(
+                tilt_cfg,
+                num_swaths,
+                "swath_tilt_degrees",
+                lambda size: np.full(size, 0.0),
+            )
+
+        min_distances = np.full(lons_deg.shape, np.inf, dtype=np.float64)
+        for center_lon_deg, swath_tilt_deg in zip(center_lons_deg, swath_tilts_deg):
+            centerline = center_lon_deg + swath_tilt_deg * sin_lat
+            distances = np.abs(self._wrap_longitude_difference_degrees(lons_deg, centerline))
+            np.minimum(min_distances, distances, out=min_distances)
+
+        structured_keep, structure_params = self._build_observation_structure_mask(
+            lats_deg, masking_strategy_config
+        )
+        eligible_indices = np.flatnonzero(structured_keep)
+        num_eligible_to_select = min(num_cells_to_select, eligible_indices.size)
+        selected_parent_ids = self._select_nearest_indices(
+            eligible_indices, min_distances, num_eligible_to_select
+        )
+
+        if num_eligible_to_select < num_cells_to_select:
+            warning_key = (
+                healpix_level,
+                num_cells_to_select,
+                num_swaths,
+                structure_params.get("scanline_spacing_degrees", 0.0),
+                structure_params.get("scanline_fill_fraction", 1.0),
+                structure_params.get("scanline_retain_rate", 1.0),
+                structure_params.get("latitudinal_sampling_mode", "uniform"),
+                structure_params.get("latitudinal_sampling_strength", 0.0),
+            )
+            if warning_key not in self._observation_backfill_warning_cache:
+                logger.warning(
+                    "Observation-geometry masking produced only %s eligible cells for a target of %s; "
+                    "backfilling with nearest remaining cells.",
+                    eligible_indices.size,
+                    num_cells_to_select,
+                )
+                self._observation_backfill_warning_cache.add(warning_key)
+            fallback_indices = np.flatnonzero(~structured_keep)
+            fallback_selected = self._select_nearest_indices(
+                fallback_indices,
+                min_distances,
+                num_cells_to_select - num_eligible_to_select,
+            )
+            selected_parent_ids = np.concatenate([selected_parent_ids, fallback_selected])
+
+        selected_parent_ids = np.sort(selected_parent_ids)
+
+        child_offsets = np.arange(num_children_per_parent)
+        child_indices = (
+            selected_parent_ids[:, None] * num_children_per_parent + child_offsets
+        ).reshape(-1)
+        mask = np.zeros(num_cells, dtype=bool)
+        mask[child_indices] = True
+
+        params = {
+            "num_swaths": num_swaths,
+            "swath_center_longitudes": center_lons_deg.tolist(),
+            "swath_tilt_degrees": swath_tilts_deg.tolist(),
+        }
+        params.update(structure_params)
+
+        return mask, params
 
     def _get_hp_obj(self, healpix_level: int) -> hp.HEALPix:
         """
