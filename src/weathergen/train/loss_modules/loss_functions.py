@@ -287,6 +287,115 @@ def mae(
     )
 
 
+def asymmetric_extreme(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    floor: float = 0.1,
+    under_weight: float = 2.0,
+    over_weight: float = 0.5,
+):
+    """
+    Asymmetric loss weighted by target magnitude for extreme event prediction.
+
+    Penalizes underprediction of extremes more heavily than overprediction,
+    reducing the double-penalty effect that causes models to produce overly smooth fields.
+
+    Params:
+        target : tensor of shape (num_data_points, num_channels)
+        pred : tensor of shape (ens_dim, num_data_points, num_channels)
+        weights_channels : tensor of shape (num_channels,) or None
+        weights_points : tensor of shape (num_data_points,) or None
+        floor : minimum magnitude weight to avoid zero-weighting calm conditions
+        under_weight : penalty multiplier when prediction < target (missing extremes)
+        over_weight : penalty multiplier when prediction > target (false alarms)
+
+    Return:
+        loss : weighted scalar loss
+        loss_chs : losses per channel
+    """
+    mask_nan = ~torch.isnan(target)
+    pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    t = torch.where(mask_nan, target, 0)
+    p = torch.where(mask_nan, pred, 0)
+
+    diff = t - p  # positive = underprediction
+
+    # Magnitude weight: extreme values contribute more to the loss
+    magnitude_weight = torch.abs(t).clamp(min=floor)
+
+    # Asymmetric weight: penalize underprediction more than overprediction
+    asym_weight = torch.where(diff > 0, under_weight, over_weight)
+
+    loss_elem = diff.pow(2) * magnitude_weight * asym_weight
+
+    if weights_points is not None:
+        loss_elem = (loss_elem.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    loss_chs = loss_elem.mean(0)
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
+def threshold_exceedance(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    threshold_quantile: float = 0.95,
+    temperature: float = 0.1,
+):
+    """
+    Binary cross-entropy loss for extreme event detection.
+
+    Evaluates whether the model correctly identifies locations where values
+    exceed a high quantile threshold computed per-batch. Uses soft thresholding
+    via sigmoid for differentiability.
+
+    Params:
+        target : tensor of shape (num_data_points, num_channels)
+        pred : tensor of shape (ens_dim, num_data_points, num_channels)
+        weights_channels : tensor of shape (num_channels,) or None
+        weights_points : tensor of shape (num_data_points,) or None
+        threshold_quantile : quantile for defining "extreme" (default: 95th percentile)
+        temperature : sigmoid temperature for soft thresholding (smaller = sharper)
+
+    Return:
+        loss : weighted scalar loss
+        loss_chs : losses per channel
+    """
+    mask_nan = ~torch.isnan(target)
+    pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    t = torch.where(mask_nan, target, 0)
+    p = torch.where(mask_nan, pred, 0)
+
+    num_channels = t.shape[-1]
+    thresholds = torch.zeros(num_channels, device=t.device)
+    for ch in range(num_channels):
+        valid = mask_nan[:, ch]
+        if valid.sum() > 0:
+            thresholds[ch] = torch.quantile(t[valid, ch], threshold_quantile)
+
+    # Binary labels: target exceeds threshold
+    y_true = (t > thresholds.unsqueeze(0)).float()
+
+    # Soft prediction logits
+    logits = (p - thresholds.unsqueeze(0)) / temperature
+
+    # Numerically stable BCE
+    bce = F.binary_cross_entropy_with_logits(logits, y_true, reduction="none")
+    bce = torch.where(mask_nan, bce, torch.zeros_like(bce))
+
+    if weights_points is not None:
+        bce = (bce.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    # Mean over valid points per channel
+    loss_chs = bce.sum(0) / mask_nan.sum(0).clamp(min=1).float()
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
 def cosine_latitude(target_coords, min_value=1e-3, max_value=1.0):
     latitudes_radian = target_coords[:, 0] * np.pi / 180
     return (max_value - min_value) * np.cos(latitudes_radian) + min_value
