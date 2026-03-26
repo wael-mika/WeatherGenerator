@@ -18,8 +18,32 @@ IMERG_ANEMOI:
 
   target_channel_weights:
     - 1.0
+  location_weight : cosine_latitude
+  # transform_type: arcsinh
+  # transform_scale: 1000.0
+  # transform_alpha: 0.15
+
+  # transform_type: log10
+  # transform_scale: 1000.0    # m -> mm
+  # transform_offset: 1.0      # log10(x_mm + 1): 0→0, 1mm→0.30, 10mm→1.04, 50mm→1.71
 
   loss_weight: 1.0
+  # Stream-specific loss functions — override the global loss_fcts for IMERG only.
+  # ERA5 continues to use global loss_fcts (mse only).
+  # loss_fcts:
+  #   "mse":
+  #     weight: 0.5
+  #   "asymmetric_extreme":
+  #     weight: 0.3
+  #     args:
+  #       floor: 0.1
+  #       under_weight: 2.0
+  #       over_weight: 0.5
+  #   "threshold_exceedance":
+  #     weight: 0.2
+  #     args:
+  #       threshold_quantile: 0.95
+
   masking_rate: 0.6
   masking_rate_none: 0.05
   token_size: 16
