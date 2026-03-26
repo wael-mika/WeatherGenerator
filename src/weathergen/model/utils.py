@@ -51,6 +51,34 @@ def apply_fct_to_blocks(model, blocks, fct):
             fct(module)
 
 
+class DrizzleGate(nn.Module):
+    """
+    Learnable gating activation that suppresses light drizzle in precipitation predictions.
+
+    Combines a soft-thresholding mechanism with Softplus to:
+    1. Push near-zero values toward zero (no-rain regions stay dry)
+    2. Preserve moderate and heavy precipitation magnitudes
+    3. Ensure non-negative output
+
+    The gate learns a threshold and sharpness during training:
+        output = softplus(x) * sigmoid((x - threshold) / sharpness)
+
+    When x << threshold: sigmoid ≈ 0, output ≈ 0 (drizzle suppressed)
+    When x >> threshold: sigmoid ≈ 1, output ≈ softplus(x) (precipitation preserved)
+    """
+
+    def __init__(self, init_threshold: float = 0.1, init_sharpness: float = 0.05):
+        super().__init__()
+        self.threshold = nn.Parameter(torch.tensor(init_threshold))
+        self.sharpness = nn.Parameter(torch.tensor(init_sharpness))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Clamp sharpness to avoid division by zero or negative values
+        sharpness = self.sharpness.clamp(min=1e-4)
+        gate = torch.sigmoid((x - self.threshold) / sharpness)
+        return torch.nn.functional.softplus(x) * gate
+
+
 class ActivationFactory:
     _registry = {
         "identity": nn.Identity,
@@ -68,6 +96,7 @@ class ActivationFactory:
         "logsoftmax": nn.LogSoftmax,
         "silu": nn.SiLU,
         "swish": nn.SiLU,
+        "drizzlegate": DrizzleGate,
     }
 
     @classmethod

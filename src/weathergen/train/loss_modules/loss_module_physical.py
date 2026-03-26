@@ -10,6 +10,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import functools
 import logging
 from collections import defaultdict
 
@@ -58,14 +59,20 @@ class LossPhysical(LossModuleBase):
         self.name = "LossPhysical"
 
         # dynamically load loss functions based on configuration and stage
-        self.loss_fcts = [
-            [
-                getattr(loss_fns, name),
-                params.get("weight", 1.0),
-                name,
-            ]
-            for name, params in loss_fcts.items()
-        ]
+        # supports optional "args" dict for passing extra kwargs to loss functions
+        self.loss_fcts = self._parse_loss_fcts(loss_fcts)
+
+    @staticmethod
+    def _parse_loss_fcts(loss_fcts_dict: dict) -> list:
+        """Parse a loss_fcts config dict into a list of [fn, weight, name] triples."""
+        result = []
+        for name, params in loss_fcts_dict.items():
+            loss_fn = getattr(loss_fns, name)
+            extra_args = params.get("args", {})
+            if extra_args:
+                loss_fn = functools.partial(loss_fn, **extra_args)
+            result.append([loss_fn, params.get("weight", 1.0), name])
+        return result
 
     def _get_weights(self, stream_info):
         """
@@ -223,6 +230,14 @@ class LossPhysical(LossModuleBase):
 
             stream_loss_weight, weights_channels = self._get_weights(stream_info)
 
+            # per-stream loss_fcts override: falls back to global list if not specified
+            stream_loss_fcts_cfg = stream_info.get("loss_fcts", None)
+            loss_fcts_active = (
+                self._parse_loss_fcts(stream_loss_fcts_cfg)
+                if stream_loss_fcts_cfg
+                else self.loss_fcts
+            )
+
             # TODO: make nicer
             output_step_loss_weights = self._get_output_step_weights(len(targets.output_idxs))
             if len(targets.physical) - len(targets.output_idxs) > 0:
@@ -281,9 +296,14 @@ class LossPhysical(LossModuleBase):
                     # loss_st_corr: loss for give source-target correspondence
                     loss_st_corr = torch.tensor(0.0, device=self.device, requires_grad=True)
                     ctr_loss_fcts = 0
-                    for loss_fct, loss_fct_weight, loss_fct_name in self.loss_fcts:
-                        # skip is loss is not computed for this sample
-                        if loss_fct_name not in pred_params.global_params["loss"]:
+                    for loss_fct, loss_fct_weight, loss_fct_name in loss_fcts_active:
+                        # Global gate: routes predictions to the loss functions they were
+                        # prepared for (set in masking.py from training_config.losses).
+                        # Bypassed when the stream declares its own loss_fcts, because those
+                        # are explicitly scoped to this stream and not in the global registry.
+                        if stream_loss_fcts_cfg is None and (
+                            loss_fct_name not in pred_params.global_params["loss"]
+                        ):
                             continue
 
                         # spoofed inputs are masked in the output calculations
