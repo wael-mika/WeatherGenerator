@@ -1,0 +1,9 @@
+# Plot config for sweep_jepa_pretrain_finetune_geo_obs.csv (auto-generated)
+train:
+  plot:
+    wcp6tblr-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.26e-06 mr=0.41 cfg=observation_geometry_1"
+    gud2zuxy-stage1:
+      slurm_id: 0
+      description: "s1 lr=5.38e-06 mr=0.84 cfg=observation_geometry_1"

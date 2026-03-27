@@ -1,0 +1,21 @@
+# Plot config for sweep_jepa_pretrain_finetune_hl3.csv (auto-generated)
+train:
+  plot:
+    lu732ony-stage2:
+      slurm_id: 0
+      description: "s2 lr=1.54e-06 mr=0.83 cfg=healpix_3"
+    pmxbr5yf-stage2:
+      slurm_id: 0
+      description: "s2 lr=1.42e-06 mr=0.20 cfg=healpix_3"
+    197n347r-stage2:
+      slurm_id: 0
+      description: "s2 lr=5.42e-06 mr=0.69 cfg=healpix_3"
+    bzg30oee-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.05e-05 mr=0.13 cfg=healpix_3"
+    4h3z96t1-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.16e-06 mr=0.89 cfg=healpix_3"
+    6a49x7oo-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.15e-05 mr=0.80 cfg=healpix_3"

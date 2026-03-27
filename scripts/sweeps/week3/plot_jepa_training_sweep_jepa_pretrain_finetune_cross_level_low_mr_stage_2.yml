@@ -1,0 +1,30 @@
+# Plot config for sweep_jepa_pretrain_finetune_cross_level_low_mr.csv (auto-generated)
+train:
+  plot:
+    rlteuolw-stage2:
+      slurm_id: 0
+      description: "s2 lr=5.11e-06 mr=0.30 cfg=healpix_1"
+    3eobq10e-stage2:
+      slurm_id: 0
+      description: "s2 lr=3.49e-05 mr=0.17 cfg=healpix_2"
+    1e61z384-stage2:
+      slurm_id: 0
+      description: "s2 lr=1.18e-05 mr=0.22 cfg=healpix_2"
+    bzg30oee-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.05e-05 mr=0.13 cfg=healpix_3"
+    pmxbr5yf-stage2:
+      slurm_id: 0
+      description: "s2 lr=1.42e-06 mr=0.20 cfg=healpix_3"
+    mad4t1ay-stage2:
+      slurm_id: 0
+      description: "s2 lr=2.45e-06 mr=0.28 cfg=healpix_4"
+    158x0lsm-stage2:
+      slurm_id: 0
+      description: "s2 lr=1.32e-06 mr=0.30 cfg=healpix_4"
+    bf9est8a:
+      slurm_id: 0
+      description: "MTM baseline"
+    i4e3vxp5:
+      slurm_id: 0
+      description: "Forecast baseline"

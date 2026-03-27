@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from omegaconf import OmegaConf
 
 from weathergen.common import config as common_config
@@ -117,10 +118,30 @@ def test_observation_healpix_latitudinal_sampling_changes_selected_latitudes():
     assert np.abs(lats_deg[polar_selected]).mean() > np.abs(lats_deg[equatorial_selected]).mean()
 
 
-def test_observation_geometry_config_smoke_loads():
-    cfg_path = Path(
-        "config/week3/config_jepa_frozen_2drope_qkrms_student_observation_geometry_1.yml"
-    )
+@pytest.mark.parametrize(
+    ("config_name", "expected_rate", "expected_fill_fraction", "expected_lat_strength"),
+    [
+        (
+            "config_jepa_frozen_2drope_qkrms_student_observation_geometry_1.yml",
+            0.2,
+            0.5,
+            0.35,
+        ),
+        (
+            "config_jepa_frozen_2drope_qkrms_student_observation_geometry_lite_1.yml",
+            0.3,
+            0.75,
+            0.15,
+        ),
+    ],
+)
+def test_observation_geometry_config_smoke_loads(
+    config_name: str,
+    expected_rate: float,
+    expected_fill_fraction: float,
+    expected_lat_strength: float,
+):
+    cfg_path = Path("config/week3") / config_name
     cfg = OmegaConf.load(cfg_path)
     cfg = common_config._load_streams_in_config(cfg)
 
@@ -128,3 +149,12 @@ def test_observation_geometry_config_smoke_loads():
     assert cfg.training_config.model_input.observation_easy.masking_strategy == "observation_healpix"
     assert cfg.training_config.target_input.full_teacher_target.masking_strategy == "healpix"
     assert cfg.training_config.model_input.observation_easy.masking_strategy_config.num_swaths == 2
+    assert cfg.training_config.model_input.observation_easy.masking_strategy_config.rate == expected_rate
+    assert (
+        cfg.training_config.model_input.observation_easy.masking_strategy_config.scanline_fill_fraction
+        == expected_fill_fraction
+    )
+    assert (
+        cfg.training_config.model_input.observation_easy.masking_strategy_config.latitudinal_sampling_strength
+        == expected_lat_strength
+    )

@@ -1,0 +1,27 @@
+# Plot config for sweep_jepa_pretrain_finetune_ema_random.csv (auto-generated)
+train:
+  plot:
+    0be9u7ix-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.12e-06 mr=0.73 cfg=random"
+    lblbujsq-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.25e-05 mr=0.72 cfg=random"
+    5xz4mmbx-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.49e-06 mr=0.39 cfg=random"
+    5anfv0g2-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.50e-05 mr=0.49 cfg=random"
+    h053ls66-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.30e-06 mr=0.33 cfg=random"
+    uvtp46wm-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.06e-06 mr=0.77 cfg=random"
+    p26dgzib-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.50e-06 mr=0.36 cfg=random"
+    f14ykaap-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.85e-05 mr=0.55 cfg=random"
