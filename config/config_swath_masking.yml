@@ -1,0 +1,47 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+
+# Satellite swath masking — diagnostic / ablation config.
+#
+# Layer on top of config_jepa.yml.
+#
+#   Sparse swath (more swaths, random subsampling within each):
+#     python -m weathergen.utils.visualize_masking \
+#       -c config/config_jepa.yml config/config_swath_masking.yml \
+#       --pair-indices 0 1 2 3 \
+#       --prefix swath_sparse --seed 42
+#
+#   Dense swath (fewer wide bands, all cells kept inside):
+#     python -m weathergen.utils.visualize_masking \
+#       -c config/config_jepa.yml config/config_swath_masking.yml \
+#       --options training_config.model_input.random_easy.masking_strategy=satellite_swath \
+#       --pair-indices 0 1 2 3 \
+#       --prefix swath_dense --seed 42
+
+training_config:
+
+  model_input:
+    random_easy:
+      masking_strategy: "satellite_swath_sparse"
+      num_samples: 4
+      masking_strategy_config:
+        num_swaths: 14            # many thin swaths → structured but fragmented diagonal coverage
+        swath_width_deg: 8        # thin bands; large gaps between passes
+        orbit_drift_deg: -25      # ~-25° lon drift S→N pole for LEO polar orbit
+        rate: 0.6                 # keep 60% of in-swath cells randomly; 40% left empty
+        rate_sampling: false      # set true to also vary keep rate across samples
+
+  target_input:
+    random_easy_target:
+      masking_strategy: "forecast"
+      masking_strategy_config: {}
+
+  losses:
+    student-teacher:
+      loss_fcts:
+        JEPA:
+          target_source_correspondence:
+            0:
+              0: "independent"

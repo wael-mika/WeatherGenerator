@@ -1,0 +1,95 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+
+# Mixed multi-scale masking override for JEPA pretraining.
+#
+# Layer on top of config_jepa.yml:
+#
+#   Visualization (4 realizations, one per strategy in a single run):
+#     python -m weathergen.utils.visualize_masking \
+#       -c config/config_jepa.yml config/config_jepa_mixed_masking.yml \
+#       --pair-indices 0 1 2 3 \
+#       --prefix mixed_masking_preview
+#
+#   Training (set num_samples: 1):
+#     python train.py -c config/config_jepa.yml config/config_jepa_mixed_masking.yml ...
+#
+# ── Available strategies ────────────────────────────────────────────────────
+#   "random"           - uniform random cell masking
+#   "healpix"          - block masking at a coarse HEALPix level
+#   "satellite_swath"        - polar-orbit ground tracks: diagonal swath bands in lat-lon space.
+#                              Each pass starts at a random longitude and drifts orbit_drift_deg
+#                              westward by the time it reaches the opposite pole (Earth rotation).
+#                              Cells within swath_width_deg of any pass centerline are kept.
+#                              config: num_swaths, swath_width_deg, orbit_drift_deg
+#   "satellite_swath_sparse" - like satellite_swath but with more, thinner swaths and random
+#                              subsampling within each swath footprint (keep_rate of in-swath
+#                              cells). Combines orbital spatial structure with random dropout
+#                              inside each pass — model handles both geographic gaps and sparse
+#                              local observations simultaneously.
+#                              config: num_swaths, swath_width_deg, orbit_drift_deg, rate
+#
+# ── Target / relationship notes ─────────────────────────────────────────────
+#   Visualization: target="forecast" + "independent" → full field, no mask intersection
+#   Training:      target="healpix" + "subset"       → JEPA predict-from-context setup
+
+training_config:
+
+  model_input:
+    # Merges into config_jepa.yml's "random_easy" entry via OmegaConf.
+    random_easy:
+      masking_strategy: "mixed"
+      num_samples: 4              # set to 1 for training; 4 shows strategy diversity in one plot
+      masking_strategy_config:
+        rate: 0.5                 # shared keep rate (used by random; ignored by satellite_swath)
+        rate_sampling: true       # sample rate ~ N(rate, ...) each call for difficulty diversity
+        diffusion_rn: false
+
+        strategies:
+          - "random"
+          - "healpix"
+          - "satellite_swath"
+          - "satellite_swath_sparse"
+
+        strategy_weights:         # equal weight; tune after initial ablation
+          random: 0.25
+          healpix: 0.25
+          satellite_swath: 0.25
+          satellite_swath_sparse: 0.25
+
+        # HEALPix family: levels 3 and 4 worked; 0/1/23 produced bad results
+        hl_mask_levels:
+          - 3
+          - 4
+
+        # Per-strategy overrides — inherits top-level rate/rate_sampling if not set here
+        strategy_configs:
+          satellite_swath:
+            num_swaths: 5           # fewer, wider swaths → large contiguous gaps
+            swath_width_deg: 20     # wide swaths; full coverage within each pass
+            orbit_drift_deg: -25    # lon drift from S to N pole (~-25° for LEO polar orbit)
+          satellite_swath_sparse:
+            num_swaths: 12          # more, thinner swaths → structured but fragmented coverage
+            swath_width_deg: 10     # thin swaths; large gaps between passes
+            orbit_drift_deg: -25    # same orbital tilt
+            rate: 0.6               # keep 60% of in-swath cells; 40% randomly left empty
+            rate_sampling: true     # vary keep rate ~ N(0.6, ...) each call
+
+  target_input:
+    # Forecast target = all cells kept → visualize full source masking patterns unobstructed.
+    # Switch to "healpix" + relationship "subset" for actual JEPA training.
+    random_easy_target:
+      masking_strategy: "forecast"
+      masking_strategy_config: {}
+
+  losses:
+    student-teacher:
+      loss_fcts:
+        JEPA:
+          # "independent": source mask not intersected with target → full masking pattern visible.
+          # Switch to "subset" for JEPA training (predict target region from source context).
+          target_source_correspondence:
+            0:
+              0: "independent"
