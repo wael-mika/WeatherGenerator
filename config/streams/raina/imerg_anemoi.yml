@@ -7,8 +7,8 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 IMERG_ANEMOI:
-  type: anemoi
-  filenames: ["nasa-imerg-grib-n320-1998-2024-6h-v1.zarr"]
+  type: anemoi 
+  filenames: ["imerg-nasa-grib-o96-1998-2024-6h-v1.zarr"] # juwels: imerg-nasa-grib-n320-1998-2024-6h-v1.zarr, imerg-nasa-grib-o96-1998-2024-6h-v1.zarr
   stream_id: 1
 
   source: ["tp"]
