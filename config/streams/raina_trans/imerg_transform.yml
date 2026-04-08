@@ -9,7 +9,7 @@
 
 IMERG_ANEMOI:
   type: anemoi_transform
-  filenames: ["nasa-imerg-grib-n320-1998-2024-6h-v1.zarr"]
+  filenames: ["imerg-nasa-grib-o96-1998-2024-6h-v1.zarr"]
   stream_id: 1
 
   source: ["tp"]
@@ -20,9 +20,9 @@ IMERG_ANEMOI:
   target_channel_weights:
     - 1.0
   location_weight : cosine_latitude
-  # transform_type: arcsinh
-  # transform_scale: 1000.0
-  # transform_alpha: 0.05
+  transform_type: arcsinh
+  transform_scale: 1000.0
+  transform_alpha: 0.05
 
   # transform_type: log10
   # transform_scale: 1000.0    # m -> mm
