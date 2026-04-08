@@ -27,9 +27,9 @@ CERRA:
 
   masking_rate: 0.6
   masking_rate_none: 0.05
-  token_size: 1024
+  token_size: 128
   tokenize_spacetime: True
-  max_num_targets: 500000
+  max_num_targets: -1
 
   embed:
     net: transformer
