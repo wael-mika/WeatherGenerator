@@ -268,7 +268,7 @@ training_config:
       num_samples: 1,
       num_steps_input: 1,
       masking_strategy_config: {
-        rate: 0.7,
+        rate: 0.4,
         rate_sampling: False,
         diffusion_rn: False,
       },
@@ -282,7 +282,7 @@ training_config:
   #     num_samples: 1,
   #     num_steps_input: 1,
   #     masking_strategy_config: {
-  #       rate: 0.7,
+  #       rate: 0.4,
   #       hl_mask: 4,
   #       rate_sampling: False,
   #     },
@@ -296,7 +296,7 @@ training_config:
   #     num_samples: 1,
   #     num_steps_input: 1,
   #     masking_strategy_config: {
-  #       rate: 0.7,
+  #       rate: 0.4,
   #       hl_mask: 4,
   #       method: "geodesic_disk",
   #       rate_sampling: False,
@@ -311,8 +311,8 @@ training_config:
   #     num_samples: 1,
   #     num_steps_input: 1,
   #     masking_strategy_config: {
-  #       num_swaths: 18,
-  #       swath_width_deg: 20.0,
+  #       num_swaths: 12,
+  #       swath_width_deg: 15.0,
   #       orbit_drift_deg: -25.0,
   #     },
   #   },
@@ -345,10 +345,10 @@ training_config:
   #       strategy_weights: {random: 1.0, healpix: 1.0, cropping_healpix: 1.0, satellite_swath: 1.0, satellite_swath_sparse: 1.0},
   #       hl_mask_levels: [0, 1, 2, 3],
   #       strategy_configs: {
-  #         random:              {rate: 0.7, rate_sampling: False, diffusion_rn: False},
-  #         healpix:             {rate: 0.7, hl_mask: 4, rate_sampling: False},
-  #         cropping_healpix:    {rate: 0.7, hl_mask: 4, method: "geodesic_disk", rate_sampling: False},
-  #         satellite_swath:     {num_swaths: 18, swath_width_deg: 20.0, orbit_drift_deg: -25.0},
+  #         random:              {rate: 0.4, rate_sampling: False, diffusion_rn: False},
+  #         healpix:             {rate: 0.4, hl_mask: 4, rate_sampling: False},
+  #         cropping_healpix:    {rate: 0.4, hl_mask: 4, method: "geodesic_disk", rate_sampling: False},
+  #         satellite_swath:     {num_swaths: 12, swath_width_deg: 15.0, orbit_drift_deg: -25.0},
   #         satellite_swath_sparse: {num_swaths: 30, swath_width_deg: 10.0, orbit_drift_deg: -25.0, rate: 0.7, rate_sampling: False},
   #       },
   #     },
