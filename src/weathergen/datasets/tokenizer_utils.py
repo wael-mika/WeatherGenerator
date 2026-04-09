@@ -324,10 +324,13 @@ def tokenize_apply_mask_target(
     def return_empty(rdata, idxs_cells_lens):
         do = torch.zeros([0, rdata.data.shape[-1]])
         coords = torch.zeros([0, rdata.coords.shape[-1]])
-        dt = np.array([], dtype=np.datetime64)
+        times_enc = enc_time(np.array([], dtype="datetime64[ns]"), time_win)
+        coords_local_dim = 1 + rdata.geoinfos.shape[-1] + times_enc.shape[-1] + 5 * (3 * 5) + 3 * 8
+        coords_local = torch.zeros([0, coords_local_dim], dtype=torch.float32)
+        dt = np.array([], dtype="datetime64[ns]")
         masked_points_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
         # data, datetimes, coords, coords_local, masked_points_per_cell
-        return do, dt, coords, coords, masked_points_per_cell
+        return do, dt, coords, coords_local, masked_points_per_cell
 
     # convert to token level, forgetting about cells
     idxs_tokens = [i for t in idxs_cells for i in t]
