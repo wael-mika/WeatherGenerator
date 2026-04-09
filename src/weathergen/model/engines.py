@@ -79,6 +79,8 @@ class MoEBlockConfig:
     renormalize_gates: bool
     use_spatial_routing: bool
     position_embed_dim: int
+    router_hidden_dim: int
+    router_z_loss_weight: float
     debug_enabled: bool
     debug_interval: int
     debug_top_experts: int
@@ -127,6 +129,8 @@ def _get_moe_block_config(
         renormalize_gates=cf.get(f"{prefix}_renormalize_gates", True),
         use_spatial_routing=cf.get(f"{prefix}_use_spatial_routing", False),
         position_embed_dim=cf.get(f"{prefix}_position_embed_dim", 128),
+        router_hidden_dim=cf.get(f"{prefix}_router_hidden_dim", 0),
+        router_z_loss_weight=cf.get(f"{prefix}_router_z_loss_weight", 0.0),
         debug_enabled=cf.get(f"{prefix}_debug", False),
         debug_interval=cf.get(f"{prefix}_debug_interval", 100),
         debug_top_experts=cf.get(f"{prefix}_debug_top_experts", 3),
@@ -602,6 +606,8 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         use_spatial_router=moe_cfg.use_spatial_routing,
                         num_positions=self.num_healpix_cells,
                         position_embed_dim=moe_cfg.position_embed_dim,
+                        router_hidden_dim=moe_cfg.router_hidden_dim,
+                        router_z_loss_weight=moe_cfg.router_z_loss_weight,
                         debug_enabled=moe_cfg.debug_enabled,
                         debug_interval=moe_cfg.debug_interval,
                         debug_top_experts=moe_cfg.debug_top_experts,
@@ -654,12 +660,23 @@ class GlobalAssimilationEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 block.set_position_ids(position_ids)
 
-    def forward(self, tokens):
+    def forward(self, tokens, coords=None):
+        aux_info = None
         for block in self.ae_global_blocks:
             if isinstance(block, MoEBlock):
-                tokens, _ = block(tokens)
+                tokens = checkpoint(
+                    _moe_forward_wrapper_with_aux,
+                    block,
+                    tokens,
+                    aux_info,
+                    None,  # position_ids — uses block default
+                    None,  # token_mask
+                    use_reentrant=False,
+                )
+            elif isinstance(block, torch.nn.modules.normalization.LayerNorm):
+                tokens = checkpoint(block, tokens, use_reentrant=False)
             else:
-                tokens = block(tokens)
+                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:
@@ -756,6 +773,8 @@ class ForecastingEngine(torch.nn.Module):
                             use_spatial_router=moe_cfg.use_spatial_routing,
                             num_positions=self.num_healpix_cells,
                             position_embed_dim=moe_cfg.position_embed_dim,
+                            router_hidden_dim=moe_cfg.router_hidden_dim,
+                            router_z_loss_weight=moe_cfg.router_z_loss_weight,
                             debug_enabled=moe_cfg.debug_enabled,
                             debug_interval=moe_cfg.debug_interval,
                             debug_top_experts=moe_cfg.debug_top_experts,
@@ -818,7 +837,7 @@ class ForecastingEngine(torch.nn.Module):
             if isinstance(block, MoEBlock):
                 block.set_position_ids(position_ids)
 
-    def forward(self, tokens, fstep):
+    def forward(self, tokens, fstep, coords=None):
         if self.training:
             # Impute noise to the latent state
             noise_std = self.cf.get("fe_impute_latent_noise_std", 0.0)
@@ -828,7 +847,7 @@ class ForecastingEngine(torch.nn.Module):
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
-                tokens = block(tokens)
+                tokens = checkpoint(block, tokens, use_reentrant=False)
             elif isinstance(block, MoEBlock):
                 # MoE blocks return (output, aux_loss).  The wrapper discards
                 # aux_loss for checkpointing; it is stored on the block as
@@ -845,7 +864,7 @@ class ForecastingEngine(torch.nn.Module):
                     use_reentrant=False,
                 )
             else:
-                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
     def get_moe_aux_losses(self) -> list[torch.Tensor]:

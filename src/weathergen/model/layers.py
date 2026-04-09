@@ -211,13 +211,62 @@ class LoadBalancingLoss(torch.nn.Module):
         return self.weight * loss
 
 
+class RouterZLoss(torch.nn.Module):
+    """Router z-loss from ST-MoE (`Zoph et al., 2022
+    <https://arxiv.org/abs/2202.08906>`_).
+
+    Penalises large router logits to prevent the softmax distribution
+    from collapsing to a single expert.  The loss is the mean squared
+    log-partition function of the router logits:
+
+    .. math::
+
+        L_z = \\frac{1}{N} \\sum_{n=1}^{N}
+              \\bigl(\\log \\sum_{e=1}^{E} \\exp z_{n,e}\\bigr)^2
+
+    Scaled by *weight* before being returned.
+    """
+
+    def __init__(self, weight: float = 0.001):
+        """
+        Args:
+            weight: Scalar multiplier applied to the raw z-loss.
+        """
+        super().__init__()
+        self.weight = weight
+
+    def forward(
+        self,
+        router_logits: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute the scaled router z-loss.
+
+        Args:
+            router_logits: ``[N, E]`` raw (pre-softmax) router logits.
+            token_mask: Optional ``[N]`` boolean mask.  When provided, only
+                ``True`` positions contribute to the mean.
+
+        Returns:
+            A scalar tensor: ``weight * mean(logsumexp(logits)^2)``.
+        """
+        log_z = torch.logsumexp(router_logits, dim=-1)
+        if token_mask is not None:
+            mask_f = token_mask.to(log_z.dtype)
+            denom = mask_f.sum().clamp_min(1.0)
+            loss = (log_z ** 2 * mask_f).sum() / denom
+        else:
+            loss = (log_z ** 2).mean()
+        return self.weight * loss
+
+
 class MoERouter(torch.nn.Module):
     """Dense top-k router for mixture-of-experts blocks.
 
-    Each token is projected to ``num_experts`` logits via a single linear
-    layer, followed by softmax and top-k selection.  An optional uniform
-    jitter noise can be added to the logits during training to encourage
-    exploration and discourage early hard collapse.
+    Each token is projected to ``num_experts`` logits via a learned
+    projection (optionally a 2-layer MLP), followed by softmax and top-k
+    selection.  Multiplicative jitter noise can be applied to the input
+    during training to encourage exploration.
     """
 
     def __init__(
@@ -227,15 +276,18 @@ class MoERouter(torch.nn.Module):
         top_k: int = 2,
         jitter_noise: float = 0.0,
         router_bias: bool = False,
+        router_hidden_dim: int = 0,
     ):
         """
         Args:
             dim_in: Token embedding dimension.
             num_experts: Number of experts to score.
             top_k: How many experts each token is routed to.
-            jitter_noise: Standard deviation of Gaussian noise added to
-                router logits during training (0 disables).
-            router_bias: Whether the router linear layer has a bias term.
+            jitter_noise: Half-width of the uniform multiplicative jitter
+                applied to router inputs during training (0 disables).
+            router_bias: Whether the final router linear layer has a bias.
+            router_hidden_dim: If >0, use a 2-layer MLP with this hidden
+                size instead of a single linear projection.
         """
         super().__init__()
         if top_k > num_experts:
@@ -243,14 +295,21 @@ class MoERouter(torch.nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.jitter_noise = jitter_noise
-        self.router_weights = nn.Linear(dim_in, num_experts, bias=router_bias)
+        if router_hidden_dim and router_hidden_dim > 0:
+            self.router_weights = nn.Sequential(
+                nn.Linear(dim_in, router_hidden_dim, bias=False),
+                nn.GELU(),
+                nn.Linear(router_hidden_dim, num_experts, bias=router_bias),
+            )
+        else:
+            self.router_weights = nn.Linear(dim_in, num_experts, bias=router_bias)
 
     def forward(
         self,
         x: torch.Tensor,
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route each token to its top-k experts.
 
         Args:
@@ -266,6 +325,7 @@ class MoERouter(torch.nn.Module):
             expert_indices: ``[N, K]`` indices of the chosen experts per token.
             expert_weights: ``[N, K]`` gate weights normalised to sum to 1
                 across the *K* selected experts for each token.
+            router_logits: ``[N, E]`` raw pre-softmax logits (used for z-loss).
         """
         del position_ids
         if x.ndim == 3:
@@ -273,9 +333,10 @@ class MoERouter(torch.nn.Module):
         elif x.ndim != 2:
             raise ValueError(f"MoERouter expects [N, D] or [B, T, D], got {tuple(x.shape)}")
 
-        router_logits = self.router_weights(x)
         if self.training and self.jitter_noise > 0:
-            router_logits = router_logits + torch.randn_like(router_logits) * self.jitter_noise
+            x = x * torch.empty_like(x).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
+
+        router_logits = self.router_weights(x)
 
         if token_mask is not None:
             token_mask = token_mask.to(torch.bool)
@@ -288,25 +349,35 @@ class MoERouter(torch.nn.Module):
 
         expert_weights, expert_indices = torch.topk(router_probs, self.top_k, dim=-1)
         expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
-        return router_probs, expert_indices, expert_weights
+        return router_probs, expert_indices, expert_weights, router_logits
 
 
 class SpatialMoERouter(torch.nn.Module):
-    """Top-k router that augments token features with learned spatial
-    position embeddings before computing expert scores.
+    """Dual-head gated router that combines content-based and spatial
+    expert scores via a learned per-token gate.
 
-    Tokens carry a ``position_id`` that indexes into a learned
-    :class:`nn.Embedding` table.  The resulting position vector is
-    concatenated with the token features before the router linear
-    projection, giving the router access to spatial location information
-    (e.g. which HEALPix cell the token belongs to).
+    Two independent scoring heads produce expert logits:
+
+    * **Content head** — projects token features to expert scores,
+      optionally through a 2-layer MLP.
+    * **Spatial head** — projects a sinusoidal position embedding to
+      expert scores, capturing geographic priors (e.g. tropics vs poles).
+
+    A learned gate ``alpha = sigmoid(gate_proj(x))`` blends the two::
+
+        router_logits = alpha * content_logits + (1 - alpha) * spatial_logits
+
+    This lets the model learn *when* to trust geography (quiet regions,
+    stable spatial priors) versus content (extreme events, unusual
+    atmospheric states).
+
+    The position embedding table is a **register_buffer** (not
+    ``nn.Embedding`` / ``nn.Parameter``) to avoid the FSDP2 DTensor
+    all-gather issue.  It is initialised with sinusoidal ``(theta, phi)``
+    HEALPix coordinates via :meth:`initialize_from_coordinates`.
 
     Special tokens (register / class tokens) use ``position_id = -1``
-    and receive a zero spatial embedding so they do not bias routing.
-
-    The embedding table can be initialised with sinusoidal features
-    derived from HEALPix ``(theta, phi)`` coordinates via
-    :meth:`initialize_from_coordinates`.
+    and receive a zero spatial embedding.
     """
 
     def __init__(
@@ -318,20 +389,20 @@ class SpatialMoERouter(torch.nn.Module):
         jitter_noise: float = 0.0,
         router_bias: bool = False,
         position_embed_dim: int = 128,
+        router_hidden_dim: int = 0,
     ):
         """
         Args:
-            dim_in: Token embedding dimension (without position embedding).
+            dim_in: Token embedding dimension.
             num_experts: Number of experts to score.
             num_positions: Size of the spatial embedding table (typically the
                 number of HEALPix cells).
             top_k: How many experts each token is routed to.
-            jitter_noise: Standard deviation of Gaussian noise added to
-                router logits during training (0 disables).
-            router_bias: Whether the router linear layer has a bias term.
+            jitter_noise: Half-width of the uniform multiplicative jitter
+                applied to content features during training (0 disables).
+            router_bias: Whether the final content-head linear has a bias.
             position_embed_dim: Dimension of each spatial position embedding.
-                The router projection operates on ``dim_in + position_embed_dim``
-                features.
+            router_hidden_dim: If >0, use a 2-layer MLP for the content head.
         """
         super().__init__()
         if top_k > num_experts:
@@ -341,18 +412,34 @@ class SpatialMoERouter(torch.nn.Module):
         self.top_k = top_k
         self.jitter_noise = jitter_noise
         self.position_embed_dim = position_embed_dim
-        # Non-trainable replicated buffer instead of nn.Embedding (nn.Parameter).
-        # nn.Embedding weight is sharded as a DTensor by FSDP2, and F.embedding
-        # with a DTensor weight does NOT unwrap the output the way F.linear does.
-        # This means every forward call triggers an implicit full_tensor() all-gather
-        # on the embedding OUTPUT, which is catastrophically slow and eventually
-        # deadlocks.  As a buffer the table stays replicated on each rank and
-        # F.embedding returns a plain local tensor.  The sinusoidal spatial signal
-        # is fixed geometry; router_weights learns to use it.
+
+        # --- Spatial embedding buffer (FSDP2-safe) ---
+        # nn.Embedding weight is sharded as a DTensor by FSDP2, and
+        # F.embedding with a DTensor weight triggers an implicit
+        # full_tensor() all-gather on every forward.  Using a plain buffer
+        # keeps the table replicated and avoids the issue.
         self.register_buffer(
             "position_embed_weight", torch.zeros(num_positions, position_embed_dim)
         )
-        self.router_weights = nn.Linear(dim_in + position_embed_dim, num_experts, bias=router_bias)
+
+        # --- Content head: token features → expert scores ---
+        if router_hidden_dim and router_hidden_dim > 0:
+            self.content_head = nn.Sequential(
+                nn.Linear(dim_in, router_hidden_dim, bias=False),
+                nn.GELU(),
+                nn.Linear(router_hidden_dim, num_experts, bias=router_bias),
+            )
+        else:
+            self.content_head = nn.Linear(dim_in, num_experts, bias=router_bias)
+
+        # --- Spatial head: position embedding → expert scores ---
+        self.spatial_head = nn.Linear(position_embed_dim, num_experts, bias=False)
+
+        # --- Per-token gate blending content vs spatial ---
+        # Initialised to output 0 → sigmoid(0) = 0.5 → equal blend at start.
+        self.gate_proj = nn.Linear(dim_in, 1, bias=True)
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.zeros_(self.gate_proj.bias)
 
     def initialize_from_coordinates(self, theta: torch.Tensor, phi: torch.Tensor):
         """Initialise the embedding table with sinusoidal features derived
@@ -378,7 +465,6 @@ class SpatialMoERouter(torch.nn.Module):
 
         with torch.no_grad():
             embed_dim = self.position_embed_dim
-            # Build the full embedding table on CPU to avoid device-specific issues.
             embeddings = torch.zeros(self.num_positions, embed_dim)
             half_dim = embed_dim // 2
 
@@ -399,8 +485,6 @@ class SpatialMoERouter(torch.nn.Module):
             embeddings[:, half_dim + 0 :: 2] = torch.sin(phi_cpu.unsqueeze(1) * freqs_phi)
             embeddings[:, half_dim + 1 :: 2] = torch.cos(phi_cpu.unsqueeze(1) * freqs_phi)
 
-            # position_embed_weight is a replicated buffer (not an FSDP2-sharded
-            # parameter), so a plain copy is safe on all ranks.
             self.position_embed_weight.copy_(
                 embeddings.to(
                     device=self.position_embed_weight.device,
@@ -415,8 +499,8 @@ class SpatialMoERouter(torch.nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Route tokens using concatenated token features and position embeddings.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route tokens using dual-head gated content + spatial scoring.
 
         Args:
             x: Token features ``[N, D]`` or ``[B, T, D]`` (flattened internally).
@@ -431,6 +515,7 @@ class SpatialMoERouter(torch.nn.Module):
             router_probs: ``[N, E]`` softmax probabilities over all experts.
             expert_indices: ``[N, K]`` indices of the chosen experts per token.
             expert_weights: ``[N, K]`` gate weights normalised per token.
+            router_logits: ``[N, E]`` raw pre-softmax logits (used for z-loss).
         """
         if x.ndim == 3:
             x = x.reshape(-1, x.shape[-1])
@@ -454,20 +539,24 @@ class SpatialMoERouter(torch.nn.Module):
                 )
             position_ids = position_ids.to(device=x.device, dtype=torch.long)
 
-        # Clamp to valid range before lookup; zero out special tokens (id < 0)
-        # via elementwise multiply instead of boolean scatter — avoids any
-        # GPU-CPU sync and the DTensor issues that arise when nn.Embedding weight
-        # is FSDP2-sharded.  The multiply is a no-op for the common case where
-        # all position_ids are non-negative (FE has no special tokens in practice).
+        # Multiplicative jitter on content features (before content head).
+        if self.training and self.jitter_noise > 0:
+            x = x * torch.empty_like(x).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
+
+        # --- Content scores ---
+        content_logits = self.content_head(x)  # [N, E]
+
+        # --- Spatial scores ---
+        # Clamp to valid range; zero out special tokens (id < 0) via
+        # elementwise multiply — avoids GPU-CPU sync.
         clipped_ids = position_ids.clamp(min=0) % self.num_positions
         pos_embed = F.embedding(clipped_ids, self.position_embed_weight).to(dtype=x.dtype)
         pos_embed = pos_embed * (position_ids >= 0).to(dtype=x.dtype).unsqueeze(-1)
+        spatial_logits = self.spatial_head(pos_embed)  # [N, E]
 
-        x_with_pos = torch.cat([x, pos_embed], dim=-1)
-
-        router_logits = self.router_weights(x_with_pos)
-        if self.training and self.jitter_noise > 0:
-            router_logits = router_logits + torch.randn_like(router_logits) * self.jitter_noise
+        # --- Gated combination ---
+        alpha = torch.sigmoid(self.gate_proj(x))  # [N, 1]
+        router_logits = alpha * content_logits + (1.0 - alpha) * spatial_logits
 
         if token_mask is not None:
             token_mask = token_mask.to(torch.bool)
@@ -481,7 +570,7 @@ class SpatialMoERouter(torch.nn.Module):
         expert_weights, expert_indices = torch.topk(router_probs, self.top_k, dim=-1)
         expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
 
-        return router_probs, expert_indices, expert_weights
+        return router_probs, expert_indices, expert_weights, router_logits
 
 
 class MoEBlock(torch.nn.Module):
@@ -523,6 +612,8 @@ class MoEBlock(torch.nn.Module):
         use_spatial_router: bool = False,
         num_positions: int | None = None,
         position_embed_dim: int = 128,
+        router_hidden_dim: int = 0,
+        router_z_loss_weight: float = 0.0,
         debug_enabled: bool = False,
         debug_interval: int = 100,
         debug_top_experts: int = 3,
@@ -536,12 +627,10 @@ class MoEBlock(torch.nn.Module):
             num_experts: Number of expert copies to instantiate.
             top_k: Experts selected per token.
             capacity_factor: Per-expert capacity as a fraction of
-                ``valid_tokens / num_experts``.  Set to ``0`` or ``None`` to
-                disable capacity enforcement.  Note: this does **not** account
-                for *top_k*, so with ``top_k=2`` and ``capacity_factor=1.25``
-                about 37.5 % of assignment edges will be dropped even under
-                perfectly balanced routing.
-            jitter_noise: Noise std added to router logits during training.
+                ``top_k * valid_tokens / num_experts``.  Set to ``0`` or
+                ``None`` to disable capacity enforcement.
+            jitter_noise: Half-width of uniform multiplicative jitter
+                applied to router inputs during training (0 disables).
             router_bias: Whether the router projection has a bias term.
             load_balance_weight: Scalar multiplier for the auxiliary
                 :class:`LoadBalancingLoss`.
@@ -554,6 +643,10 @@ class MoEBlock(torch.nn.Module):
             num_positions: Spatial embedding table size (required when
                 *use_spatial_router* is ``True``).
             position_embed_dim: Dimension of the spatial position embedding.
+            router_hidden_dim: If >0, use a 2-layer MLP router with this
+                hidden size instead of a single linear projection.
+            router_z_loss_weight: Scalar multiplier for the
+                :class:`RouterZLoss`.  Set to ``0`` to disable.
             debug_enabled: Emit periodic diagnostic log lines during training.
             debug_interval: Log every *N*-th forward pass (rank 0 only).
             debug_top_experts: Number of top experts shown in the log line.
@@ -588,6 +681,7 @@ class MoEBlock(torch.nn.Module):
                 jitter_noise=jitter_noise,
                 router_bias=router_bias,
                 position_embed_dim=position_embed_dim,
+                router_hidden_dim=router_hidden_dim,
             )
         else:
             self.router = MoERouter(
@@ -596,12 +690,16 @@ class MoEBlock(torch.nn.Module):
                 top_k=top_k,
                 jitter_noise=jitter_noise,
                 router_bias=router_bias,
+                router_hidden_dim=router_hidden_dim,
             )
 
         self.load_balance_loss = LoadBalancingLoss(
             num_experts=num_experts,
             weight=load_balance_weight,
         )
+        self.router_z_loss: RouterZLoss | None = None
+        if router_z_loss_weight and router_z_loss_weight > 0:
+            self.router_z_loss = RouterZLoss(weight=router_z_loss_weight)
         self.last_aux_loss: torch.Tensor | None = None
         self.last_expert_indices: torch.Tensor | None = None
         self.last_expert_weights: torch.Tensor | None = None
@@ -930,7 +1028,7 @@ class MoEBlock(torch.nn.Module):
         )
         should_log_debug = self._should_log_debug()
 
-        router_probs, expert_indices, expert_weights = self.router(
+        router_probs, expert_indices, expert_weights, router_logits = self.router(
             x_flat, position_ids=pos_ids_flat, token_mask=token_mask_flat
         )
 
@@ -957,12 +1055,12 @@ class MoEBlock(torch.nn.Module):
             if token_mask_flat is not None:
                 num_tokens_for_capacity = int(token_mask_flat.sum().item())
             capacity = int(
-                math.ceil(self.capacity_factor * max(num_tokens_for_capacity, 1) / self.num_experts)
+                math.ceil(self.capacity_factor * self.top_k * max(num_tokens_for_capacity, 1) / self.num_experts)
             )
             capacity = max(capacity, 1)
             # capacity = max number of assignment edges retained *per expert*.
-            # Note: this formula does NOT multiply by top_k, so with top_k=2
-            # and CF=1.25 the theoretical minimum drop rate is 37.5 %.
+            # Multiplied by top_k so that CF=1.25 means 25% headroom above
+            # the perfectly-balanced case regardless of top_k.
 
         # --- Capacity enforcement: keep at most `capacity` edges per expert,
         # preferring edges with the highest gate weights. ---
@@ -1030,6 +1128,8 @@ class MoEBlock(torch.nn.Module):
                 assignment_weights,
                 token_mask_flat,
             )
+            if self.router_z_loss is not None:
+                step_aux = step_aux + self.router_z_loss(router_logits, token_mask_flat)
             if self.last_aux_loss is not None:
                 self.last_aux_loss = self.last_aux_loss + step_aux
             else:
