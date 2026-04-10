@@ -184,6 +184,46 @@ class Masker:
         """Return latitude in degrees [-90, 90] for every HEALPix cell (cached)."""
         return self._get_cell_coords()[0]
 
+    def _resolve_mixed_strategies(self, cfgs: dict) -> dict:
+        """Replace any 'mixed' masking strategy with a single randomly-chosen sub-strategy.
+
+        Draws the sub-strategy exactly once per config entry so that source and target
+        loops share the same sub-strategy for a given sample.  Without this, both loops
+        would call ``_generate_cell_mask("mixed", ...)`` independently and could draw
+        different sub-strategies (e.g. target draws "random", source draws "cropping").
+
+        Args:
+            cfgs: Deep copy of a masking config section (model_input dict). Modified in-place.
+
+        Returns:
+            The modified cfgs dict with "mixed" replaced by a concrete sub-strategy.
+        """
+        for _, cfg in cfgs.items():
+            if cfg.get("masking_strategy") != "mixed":
+                continue
+            msc = cfg.get("masking_strategy_config", {})
+            strategies = list(msc.get("strategies", ["random", "healpix"]))
+            raw_weights = msc.get("strategy_weights", None)
+            if raw_weights is not None:
+                w = np.array([raw_weights.get(s, 1.0) for s in strategies], dtype=float)
+                w /= w.sum()
+            else:
+                w = None
+            chosen_idx = self.rng.choice(len(strategies), p=w)
+            chosen = strategies[chosen_idx]
+
+            strategy_cfgs = msc.get("strategy_configs", {})
+            sub_cfg = {**msc, **strategy_cfgs.get(chosen, {})}
+
+            if "hl_mask_levels" in msc and "hl_mask" not in strategy_cfgs.get(chosen, {}):
+                hl_mask_levels = list(msc["hl_mask_levels"])
+                hl_mask = hl_mask_levels[self.rng.integers(0, len(hl_mask_levels))]
+                sub_cfg["hl_mask"] = hl_mask
+
+            cfg["masking_strategy"] = chosen
+            cfg["masking_strategy_config"] = sub_cfg
+        return cfgs
+
     def merge_masking_config(self, mode_cfg, override):
         """Merge a stream's masking override into the base mode config.
 
@@ -399,6 +439,11 @@ class Masker:
         # target and source are assumed identical when target is not specified
         target_auto_generated = len(target_cfgs) == 0
         if target_auto_generated:
+            # Resolve "mixed" to a concrete sub-strategy exactly once per sample so
+            # source and target share the same sub-strategy (spatial structure).
+            # The resolved copy also becomes the basis for target_cfgs so both loops
+            # dispatch to the same concrete strategy without a second independent draw.
+            source_cfgs = self._resolve_mixed_strategies(copy.deepcopy(source_cfgs))
             target_cfgs = copy.deepcopy(source_cfgs)
 
         losses = stream_masking_cfg.losses
@@ -463,14 +508,20 @@ class Masker:
                 # ensure proper default relationships
                 if relationship is None:
                     if target_auto_generated:
-                        # source rate drives the split: generate source independently,
-                        # then set target = complement of source (done below)
+                        # `rate` in source config controls the encoder's visible fraction.
+                        # Source is generated independently with the configured strategy;
+                        # target is then set to the complement of source (see below).
+                        # This applies to ALL strategies (random, healpix, cropping,
+                        # satellite_swath, mixed, etc.) so that source and target never
+                        # overlap and have no gaps.  For "mixed" in particular this also
+                        # prevents target and source from independently drawing different
+                        # sub-strategies from the pool.
                         relationship = "independent"
                     elif source_cfg.get("masking_strategy") == "random":
-                        # default for masked token modeling
+                        # default for masked token modeling when target is explicit
                         relationship = "complement"
                     else:
-                        # default for forecasting
+                        # default for forecasting / explicit target configs
                         relationship = "independent"
                 target_idx = target_num_samples[:target_cfg_idx].sum()
                 # iterate sequentially through targets (to enable 1-to-1 correspondence when no
@@ -488,9 +539,11 @@ class Masker:
                         target_relationship_mask=(relationship, target_masks.get_mask(target_idx)),
                     )
 
-                # When target was auto-generated from source config, rate controls the source
-                # fraction directly. Override the target mask to be the complement of the source
-                # so the decoder reconstructs exactly what the encoder did not see.
+                # When target was auto-generated from source config, `rate` controls the
+                # source fraction directly.  Override the target mask to be the complement
+                # of the source so the decoder reconstructs exactly what the encoder did
+                # not see — guaranteed for every strategy, including "mixed" (which would
+                # otherwise independently draw a different sub-strategy for target).
                 if target_auto_generated and not (
                     is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
                 ):
@@ -825,7 +878,7 @@ class Masker:
         child_offsets = np.arange(num_children_per_parent)
         child_indices = (parent_ids[:, None] * num_children_per_parent + child_offsets).reshape(-1)
 
-        # Create mask: True = MASK (masked tokens), False = KEEP (kept tokens)
+        # Create keep mask (True = selected/kept cells at data level).
         mask = np.zeros(num_cells, dtype=bool)
         mask[child_indices] = True
 

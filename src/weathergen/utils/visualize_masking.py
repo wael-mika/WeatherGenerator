@@ -313,7 +313,7 @@ def _format_mask_params(params: dict) -> str:
     rate = cfg.get("rate", None)
     parts = [strategy]
     if isinstance(rate, int | float):
-        parts.append(f"rate={rate:.2f}")
+        parts.append(f"cfg_rate={rate:.2f}")
     if "hl_mask" in cfg:
         parts.append(f"hl={cfg['hl_mask']}")
     if "method" in cfg:
@@ -352,6 +352,15 @@ def _map_points_visible(
     cell_indices = hp.lonlat_to_healpix(lon_rad, lat_rad, nside, order="nested")
     mask_np = _to_numpy(mask).astype(bool)
     return mask_np[cell_indices]
+
+
+def _mask_keep_masked_fraction(mask) -> tuple[float, float]:
+    """Return (keep_fraction, masked_fraction) from a boolean cell mask."""
+    mask_np = _to_numpy(mask).astype(bool)
+    if mask_np.size == 0:
+        return 0.0, 1.0
+    keep = float(mask_np.mean())
+    return keep, 1.0 - keep
 
 
 def _resolve_var_idx(
@@ -872,6 +881,8 @@ def main(args=None) -> int:
 
         source_meta = source_sample.meta_info[stream_name]
         target_meta = target_sample.meta_info[stream_name]
+        src_keep, src_masked = _mask_keep_masked_fraction(source_meta.mask)
+        tgt_keep, tgt_masked = _mask_keep_masked_fraction(target_meta.mask)
 
         # Decide target view: use target values if available, else network input view.
         target_view = "target_values"
@@ -957,11 +968,13 @@ def main(args=None) -> int:
 
         src_label = (
             f"Source ({source_var_name})\n{_format_mask_params(_to_dict(source_meta.params))}\n"
+            f"keep={src_keep:.1%}, masked={src_masked:.1%}\n"
             f"points={len(vals_src)}"
         )
         tgt_label = (
             f"Target ({target_var_name}, {target_view})\n"
             f"{_format_mask_params(_to_dict(target_meta.params))}\n"
+            f"keep={tgt_keep:.1%}, masked={tgt_masked:.1%}\n"
             f"points={len(vals_tgt)}"
         )
 
