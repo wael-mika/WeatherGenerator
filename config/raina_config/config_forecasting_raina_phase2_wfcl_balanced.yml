@@ -7,6 +7,27 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+# PHASE 2: FULL WFCL WITH CONSERVATIVE WEIGHT
+#
+# Purpose: If Phase 1 (FACL-only) shows promise, add the wavelet component.
+# This config uses a conservative weight (0.1) to avoid overwhelming the MSE
+# gradient, particularly important for multi-variable learning.
+#
+# Key config choices:
+# - MSE weight: 0.9 (reduced from 0.95 to make room for wavelets)
+# - WFCL weight: 0.1 (still conservative; empirically tune up if FACL gains hold)
+# - beta: 1.0 (FACL contribution; can be reduced if Fourier term is too strong)
+# - wavelet_levels: 3 (3-level DTCWT: ~4–16 km, ~8–32 km, ~16–64 km scales)
+# - gamma_levels: [1, 1, 1] (equal weight across scales; adjust to [1, 2, 4] if finer scales matter more)
+# - alpha: 0.1 (standard: amplitude loss for first 10%, then interpolate to phase loss by 90%)
+#
+# Expected outcomes:
+# - If sharpness improves without metric degradation: consider Phase 3
+# - If other variables degrade: reduce WFCL weight to 0.05
+# - If sharpness plateaus: investigate wavelet level weights or alpha schedule
+#
+# Note: Stream config should predict IMERG_ANEMOI only. Monitor LPIPS, FSS for precipitation.
+
 embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
@@ -30,8 +51,6 @@ ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -45,7 +64,7 @@ ae_aggregation_att_dense_rate: 1.0
 ae_aggregation_block_factor: 64
 ae_aggregation_mlp_hidden_factor: 2
 
-decoder_type: PerceiverIOCoordConditioning #  Main options PerceiverIOCoordConditioning or Linear
+decoder_type: PerceiverIOCoordConditioning
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
@@ -53,15 +72,12 @@ pred_mlp_adaln: True
 num_class_tokens: 0
 num_register_tokens: 0
 
-# number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
-# one is training an auto-encoder
 fe_num_blocks: 16
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
-fe_layer_norm_after_blocks: [7]  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
+fe_layer_norm_after_blocks: [7]
 fe_impute_latent_noise_std: 1e-4
-# currently fixed to 1.0 (due to limitations with flex_attention and triton)
 forecast_att_dense_rate: 1.0
 
 healpix_level: 5
@@ -77,11 +93,11 @@ mixed_precision_dtype: bf16
 mlp_norm_eps: 1e-5
 norm_eps: 1e-4
 
-latent_noise_kl_weight: 0.0 # 1e-5
+latent_noise_kl_weight: 0.0
 latent_noise_gamma: 2.0
-latent_noise_saturate_encodings: 5 
+latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
-latent_noise_deterministic_latents: True 
+latent_noise_deterministic_latents: True
 
 freeze_modules: ""
 load_chkpt: {}
@@ -93,36 +109,25 @@ norm_type: "LayerNorm"
 streams_directory: "./config/streams/raina/"
 streams: ???
 
-# type of zarr_store
-zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
+zarr_store: "zip"
 
 general:
 
-  # mutable parameters
   istep: 0
   rank: ???
   world_size: ???
 
-  # local_rank, 
-  # with_ddp,
-  # data_path_*, 
-  # model_path, 
-  # run_path, 
-  # path_shared_
-  
   multiprocessing_method: "fork"
 
   desc: ""
   run_id: ???
   run_history: []
 
-# logging frequency in the training loop (in number of batches)
 train_logging:
   terminal: 10
   metrics: 20
   checkpoint: 250
 
-# parameters for data loading
 data_loading :
 
   num_workers: 12
@@ -130,10 +135,8 @@ data_loading :
   repeat_data_in_mini_epoch : False
 
 
-# config for training
 training_config:
-  
-  # training_mode: "masking", "student_teacher", "latent_loss"
+
   training_mode: ["masking"]
 
   num_mini_epochs: 64
@@ -145,7 +148,7 @@ training_config:
 
   time_window_step: 06:00:00
   time_window_len: 06:00:00
-  
+
   learning_rate_scheduling :
     lr_start: 1e-6
     lr_max: 5e-5
@@ -163,15 +166,15 @@ training_config:
     weight_decay: 0.1
     log_grad_norms: False
     adamw :
-      # parameters are scaled by number of DDP workers
-      beta1 : 0.98125 # == 0.85 on 2 nodes x 4 gpus
-      beta2 : 0.9875  # == 0.90 on 2 nodes x 4 gpus
+      beta1 : 0.98125
+      beta2 : 0.9875
       eps : 2e-08
 
   losses : {
     "physical": {
         type: LossPhysical,
         loss_fcts: { "mse": { }, },
+        weight: 0.9,
         },
     "spectral": {
         type: LossSpectralWFCL,
@@ -190,10 +193,9 @@ training_config:
           },
         },
     }
-  
+
   model_input: {
     "forecasting" : {
-      # masking strategy: "random", "healpix", "forecast"
       masking_strategy: "forecast",
       },
     }
@@ -205,62 +207,30 @@ training_config:
       policy: "fixed"
 
 
-# validation config; full validation config is merge of training and validation config
-validation_config: 
+validation_config:
 
   samples_per_mini_epoch: 256
   shuffle: False
 
   start_date: 2023-10-01T00:00
   end_date: 2023-12-31T00:00
-  
-  # whether to track the exponential moving average of weights for validation
-  validate_with_ema: 
+
+  validate_with_ema:
     enabled : True
     ema_ramp_up_ratio: 0.09
     ema_halflife_in_thousands: 1e-3
 
-  # parameters for validation samples that are written to disk
   output : {
-    # number of samples that are written
     num_samples: 0,
-    # write samples in normalized model space
     normalized_samples: False,
-    # output streams to write; default all
     streams: null,
     }
 
-  # run validation before training starts (mainly for model development)
   validate_before_training: False
 
 
-# test config; full test config is merge of validation and test config
-# test config is used by default when running inference
-
-# Tags for experiment tracking
-# These tags will be logged in MLFlow along with completed runs for train, eval, val
-# The tags are free-form, with the following rules:
-# - tags should be primitive types (strings, numbers, booleans). NO lists or dictionaries
-# - tags should not duplicate existing config entries.
-# - try to reuse existing tags where possible. MLFlow does not like having too many unique tags
-# - do not use long strings in values (less than 20 characters is a good rule of thumb, we may enforce this in the future)
 wgtags:
-  # The name of the organization of the person running the experiment.
-  # This may be autofilled in the future. Expected values are lowercase strings 
-  # e.g. "ecmwf", "cmcc", "metnor", "jsc", "escience"
   org: null
-  # The Github issue corresponding to this run (number such as 1234)
-  # Github issues are the central point when running experiment and contain 
-  # links to hedgedocs, code branches, pull requests etc.
-  # It is recommended to associate a run with a Github issue.
   issue: null
-  # The name of the experiment. This is a distinctive codename for the experiment campaign being run.
-  # This is expected to be the primary tag for comparing experiments in MLFlow, along with the
-  # issue number.
-  # Expected values are lowercase strings with no spaces, just underscores:
-  # Examples: "rollout_ablation_grid"  
   exp: null
-  # *** Experiment-specific tags ***
-  # All extra tags (including lists, dictionaries, etc.) are treated 
-  # as strings by mlflow, so treat all extra tags as simple string key: value pairs.
   grid: null
