@@ -41,7 +41,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 128
+ae_global_dim_embed: 2048
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -69,7 +69,7 @@ pred_mlp_adaln: True
 num_class_tokens: 0
 num_register_tokens: 0
 
-fe_num_blocks: 4
+fe_num_blocks: 16
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
