@@ -1,0 +1,20 @@
+train:
+  plot:
+    q2lwxfq6:
+      slurm_id: 13670520
+      description: "Random"
+    md9nqy5m:
+      slurm_id: 13670530
+      description: "Healpix"
+    ydqglhzv:
+      slurm_id: 13670543
+      description: "Cropping"
+    v6dmwg98:
+      slurm_id: 13670551
+      description: "satellite_swath"
+    bz5q1ce2:
+      slurm_id: 13670613
+      description: "satellite_swath_sparse"
+    sa85u2qb:
+      slurm_id: 13670639
+      description: "Mixed"
