@@ -792,9 +792,18 @@ class MoEBlock(torch.nn.Module):
         is not provided by the caller.
         """
         if position_ids is None:
-            self.position_ids = torch.empty(0, dtype=torch.long, device=self.position_ids.device)
+            # Determine device, guarding against the meta device that is present
+            # before the model is materialised (e.g. during FSDP2 init).
+            dev = self.position_ids.device
+            if dev.type == "meta":
+                dev = torch.device("cpu")
+            self.position_ids = torch.empty(0, dtype=torch.long, device=dev)
         else:
-            self.position_ids = position_ids.to(device=self.position_ids.device, dtype=torch.long)
+            # Use the incoming tensor's device directly; callers (initialize_moe_position_ids)
+            # already place position_ids on the correct CUDA device.  Inferring the
+            # target device from self.position_ids would propagate "meta" when the
+            # buffer has not yet been materialised (train_continue path).
+            self.position_ids = position_ids.to(dtype=torch.long)
 
     def _flatten_tokens(
         self,
