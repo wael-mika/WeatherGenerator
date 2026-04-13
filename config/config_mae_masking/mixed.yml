@@ -181,11 +181,11 @@ training_config:
         hl_mask_levels: [0, 1, 2, 3]
         strategy_configs:
           random:
-            rate: 0.2
+            rate: 0.15
             rate_sampling: False
             diffusion_rn: False
           healpix:
-            rate: 0.2
+            rate: 0.15
             hl_mask: 4
             rate_sampling: False
           cropping_healpix:
@@ -194,14 +194,14 @@ training_config:
             method: "geodesic_disk"
             rate_sampling: False
           satellite_swath:
-            num_swaths: 12
+            num_swaths: 4
             swath_width_deg: 15.0
             orbit_drift_deg: -25.0
           satellite_swath_sparse:
             num_swaths: 30
             swath_width_deg: 10.0
             orbit_drift_deg: -25.0
-            rate: 0.7
+            rate: 0.3
             rate_sampling: False
 
   forecast:
