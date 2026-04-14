@@ -184,6 +184,27 @@ class Masker:
         """Return latitude in degrees [-90, 90] for every HEALPix cell (cached)."""
         return self._get_cell_coords()[0]
 
+    def _get_xyz_at_hl_level(self, hl: int) -> NDArray:
+        """Return (N, 3) Cartesian unit vectors for every HEALPix cell at level *hl* (cached).
+
+        Results are cached per level so forked data workers compute this at most once.
+        """
+        if not hasattr(self, "_xyz_cache"):
+            self._xyz_cache: dict[int, NDArray] = {}
+        if hl not in self._xyz_cache:
+            nside = 2**hl
+            num_cells = 12 * nside * nside
+            all_idx = np.arange(num_cells)
+            lonlat = hp.healpix_to_lonlat(all_idx, nside, order="nested")
+            lon = lonlat[0].value if hasattr(lonlat[0], "value") else lonlat[0]
+            lat = lonlat[1].value if hasattr(lonlat[1], "value") else lonlat[1]
+            xyz = np.stack(
+                [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
+                axis=1,
+            )
+            self._xyz_cache[hl] = xyz
+        return self._xyz_cache[hl]
+
     def _resolve_mixed_strategies(self, cfgs: dict) -> dict:
         """Replace any 'mixed' masking strategy with a single randomly-chosen sub-strategy.
 
@@ -544,9 +565,14 @@ class Masker:
                 # of the source so the decoder reconstructs exactly what the encoder did
                 # not see — guaranteed for every strategy, including "mixed" (which would
                 # otherwise independently draw a different sub-strategy for target).
+                # Exception: forecasting/causal strategies encode the full input timestep
+                # (all-True mask).  Source and target are different timesteps, so there is
+                # no overlap to avoid — keep the auto-generated all-True target mask as-is.
+                source_strategy = source_cfg.get("masking_strategy", "")
+                is_forecast_strategy = "forecast" in source_strategy or source_strategy == "causal"
                 if target_auto_generated and not (
                     is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
-                ):
+                ) and not is_forecast_strategy:
                     complement = ~source_mask
                     target_masks.masks[target_idx] = complement
                     target_masks.metadata[target_idx].mask = complement
@@ -947,39 +973,16 @@ class Masker:
         self, center_cell: int, num_cells_to_select: int, nside: int, num_total_cells: int
     ) -> set:
         """
-        Angular distance selection, creates most uniform somewhat circular regions
+        Angular distance selection, creates most uniform somewhat circular regions.
+
+        Uses _get_xyz_at_hl_level() so HEALPix coordinate lookups are cached per
+        worker process and never repeated across samples.
         """
+        hl = int(round(np.log2(nside)))
+        all_xyz = self._get_xyz_at_hl_level(hl)  # (num_total_cells, 3) — cached
 
-        def lonlat_to_xyz(lon, lat):
-            """
-            Convert lon/lat to 3D cartesian coordinates.
-            """
-            return np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+        center_xyz = all_xyz[center_cell]
 
-        # Get center coordinates
-        center_lonlat = hp.healpix_to_lonlat(center_cell, nside, order="nested")
-        center_lon = float(
-            center_lonlat[0].value if hasattr(center_lonlat[0], "value") else center_lonlat[0]
-        )
-        center_lat = float(
-            center_lonlat[1].value if hasattr(center_lonlat[1], "value") else center_lonlat[1]
-        )
-        center_xyz = lonlat_to_xyz(center_lon, center_lat)
-
-        # Get all cell coordinates
-        all_indices = np.arange(num_total_cells)
-        all_lonlat = hp.healpix_to_lonlat(all_indices, nside, order="nested")
-        all_lon = all_lonlat[0].value if hasattr(all_lonlat[0], "value") else all_lonlat[0]
-        all_lat = all_lonlat[1].value if hasattr(all_lonlat[1], "value") else all_lonlat[1]
-
-        all_xyz = np.stack(
-            [
-                np.cos(all_lat) * np.cos(all_lon),
-                np.cos(all_lat) * np.sin(all_lon),
-                np.sin(all_lat),
-            ],
-            axis=1,
-        )
         # Compute angular distances and select closest cells
         dot_products = np.clip(np.dot(all_xyz, center_xyz), -1.0, 1.0)
         angular_distances = np.arccos(dot_products)
