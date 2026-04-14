@@ -157,13 +157,9 @@ training_config:
       },
     }
 
-  target_input: {
-    "mae_mixed_target": {
-      # Disable any pretraining-style target input branch.
-      enabled: False,
-      num_samples: 0,
-      },
-    }
+  # No target_input: triggers target_auto_generated=True so targets are derived from
+  # model_input. masking.py skips the complement override for forecast strategy, keeping
+  # the all-True target mask → all future timestep tokens are loaded as prediction targets.
   forecast:
     time_step: 06:00:00
     num_steps: 3
