@@ -466,6 +466,26 @@ class Masker:
             source_cfgs = self._resolve_mixed_strategies(copy.deepcopy(source_cfgs))
             target_cfgs = copy.deepcopy(source_cfgs)
 
+            # When forecasting/causal sources are present alongside spatial-masking sources
+            # (e.g. satellite_swath from pretraining + forecast for finetuning), the spatial
+            # sources should serve as encoder-only context: they must NOT generate
+            # reconstruction targets, because source and target are *different* timesteps.
+            # Force num_samples=0 on non-forecast sources so both encoder and decoder loops
+            # skip them.  This is robust to config-merge failures where the override
+            # `num_samples: 0` for the old pretraining source did not propagate.
+            def _is_forecast_strategy(cfg):
+                s = cfg.get("masking_strategy", "")
+                return "forecast" in s or s == "causal"
+
+            has_forecast_source = any(_is_forecast_strategy(cfg) for _, cfg in source_cfgs.items())
+            if has_forecast_source:
+                for _, cfg in source_cfgs.items():
+                    if not _is_forecast_strategy(cfg):
+                        cfg["num_samples"] = 0
+                for _, cfg in target_cfgs.items():
+                    if not _is_forecast_strategy(cfg):
+                        cfg["num_samples"] = 0
+
         losses = stream_masking_cfg.losses
         corr_dict = self.parse_src_target_correspondence(losses, target_cfgs, source_cfgs)
 
