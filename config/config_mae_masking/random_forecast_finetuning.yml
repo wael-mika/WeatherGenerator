@@ -110,7 +110,7 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 2014-01-01T00:00
+  start_date: 1979-01-01T00:00
   end_date: 2022-12-31T00:00
 
   time_window_step: 06:00:00
@@ -153,17 +153,14 @@ training_config:
       },
     "forecasting": {
       # masking strategy: "forecast" passes all tokens unmasked as input to the encoder
+      enabled: True,
       masking_strategy: "forecast",
       },
     }
 
-  target_input: {
-    "mae_random_target": {
-      # Disable any pretraining-style target input branch.
-      enabled: False,
-      num_samples: 0,
-      },
-    }
+  # No target_input: triggers target_auto_generated=True so targets are derived from
+  # model_input. masking.py skips the complement override for forecast strategy, keeping
+  # the all-True target mask → all future timestep tokens are loaded as prediction targets.
   forecast:
     time_step: 06:00:00
     num_steps: 3
