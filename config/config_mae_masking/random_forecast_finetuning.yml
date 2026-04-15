@@ -51,7 +51,7 @@ latent_noise_deterministic_latents: True
 # - .*encoder.*       → EncoderModule and all sub-engines (ae_local, ae_global, ae_aggregation, embed)
 # - .*latent_pre_norm.* → latent normalisation layer (SSL-only, not used in forecasting)
 # - .*latent_heads.*  → latent prediction heads (SSL-only, not used in forecasting)
-freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*"
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*"
 
 norm_type: "LayerNorm"
 
