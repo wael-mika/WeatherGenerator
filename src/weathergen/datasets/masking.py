@@ -53,6 +53,32 @@ def get_num_samples(config) -> np.typing.NDArray:
     return np.array([s_cfg.get("num_samples", 1) for _, s_cfg in config.items()])
 
 
+def _is_forecast_like(strategy: str) -> bool:
+    """Return True for forecast-type masking strategies (``"forecast*"`` or ``"causal"``)."""
+    return "forecast" in strategy or strategy == "causal"
+
+
+def _filter_active_configs(cfgs) -> dict:
+    """Return plain dict of config entries that are enabled and have num_samples > 0.
+
+    An entry is active when:
+    - ``enabled`` is absent or not False
+    - ``num_samples`` is absent (defaults to 1) or > 0
+
+    Accepts both OmegaConf DictConfig and plain dict.
+    Guards against ListConfig([]) returned when the YAML key is absent.
+    Returns a plain dict so downstream code can safely iterate and mutate.
+    """
+    if not cfgs:
+        return {}
+    return {
+        k: v
+        for k, v in cfgs.items()
+        if v.get("enabled", True) is not False
+        and v.get("num_samples", 1) != 0
+    }
+
+
 def validate_correspondence_mode(correspondence_mode, target_cfgs, source_cfgs):
     """
     Validate that the configs are consistent with the correspondence mode
@@ -445,47 +471,84 @@ class Masker:
         num_cells: int,
         stream_info: dict,
     ) -> tuple[np.typing.NDArray, list[np.typing.NDArray], list[SampleMetaData]]:
-        """
-        Construct teacher/student keep masks for a stream.
-        SampleMetaData is currently just a dict with the masking params used.
+        """Construct encoder/decoder keep-masks for one stream.
+
+        Three operating modes, determined from the active config entries:
+
+        Mode A — MAE Reconstruction
+            Trigger: no active ``target_input`` entries AND no forecast source.
+            Encoder sees a masked fraction of tokens at timestep *t*;
+            decoder reconstructs the complement (tokens encoder did not see).
+
+        Mode B — Forecasting fine-tuning
+            Trigger: no active ``target_input`` entries AND at least one
+            ``"forecast"`` or ``"causal"`` source present.
+            Encoder sees all tokens at timestep *t* (all-True mask);
+            decoder predicts all tokens at *t + offset* (all-True mask).
+            Non-forecast sources (e.g., a leftover ``mae_swath`` entry from a
+            config-merge failure) are silently excluded — only forecast/causal
+            sources survive into ``source_cfgs`` / ``target_cfgs``.
+
+        Mode C — Explicit target (e.g., IASI cross-stream fine-tuning)
+            Trigger: at least one active ``target_input`` entry.
+            Both ``model_input`` and ``target_input`` are used as-is after
+            filtering.  Stream flags still apply:
+            • ``forcing: True``    → target mask forced to all-False
+            • ``diagnostic: True`` → source mask forced to all-False
+
+        An entry is **active** when ``enabled`` is absent or not False AND
+        ``num_samples`` is absent or > 0.  ``_filter_active_configs`` enforces
+        this before any mode logic runs, so ``enabled: False`` in YAML is
+        finally honoured in code.
         """
 
         stream_masking_cfg = self._effective_masking_cfgs[stream_info["name"]]
 
-        # target and source configs
-        target_cfgs = stream_masking_cfg.get("target_input", [])
-        source_cfgs = stream_masking_cfg.get("model_input", [])
+        # ── Phase 1: Load raw configs ─────────────────────────────────────────
+        raw_source_cfgs = stream_masking_cfg.get("model_input", {})
+        raw_target_cfgs = stream_masking_cfg.get("target_input", {})
 
-        # target and source are assumed identical when target is not specified
-        target_auto_generated = len(target_cfgs) == 0
-        if target_auto_generated:
-            # Resolve "mixed" to a concrete sub-strategy exactly once per sample so
-            # source and target share the same sub-strategy (spatial structure).
-            # The resolved copy also becomes the basis for target_cfgs so both loops
-            # dispatch to the same concrete strategy without a second independent draw.
+        # ── Phase 2: Filter to active-only entries ────────────────────────────
+        # Removes entries with enabled:False or num_samples:0 before any
+        # mode logic runs, so those YAML conventions are enforced in code.
+        active_source_cfgs = _filter_active_configs(raw_source_cfgs)
+        active_target_cfgs = _filter_active_configs(raw_target_cfgs)
+
+        # ── Phase 3: Determine mode ───────────────────────────────────────────
+        target_auto_generated = len(active_target_cfgs) == 0
+        has_forecast_source = any(
+            _is_forecast_like(cfg.get("masking_strategy", ""))
+            for cfg in active_source_cfgs.values()
+        )
+        is_mode_a = target_auto_generated and not has_forecast_source  # MAE reconstruction
+        is_mode_b = target_auto_generated and has_forecast_source      # Forecasting
+
+        # ── Phase 4: Build source_cfgs and target_cfgs ────────────────────────
+        if is_mode_b:
+            # Keep only forecast/causal sources.  This acts as a safety net for
+            # config-merge failures where a pretraining source (e.g. mae_swath)
+            # retains num_samples=1 despite the intended override to 0 — those
+            # sources are excluded by the comprehension rather than mutated.
+            source_cfgs = {
+                k: v
+                for k, v in active_source_cfgs.items()
+                if _is_forecast_like(v.get("masking_strategy", ""))
+            }
+            target_cfgs = copy.deepcopy(source_cfgs)
+        else:
+            # Modes A and C start from the full active sets; Mode A will also
+            # run mixed-strategy resolution in Phase 5.
+            source_cfgs = active_source_cfgs
+            target_cfgs = active_target_cfgs
+
+        # ── Phase 5: Resolve "mixed" strategy (Mode A only) ──────────────────
+        # Resolve once per sample so source and target share the same
+        # sub-strategy draw (same spatial structure, no double-draw for "mixed").
+        if is_mode_a:
             source_cfgs = self._resolve_mixed_strategies(copy.deepcopy(source_cfgs))
             target_cfgs = copy.deepcopy(source_cfgs)
 
-            # When forecasting/causal sources are present alongside spatial-masking sources
-            # (e.g. satellite_swath from pretraining + forecast for finetuning), the spatial
-            # sources should serve as encoder-only context: they must NOT generate
-            # reconstruction targets, because source and target are *different* timesteps.
-            # Force num_samples=0 on non-forecast sources so both encoder and decoder loops
-            # skip them.  This is robust to config-merge failures where the override
-            # `num_samples: 0` for the old pretraining source did not propagate.
-            def _is_forecast_strategy(cfg):
-                s = cfg.get("masking_strategy", "")
-                return "forecast" in s or s == "causal"
-
-            has_forecast_source = any(_is_forecast_strategy(cfg) for _, cfg in source_cfgs.items())
-            if has_forecast_source:
-                for _, cfg in source_cfgs.items():
-                    if not _is_forecast_strategy(cfg):
-                        cfg["num_samples"] = 0
-                for _, cfg in target_cfgs.items():
-                    if not _is_forecast_strategy(cfg):
-                        cfg["num_samples"] = 0
-
+        # ── Phase 6: Build source→target correspondence mapping ───────────────
         losses = stream_masking_cfg.losses
         corr_dict = self.parse_src_target_correspondence(losses, target_cfgs, source_cfgs)
 
@@ -496,15 +559,12 @@ class Masker:
             else 0.0
         )
 
+        # ── Phase 7: Generate target masks ────────────────────────────────────
         target_masks = MaskData()
-
-        # iterate over all target samples
-        # different strategies
         i_target = 0
         for i_cfg, (_, target_cfg) in enumerate(target_cfgs.items()):
-            # different samples/view per strategy
             for _ in range(target_cfg.get("num_samples", 1)):
-                # determine if forcing dataset => mask is empty
+                # forcing stream: decoder never predicts this stream → all-False
                 if is_stream_forcing(stream_info, self.stage):
                     target_mask, mask_params = torch.zeros(num_cells, dtype=torch.bool), {}
                 else:
@@ -525,12 +585,12 @@ class Masker:
                 # skip items that do not appear in loss
                 if len(corr) == 0:
                     continue
-                # add
                 target_masks.add_mask(
                     target_mask, mask_params, target_cfg, losses, i_target, corr, None
                 )
                 i_target += 1
 
+        # ── Phase 8: Generate source masks + complement override (Mode A) ─────
         source_masks = MaskData()
         source_target_mapping = []
         target_num_samples = get_num_samples(target_cfgs)
@@ -540,7 +600,6 @@ class Masker:
             # skip items that do not appear in loss
             if i_src_cfg not in corr_dict:
                 continue
-            # samples per strategy
             for i_sample in range(source_cfg.get("num_samples", 1)):
                 masking_config = source_cfg.get("masking_strategy_config", {})
                 # extract corresponding target
@@ -548,28 +607,20 @@ class Masker:
                 relationship, losses = rel_losses
                 # ensure proper default relationships
                 if relationship is None:
-                    if target_auto_generated:
-                        # `rate` in source config controls the encoder's visible fraction.
-                        # Source is generated independently with the configured strategy;
-                        # target is then set to the complement of source (see below).
-                        # This applies to ALL strategies (random, healpix, cropping,
-                        # satellite_swath, mixed, etc.) so that source and target never
-                        # overlap and have no gaps.  For "mixed" in particular this also
-                        # prevents target and source from independently drawing different
-                        # sub-strategies from the pool.
+                    if is_mode_a:
+                        # Source is generated independently; target is overridden to
+                        # complement below, so source and target never overlap or gap.
                         relationship = "independent"
                     elif source_cfg.get("masking_strategy") == "random":
-                        # default for masked token modeling when target is explicit
+                        # default for masked-token modeling with explicit target
                         relationship = "complement"
                     else:
-                        # default for forecasting / explicit target configs
                         relationship = "independent"
                 target_idx = target_num_samples[:target_cfg_idx].sum()
-                # iterate sequentially through targets (to enable 1-to-1 correspondence when no
-                # target is specified)
+                # iterate sequentially through targets (1-to-1 when target auto-generated)
                 target_idx += i_sample % target_num_samples[target_cfg_idx].item()
 
-                # determine if diagnostic dataset or randomly dropped => mask is empty
+                # diagnostic stream or randomly dropped: encoder ignores this stream → all-False
                 if is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped:
                     source_mask, mask_params = torch.zeros(num_cells, dtype=torch.bool), {}
                 else:
@@ -580,19 +631,13 @@ class Masker:
                         target_relationship_mask=(relationship, target_masks.get_mask(target_idx)),
                     )
 
-                # When target was auto-generated from source config, `rate` controls the
-                # source fraction directly.  Override the target mask to be the complement
-                # of the source so the decoder reconstructs exactly what the encoder did
-                # not see — guaranteed for every strategy, including "mixed" (which would
-                # otherwise independently draw a different sub-strategy for target).
-                # Exception: forecasting/causal strategies encode the full input timestep
-                # (all-True mask).  Source and target are different timesteps, so there is
-                # no overlap to avoid — keep the auto-generated all-True target mask as-is.
-                source_strategy = source_cfg.get("masking_strategy", "")
-                is_forecast_strategy = "forecast" in source_strategy or source_strategy == "causal"
-                if target_auto_generated and not (
+                # Mode A complement override: decoder reconstructs exactly what the
+                # encoder did not see.  Skipped for diagnostic/dropped streams (source
+                # mask is all-False, complement would be all-True which is wrong) and
+                # for Modes B/C (different timesteps or explicit target configured).
+                if is_mode_a and not (
                     is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
-                ) and not is_forecast_strategy:
+                ):
                     complement = ~source_mask
                     target_masks.masks[target_idx] = complement
                     target_masks.metadata[target_idx].mask = complement
