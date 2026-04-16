@@ -65,7 +65,7 @@ evaluation:
   print_summary: false #print out score values on screen. it can be verbose
   log_scale: false
   add_grid: false
-  score_cards: false
+  score_cards: true
   bar_plots: false
   # baseline: "ar40mckx"
 
@@ -74,8 +74,8 @@ default_streams:
   ERA5:
     #offset: "1h" #optional: specify a timedelta offset to infer init_time when source_interval is missing. Format examples: "1h", "30m", "2h30m".
     regions: ["global"]
-    channels: ["2t", "10u"] #, "10v", "z_500", "t_850", "u_850", "v_850", "q_850", ]
-    regrid: True 
+    channels: ["2t", "10u", "10v", "z_500", "t_850", "u_850", "v_850", "q_850" ]
+    regrid: True
       # target_grid: [1.5, 1.5] #default is [1.5, 1.5], e.g. ["O96"]
     evaluation:
       forecast_step: "all"
@@ -83,8 +83,8 @@ default_streams:
       ensemble: "all" #supported: "all", "mean", [0,1,2]
     plotting:
       sample: [1, 3]
-      forecast_step: [1,3, 2] #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
-      ensemble: [0,2,5] #supported: "all", "mean", [0,1,2]
+      forecast_step: "all" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
+      ensemble: "mean" #supported: "all", "mean", [0,1,2]
       plot_maps: true
       plot_bias: false
       plot_target: false
@@ -126,20 +126,21 @@ default_streams:
       plot_timeseries: false
 
 run_ids :
-  ar40mckx:
-    label: "pretrained model ar40mckx"
-    results_base_dir : "./results/"
+  byr1ij68:
+    label: "forecast model no MoE"
+    results_base_dir : "./results/byr1ij68/"
     #NEW: if "streams" is not specified, the default streams are used
-    
-      
-  c8g5katp:
-    label: "2 steps window"
-    results_base_dir : "./results/"
-    #NEW: if "streams" is not specified, the default streams are used
-  
-  ###############################
 
-  #How to define custom variables different than default_streams (default_streams will be ignored for this run_id):
+
+  fqenkt4a:
+    label: "MoE: All blocks, spatial"
+    results_base_dir : "./results/fqenkt4a/"
+    #NEW: if "streams" is not specified, the default streams are used
+
+  x4v3ticp:
+    label: "MoE: Early blocks, token routing"
+    results_base_dir : "./results/x4v3ticp/"
+    #NEW: if "streams" is not specified, the default streams are used
 
   jjc9ym62:
     label: "2 steps window"
@@ -149,15 +150,15 @@ run_ids :
     rank: "all" #optional: int, "all", or list of ints. Default: "all". Use "all" for multi-rank inference.
     streams:
       ERA5:
-        channels: ["2t", "10u", "10v"] 
+        channels: ["2t", "10u", "10v"]
         evaluation:
           forecast_step: "all"
           sample: "all"
-          ensemble: "mean" 
+          ensemble: "mean"
         plotting:
           sample: [1, 3]
           forecast_step: [1,3, 2]
-          ensemble: "mean" 
+          ensemble: "mean"
           plot_maps: true
           plot_bias: false
           plot_target: false
@@ -165,12 +166,22 @@ run_ids :
           plot_animations: true
           plot_timeseries: false
 
-  
+  wu7joi2a:
+    label: "MoE: late blocks, spatial routing"
+    results_base_dir : "./results/wu7joi2a/"
+    #NEW: if "streams" is not specified, the default streams are used
 
-  #WeatherGeneratorMerge example:
-  ###############################
+  srys8hzo:
+    label: "MoE: late blocks, token routing"
+    results_base_dir : "./results/srys8hzo/"
+    #NEW: if "streams" is not specified, the default streams are used
 
-  #Example of syntax to stack multiple runs over the ensemble dimension  
+  sdsx4kaf:
+    label: "MoE: mid blocks, spatila routing"
+    results_base_dir : "./results/sdsx4kaf/"
+    #NEW: if "streams" is not specified, the default streams are used
+
+  #Example of syntax to stack multiple runs over the ensemble dimension
   merge_test: #<------ This is the new run_id name of the merged dataset. NB. you always need to specify one
     type: "merge" # <------- VERY IMPORTANT
     merge_run_ids:
@@ -259,3 +270,7 @@ run_ids :
     - fbi:
         thresh: 280
     - rmse
+
+  jczsvm6u:
+    label: "MoE: Spread blocks, spatial routing"
+    results_base_dir : "./results/jczsvm6u/"
