@@ -125,13 +125,14 @@ class TokenizerMasking(Tokenizer):
         idxs_cells_data,
         time_win: tuple,
         cell_mask: torch.Tensor,
+        channel_mask: torch.Tensor | None = None,
     ):
         # create tokenization index
         (idxs_cells, idxs_cells_lens) = idxs_cells_data
 
         # select strategy from XXX depending on stream and if student or teacher
 
-        (mask_tokens, mask_channels) = self.cell_to_token_mask(
+        (mask_tokens, _) = self.cell_to_token_mask(
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
@@ -139,7 +140,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells,
             idxs_cells_lens,
             mask_tokens,
-            mask_channels,
+            channel_mask,  # variable-level mask (BoolTensor[C] or None)
             stream_info["stream_id"],
             rdata,
             time_win,

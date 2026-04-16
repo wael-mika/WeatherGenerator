@@ -34,6 +34,8 @@ class StreamEmbedTransformer(torch.nn.Module):
         norm_type="LayerNorm",
         unembed_mode="full",
         stream_name="stream_embed",
+        num_data_channels: int = 0,
+        use_mask_tokens: bool = False,
     ):
         """Constructor
 
@@ -57,6 +59,18 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_blocks = num_blocks
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
+
+        # XV-MAE Feature 2: learned per-variable mask tokens.
+        # When use_mask_tokens=True and a channel_mask is provided at forward time,
+        # replaces the zeros placed by Feature 1 (zeroing) with a learned scalar per
+        # variable, giving the encoder a consistent "this variable is masked" signal.
+        self.num_data_channels = num_data_channels
+        if use_mask_tokens and num_data_channels > 0:
+            self.variable_mask_values = torch.nn.Parameter(
+                torch.zeros(num_data_channels), requires_grad=True
+            )
+        else:
+            self.variable_mask_values = None
 
         norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
 

@@ -271,8 +271,10 @@ def tokenize_apply_mask_source(
     data = data_padded[idxs_data]
 
     if mask_channels is not None:
-        assert False, "to be implemented"
-        # data = data_padded[ : channel_mask]
+        # Zero out masked variable channels in the already-indexed data tensor.
+        # mask_channels is BoolTensor[C], True = hidden from encoder.
+        data = data.clone()
+        data[:, mask_channels] = 0.0
 
     # local coords
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]

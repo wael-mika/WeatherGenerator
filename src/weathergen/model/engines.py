@@ -56,6 +56,9 @@ class EmbeddingEngine(torch.nn.Module):
                 continue
 
             if si["embed"]["net"] == "transformer":
+                # Number of raw ERA5/data channels (last dims of each token, after metadata).
+                # Used by Feature 2 (learned variable mask tokens).
+                num_data_ch = len(si.get("train_source_channels") or si.get("val_source_channels") or [])
                 self.embeds[stream_name] = StreamEmbedTransformer(
                     mode=self.cf.embed_orientation,
                     num_tokens=si["embed"]["num_tokens"],
@@ -69,6 +72,8 @@ class EmbeddingEngine(torch.nn.Module):
                     norm_type=self.cf.norm_type,
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
+                    num_data_channels=num_data_ch,
+                    use_mask_tokens=self.cf.get("use_variable_mask_tokens", False),
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(
@@ -100,6 +105,26 @@ class EmbeddingEngine(torch.nn.Module):
             # skip empty stream
             if sdata.numel() == 0:
                 continue
+
+            # XV-MAE Feature 2: replace zeroed variable channels with learned mask values.
+            # Feature 1 (dataset pipeline) already zeros masked channels in sdata.
+            # Here we substitute those zeros with a learnable per-variable scalar so the
+            # encoder receives a consistent "this variable is masked" signal.
+            embed = self.embeds[stream_name]
+            channel_masks = getattr(batch, "channel_masks", None)
+            if (
+                channel_masks is not None
+                and stream_name in channel_masks
+                and channel_masks[stream_name] is not None
+                and hasattr(embed, "variable_mask_values")
+                and embed.variable_mask_values is not None
+            ):
+                ch_mask = channel_masks[stream_name].to(sdata.device)
+                num_data = embed.num_data_channels
+                sdata = sdata.clone()
+                sdata[:, -num_data:][:, ch_mask] = (
+                    embed.variable_mask_values[ch_mask].to(sdata.dtype)
+                )
 
             # embedding from physical space to per patch latent representation
             x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1)]

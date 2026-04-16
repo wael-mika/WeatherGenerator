@@ -273,6 +273,11 @@ class ModelBatch:
     # device of the tensors in the batch
     device: str | torch.device
 
+    # XV-MAE: per-stream variable channel masks (BoolTensor[C], True = channel was zeroed in encoder)
+    # Used by EmbeddingEngine for Feature 2 (learned variable mask tokens).
+    # None when variable masking is not configured.
+    channel_masks: dict | None
+
     def __init__(
         self,
         streams: dict,
@@ -297,6 +302,7 @@ class ModelBatch:
 
         self.source2target_matching_idxs = np.full(num_source_samples, -1, dtype=np.int32)
         self.target2source_matching_idxs = [[] for _ in range(num_target_samples)]
+        self.channel_masks = None  # set by MultiStreamDataSampler after batch assembly
 
     def pin_memory(self):
         """Pin all tensors in this batch to CPU pinned memory"""
@@ -316,6 +322,13 @@ class ModelBatch:
 
         self.source_samples.to_device(device)
         self.target_samples.to_device(device)
+
+        # Move channel masks for Feature 2 (learned variable mask tokens)
+        if self.channel_masks is not None:
+            self.channel_masks = {
+                name: (mask.to(device, non_blocking=True) if mask is not None else None)
+                for name, mask in self.channel_masks.items()
+            }
 
         self.device = device
 

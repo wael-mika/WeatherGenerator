@@ -9,6 +9,7 @@
 
 import logging
 import pathlib
+import re
 
 import numpy as np
 import torch
@@ -33,6 +34,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
+from weathergen.utils.utils import is_stream_diagnostic, is_stream_forcing
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -362,6 +364,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         input_data: list,
         input_tokens: list,
         mask: torch.Tensor | None = None,
+        channel_mask: torch.Tensor | None = None,
     ) -> tuple[StreamData, dict | None]:
         """
         Build model network input
@@ -373,6 +376,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             view_meta: ViewMetadata describing spatial mask
             stream_info: Stream configuration dict
             stream_ds: List of dataset readers for this stream
+            channel_mask: Optional BoolTensor[C] for XV-MAE variable masking.
+                          True = zero out this variable channel in the encoder input.
 
         Returns:
             StreamData with source and targets masked according to view_meta
@@ -390,13 +395,16 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 rdata = input_data[-(step + 1)]
                 token_data = input_tokens[-(step + 1)]
 
-                # preprocess data for model input
+                stream_data.source_is_spoof = rdata.is_spoof
+
+                # preprocess data for model input; channel_mask zeros masked variables
                 (source_cells, source_cells_lens) = self.tokenizer.get_source(
                     stream_info,
                     rdata,
                     token_data,
                     (time_win_source.start, time_win_source.end),
                     mask,
+                    channel_mask=channel_mask,
                 )
 
                 # collect data for stream
@@ -430,6 +438,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             rdata = output_data[step]
             token_data = output_tokens[step]
 
+            stream_data.target_is_spoof = rdata.is_spoof
+
             if "target_coords" in mode:
                 (tc, tc_l) = self.tokenizer.get_target_coords(
                     stream_info,
@@ -448,9 +458,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     (time_win_target.start, time_win_target.end),
                     target_mask,
                 )
-                stream_data.add_target_values(
-                    timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof
-                )
+                stream_data.add_target_values(timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof)
 
         return stream_data
 
@@ -467,6 +475,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         output_tokens: list,
         output_mask,
         input_mask,
+        channel_mask: torch.Tensor | None = None,
     ) -> StreamData:
         """
         Return one batch of data
@@ -505,6 +514,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             input_data,
             input_tokens,
             input_mask,
+            channel_mask=channel_mask,
         )
 
         stream_data = self._build_stream_data_output(
@@ -572,23 +582,156 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         return (input_data, output_data)
 
+    def _apply_channel_dropout(self, masks_streams, channel_dropout_rate):
+        """Apply cross-variable channel dropout for XV-MAE pretraining.
+
+        For each non-forcing, non-diagnostic stream, independently drops it from the
+        encoder with probability ``channel_dropout_rate``.  A dropped stream has:
+          - source_masks.masks[i] = all False  (encoder sees nothing of this stream)
+          - target_masks.masks[i] = all True   (decoder reconstructs the full stream)
+
+        This forces the model to predict one atmospheric variable everywhere using
+        only the context of other visible variables, learning cross-variable physical
+        relationships (e.g. temperature from pressure+wind via thermal wind balance).
+
+        At least one droppable stream is always kept visible so the encoder is never
+        entirely empty.  Skipped outside of training.
+        """
+        if channel_dropout_rate <= 0.0 or self._stage != "train":
+            return masks_streams
+
+        stream_info_by_name = {si["name"]: si for si in self.streams}
+        droppable = [
+            name
+            for name in masks_streams
+            if not is_stream_forcing(stream_info_by_name[name], self._stage)
+            and not is_stream_diagnostic(stream_info_by_name[name], self._stage)
+        ]
+        if not droppable:
+            return masks_streams
+
+        dropped = [name for name in droppable if self.rng.random() < channel_dropout_rate]
+
+        # Guarantee at least one stream stays visible
+        if len(dropped) == len(droppable):
+            keep_idx = self.rng.integers(len(droppable))
+            dropped = [n for n in dropped if n != droppable[keep_idx]]
+
+        all_false = torch.zeros(self.num_healpix_cells, dtype=torch.bool)
+        all_true = torch.ones(self.num_healpix_cells, dtype=torch.bool)
+
+        for stream_name in dropped:
+            target_masks, source_masks, _ = masks_streams[stream_name]
+            for i in range(len(source_masks)):
+                source_masks.masks[i] = all_false
+                source_masks.metadata[i].mask = all_false
+            for i in range(len(target_masks)):
+                target_masks.masks[i] = all_true
+                target_masks.metadata[i].mask = all_true
+
+        if dropped:
+            logger.debug("XV-MAE channel dropout: dropped streams %s", dropped)
+
+        return masks_streams
+
+    def _get_channel_dropout_rate(self):
+        """Read channel_dropout_rate from model_input config entries (first match wins)."""
+        for _, source_cfg in self.mode_cfg.get("model_input", {}).items():
+            rate = source_cfg.get("channel_dropout_rate", 0.0)
+            if rate > 0.0:
+                return float(rate)
+        return 0.0
+
+    def _get_variable_masking_cfg(self):
+        """Read variable_masking config block from model_input entries (first match wins)."""
+        for _, source_cfg in self.mode_cfg.get("model_input", {}).items():
+            vm_cfg = source_cfg.get("variable_masking", None)
+            if vm_cfg is not None:
+                return vm_cfg
+        return None
+
+    def _build_channel_mask(self, stream_name: str) -> torch.Tensor | None:
+        """Build per-variable channel mask for XV-MAE variable masking.
+
+        Returns BoolTensor[C] where True = this channel is hidden from the encoder
+        (its values are zeroed in the source tokens).  Returns None if variable
+        masking is not configured, rate is 0, or we are outside of training.
+        """
+        if self._stage != "train":
+            return None
+
+        vm_cfg = self._get_variable_masking_cfg()
+        if vm_cfg is None:
+            return None
+
+        global_rate = float(vm_cfg.get("channel_dropout_rate", 0.0))
+        variable_groups = vm_cfg.get("variable_groups", {}) or {}
+        if global_rate <= 0.0 and not variable_groups:
+            return None
+
+        # Channel names for this stream (populated in __init__)
+        channels = list(self.streams_datasets[stream_name][0].source_channels)
+        if not channels:
+            return None
+
+        # Determine per-channel dropout rate (group match overrides global rate)
+        channel_rates = []
+        for ch_name in channels:
+            rate = global_rate
+            for _group_name, group_cfg in variable_groups.items():
+                for pattern in group_cfg.get("variables", []):
+                    if re.fullmatch(pattern, ch_name):
+                        rate = float(group_cfg.get("dropout_rate", global_rate))
+                        break
+            channel_rates.append(rate)
+
+        # Sample: Bernoulli per channel
+        channel_mask = torch.zeros(len(channels), dtype=torch.bool)
+        for k, rate in enumerate(channel_rates):
+            if rate > 0.0 and self.rng.random() < rate:
+                channel_mask[k] = True
+
+        # Safety: keep at least one channel visible
+        if channel_mask.all():
+            keep_k = int(self.rng.integers(len(channels)))
+            channel_mask[keep_k] = False
+
+        # Return None when nothing is masked (common when rate is low)
+        if not channel_mask.any():
+            return None
+
+        return channel_mask
+
     def _get_source_target_masks(self, training_mode):
         """
         Generate source and target masks for all streams.
+
+        Returns spatial masks, sample counts, and per-stream variable channel masks.
+        The channel_masks dict maps stream_name → BoolTensor[C] (True = masked variable)
+        or None if variable masking is disabled / nothing was sampled for that stream.
         """
         masks = {}
+        channel_masks = {}
         for stream_info in self.streams:
-            # Build source and target sample masks
-            masks[stream_info["name"]] = self.tokenizer.build_samples_for_stream(
+            stream_name = stream_info["name"]
+            # Build source and target spatial masks
+            masks[stream_name] = self.tokenizer.build_samples_for_stream(
                 training_mode,
                 self.num_healpix_cells,
                 stream_info,
             )
             # identical for all streams
-            num_target_samples = len(masks[stream_info["name"]][0])
-            num_source_samples = len(masks[stream_info["name"]][1])
+            num_target_samples = len(masks[stream_name][0])
+            num_source_samples = len(masks[stream_name][1])
+            # XV-MAE: per-variable channel mask (Feature 1 + Feature 2)
+            channel_masks[stream_name] = self._build_channel_mask(stream_name)
 
-        return masks, num_source_samples, num_target_samples
+        # XV-MAE: stream-level dropout (only meaningful in multi-stream setups)
+        channel_dropout_rate = self._get_channel_dropout_rate()
+        if channel_dropout_rate > 0.0:
+            masks = self._apply_channel_dropout(masks, channel_dropout_rate)
+
+        return masks, num_source_samples, num_target_samples, channel_masks
 
     def _get_output_length(self, num_forecast_steps):
         # max(1, ...) : self.output_offset and num_forecast_steps are zero for pure masking
@@ -618,8 +761,10 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         source_cfgs = self.mode_cfg.get("model_input")
         target_cfgs = self.mode_cfg.get("target_input", {})
 
-        # get/coordinate masks
-        masks_streams, num_source_samples, num_target_samples = self._get_source_target_masks(mode)
+        # get/coordinate masks (channel_masks: per-stream variable masks for XV-MAE)
+        masks_streams, num_source_samples, num_target_samples, channel_masks = (
+            self._get_source_target_masks(mode)
+        )
 
         source_select, target_select = [], []
         if "masking" in mode:
@@ -667,6 +812,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
             output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
 
+            stream_channel_mask = channel_masks.get(stream_name)
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target
                 tidx = source_to_target[sidx].item()
@@ -682,6 +828,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     output_tokens,
                     output_mask=target_masks.masks[tidx],
                     input_mask=source_mask,
+                    channel_mask=stream_channel_mask,
                 )
 
                 batch.add_source_stream(sidx, tidx, stream_name, sdata, source_masks.metadata[sidx])
@@ -716,6 +863,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         target_in_steps = np.array([tc.get("num_steps_input", 1) for _, tc in target_cfgs.items()])
         target_in_steps = 1 if len(target_in_steps) == 0 else target_in_steps.max().item()
         batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
+
+        # Store channel masks for Feature 2 (learned variable mask tokens in EmbeddingEngine)
+        batch.channel_masks = {
+            name: mask for name, mask in channel_masks.items() if mask is not None
+        } or None
 
         return batch
 
