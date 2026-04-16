@@ -115,6 +115,7 @@ latent_noise_deterministic_latents: True
 freeze_modules: ""
 load_chkpt: {}
 
+qk_norm_type: "RMSNorm"
 norm_type: "LayerNorm"
 
 #####################################
