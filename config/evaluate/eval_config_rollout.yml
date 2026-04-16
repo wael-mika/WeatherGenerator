@@ -42,18 +42,18 @@ default_streams:
   ERA5:
     channels: ["2t", "10v", "z_850", "t_850", "u_850", "v_850", "q_850"]
     evaluation:
-      forecast_step: "1-39"
+      forecast_step: "all"  # Load all 40 steps - froct needs step N+1 to compute for step N
       sample: "all"
       ensemble: "all" #supported: "all", "mean", [0,1,2]
     plotting:
       sample: [1]
-      forecast_step: "1-39" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50]) - exclude step 40 to avoid NaN in froct
+      forecast_step: "1-39" # Only plot steps 1-39 (step 40 has no next step for froct)
       ensemble: [0] #supported: "all", "mean", [0,1,2]
-      plot_maps: true
+      plot_maps: false
       plot_bias: false
-      plot_target: true
+      plot_target: false
       plot_histograms: false
-      plot_animations: true
+      plot_animations: false
 
 run_ids :
   yi9om18z:
@@ -61,15 +61,15 @@ run_ids :
     results_base_dir : "./results/yi9om18z/"
     #NEW: if "streams" is not specified, the default streams are used
     
-  y3ajfink:
-    label: "MoE: All blocks, spatial"
-    results_base_dir : "./results/y3ajfink/"
-    #NEW: if "streams" is not specified, the default streams are used
+  # y3ajfink:
+  #   label: "MoE: All blocks, spatial"
+  #   results_base_dir : "./results/y3ajfink/"
+  #   #NEW: if "streams" is not specified, the default streams are used
   
-  dwst7fki:
-    label: "MoE: Spread blocks, spatial routing"
-    results_base_dir : "./results/dwst7fki/"
-    #NEW: if "streams" is not specified, the default streams are used
+  # dwst7fki:
+  #   label: "MoE: Spread blocks, spatial routing"
+  #   results_base_dir : "./results/dwst7fki/"
+  #   #NEW: if "streams" is not specified, the default streams are used
 
   # puvztgc3:
   #   label: "mul by 2"
