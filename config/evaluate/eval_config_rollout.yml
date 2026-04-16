@@ -20,12 +20,9 @@
 #      vmin: -40
 #      vmax: 40
 
-
-# max_workers: 36  # hard cap on parallel workers (I/O, plotting, scoring)
-
 evaluation:
-  metrics  : ["rmse", "mae"]
-  regions: ["global", "nhem"]
+  metrics  : ["froct"]
+  regions: ["global"]
   summary_plots : true
   ratio_plots : false
   heat_maps : false
@@ -43,53 +40,43 @@ evaluation:
 
 default_streams:
   ERA5:
-    channels: ["2t", "10u", "10v", "z_500", "t_850", "u_850", "v_850", "q_850" ]
+    channels: ["2t", "10v", "z_850", "t_850", "u_850", "v_850", "q_850"]
     evaluation:
-      forecast_step: "all"
+      forecast_step: "1-39"
       sample: "all"
       ensemble: "all" #supported: "all", "mean", [0,1,2]
     plotting:
-      sample: [1, 3]
-      forecast_step: "all" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
-      ensemble: "mean" #supported: "all", "mean", [0,1,2]
+      sample: [1]
+      forecast_step: "1-39" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50]) - exclude step 40 to avoid NaN in froct
+      ensemble: [0] #supported: "all", "mean", [0,1,2]
       plot_maps: true
       plot_bias: false
-      plot_target: false
-      plot_histograms: true
+      plot_target: true
+      plot_histograms: false
       plot_animations: true
-  
+
 run_ids :
-  byr1ij68:
+  yi9om18z:
     label: "forecast model no MoE"
-    results_base_dir : "./results/byr1ij68/"
+    results_base_dir : "./results/yi9om18z/"
     #NEW: if "streams" is not specified, the default streams are used
-
-
-  fqenkt4a:
+    
+  y3ajfink:
     label: "MoE: All blocks, spatial"
-    results_base_dir : "./results/fqenkt4a/"
+    results_base_dir : "./results/y3ajfink/"
     #NEW: if "streams" is not specified, the default streams are used
-
-  x4v3ticp:
-    label: "MoE: Early blocks, token routing"
-    results_base_dir : "./results/x4v3ticp/"
-    #NEW: if "streams" is not specified, the default streams are used
-
-  wu7joi2a:
-    label: "MoE: late blocks, spatial routing"
-    results_base_dir : "./results/wu7joi2a/"
-    #NEW: if "streams" is not specified, the default streams are used
-
-  srys8hzo:
-    label: "MoE: late blocks, token routing"
-    results_base_dir : "./results/srys8hzo/"
-    #NEW: if "streams" is not specified, the default streams are used
-
-  sdsx4kaf:
-    label: "MoE: mid blocks, spatila routing"
-    results_base_dir : "./results/sdsx4kaf/"
-    #NEW: if "streams" is not specified, the default streams are used
-
-  jczsvm6u:
+  
+  dwst7fki:
     label: "MoE: Spread blocks, spatial routing"
-    results_base_dir : "./results/jczsvm6u/"
+    results_base_dir : "./results/dwst7fki/"
+    #NEW: if "streams" is not specified, the default streams are used
+
+  # puvztgc3:
+  #   label: "mul by 2"
+  #   results_base_dir : "./results/puvztgc3/"
+  #   #NEW: if "streams" is not specified, the default streams are used
+
+  # t3ld9ki7:
+  #   label: "mul by 5"
+  #   results_base_dir : "./results/t3ld9ki7/"
+  #   #NEW: if "streams" is not specified, the 
