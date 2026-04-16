@@ -123,6 +123,7 @@ freeze_modules: ""
 load_chkpt: {}
 
 norm_type: "LayerNorm"
+qk_norm_type: "RMSNorm"
 
 #####################################
 
