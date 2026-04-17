@@ -13,6 +13,7 @@ ERA5 :
   stream_id : 0
   source_exclude : ['w_', 'skt', 'tcw', 'cp', 'tp']
   target_exclude : ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp']
+  # target: [ ]
   # forcing: True
   loss_weight : 1.
   location_weight : cosine_latitude
@@ -25,11 +26,11 @@ ERA5 :
     net : transformer
     num_tokens : 1
     num_heads : 8
-    dim_embed : 256
+    dim_embed : 512
     num_blocks : 2
   embed_target_coords :
     net : linear
-    dim_embed : 256
+    dim_embed : 512
   target_readout :
     num_layers : 2
     num_heads : 4
