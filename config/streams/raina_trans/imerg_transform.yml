@@ -20,15 +20,12 @@ IMERG_ANEMOI:
   target_channel_weights:
     - 1.0
   location_weight : cosine_latitude
-  transform_type: arcsinh
-  transform_scale: 1000.0
-  transform_alpha: 0.05
 
-  # transform_type: log10
-  # transform_scale: 1000.0    # m -> mm
-  # transform_offset: 1.0      # log10(x_mm + 1): 0→0, 1mm→0.30, 10mm→1.04, 50mm→1.71
+  transform_type: log10
+  transform_scale: 1000.0    # m -> mm
+  transform_offset: 1.0      # log10(x_mm + 1): 0→0, 1mm→0.30, 10mm→1.04, 50mm→1.71
 
-  transform_type: none
+  # transform_type: none
 
   loss_weight: 1.0
   # Stream-specific loss functions — override the global loss_fcts for IMERG only.
@@ -46,6 +43,9 @@ IMERG_ANEMOI:
   #     weight: 0.2
   #     args:
   #       threshold_quantile: 0.95
+  # loss_fcts:
+  #   "kernel_crps":
+  #     weight: 1.0
 
   masking_rate: 0.6
   masking_rate_none: 0.05

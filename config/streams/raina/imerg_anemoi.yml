@@ -43,6 +43,9 @@ IMERG_ANEMOI:
   #     weight: 0.2
   #     args:
   #       threshold_quantile: 0.95
+  # loss_fcts:
+  #   "kernel_crps":
+  #     weight: 1.0
 
   masking_rate: 0.6
   masking_rate_none: 0.05
@@ -54,15 +57,15 @@ IMERG_ANEMOI:
     net: transformer
     num_tokens: 1
     num_heads: 8
-    dim_embed: 256
+    dim_embed: 512
     num_blocks: 2
   embed_target_coords:
     net: linear
-    dim_embed: 256
+    dim_embed: 512
   target_readout:
     type: "obs_value"
     num_layers: 2
     num_heads: 4
   pred_head:
-    ens_size: 16
-    num_layers: 2
+    ens_size: 1
+    num_layers: 1
