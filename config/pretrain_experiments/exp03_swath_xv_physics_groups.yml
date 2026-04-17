@@ -1,15 +1,31 @@
-# MAE masking config: MIXED (standalone with base settings)
-# Randomly selects one sub-strategy per sample according to strategy_weights.
+# Experiment 03: Satellite swath sparse spatial MAE + XV variable masking with physics groups
+#
+# Hypothesis:
+#   The satellite swath geometry is the most observationally realistic of all masking
+#   strategies: it mimics polar-orbiting instruments (AMSU, IASI, ATMS) that see thin
+#   strips of the atmosphere across successive orbits.  This geometry already teaches
+#   the model to complete large spatial gaps from narrow observational corridors.
+#   Adding physics-informed variable masking on top creates a doubly challenging
+#   pretraining task that more closely resembles real data assimilation: the model
+#   must reconstruct unobserved regions from a partial swath AND infer missing
+#   dynamical variables from the thermodynamic variables that are observed.
+#
+#   This directly prepares the model for the IASI finetuning scenario where only
+#   radiance-sensitive variables (temperature, humidity) are "observed" and wind
+#   fields must be inferred.
+#
+# Key design choices:
+#   - Swath geometry: 25 passes, 10-degree width (realistic IASI-like coverage)
+#   - Upper-air dynamics masked at 0.45 — the model must infer wind from T/q
+#   - Thermodynamic variables at 0.25 — partially visible for anchoring
+#   - Surface vars at 0.10 — almost always visible as boundary condition
+#   - Spatial in-swath keep rate 0.30 — 70% of swath cells subsampled away
+#     (more aggressive than the default 0.3 rate in mixed configs)
 
 # (C) Copyright 2025 WeatherGenerator contributors.
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-#
-# In applying this licence, ECMWF does not waive the privileges and immunities
-# granted to it by virtue of its status as an intergovernmental organisation
-# nor does it submit to any jurisdiction.
-#
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -34,8 +50,6 @@ ae_global_num_blocks: 2
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -90,6 +104,8 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 zarr_store: "zip"
 
+use_variable_mask_tokens: False
+
 #####################################
 
 streams_directory: "./config/streams/era5_1deg/"
@@ -103,7 +119,7 @@ general:
 
   multiprocessing_method: "fork"
 
-  desc: ""
+  desc: "exp03_swath_xv_physics_groups"
   run_id: ???
   run_history: []
 
@@ -164,35 +180,34 @@ training_config:
         },
     }
 
-  # model_input is defined by the masking strategy override file
   model_input:
-    "mae_mixed":
-      masking_strategy: "mixed"
+    "mae_swath_xv_physics":
+      masking_strategy: "satellite_swath_sparse"
       num_samples: 1
       num_steps_input: 1
       masking_strategy_config:
-        strategies: ["random", "healpix", "satellite_swath", "satellite_swath_sparse"]
-        strategy_weights:
-          random: 1.0
-          healpix: 1.0
-          cropping_healpix: 1.0
-          satellite_swath_sparse: 1.0
-        hl_mask_levels: [0, 1, 2, 3]
-        strategy_configs:
-          random:
-            rate: 0.15
-            rate_sampling: False
-            diffusion_rn: False
-          healpix:
-            rate: 0.15
-            hl_mask: 4
-            rate_sampling: False
-          satellite_swath_sparse:
-            num_swaths: 30
-            swath_width_deg: 10.0
-            orbit_drift_deg: -25.0
-            rate: 0.3
-            rate_sampling: False
+        # 25 passes × 10-degree width ≈ realistic single-instrument 6-hour coverage
+        num_swaths: 25
+        swath_width_deg: 10.0
+        orbit_drift_deg: -25.0
+        rate: 0.30    # keep 30% of in-swath cells → outside swath always masked
+        rate_sampling: False
+      # Physics-informed variable masking.
+      # Upper-air wind/geopotential: high dropout → model must infer from T/q.
+      # This mirrors the IASI scenario where radiance constrains T/q but not wind.
+      variable_masking:
+        use_mask_tokens: False
+        channel_dropout_rate: 0.20
+        variable_groups:
+          upper_air_dynamics:
+            variables: ["u_\\d+", "v_\\d+", "z_\\d+"]
+            dropout_rate: 0.45
+          thermodynamics:
+            variables: ["t_\\d+", "q_\\d+", "r_\\d+", "w_\\d+"]
+            dropout_rate: 0.25
+          surface:
+            variables: ["u_10m", "v_10m", "t_2m", "d_2m", "msl", "sp", "sst", "tcw", "tp"]
+            dropout_rate: 0.10
 
   forecast:
     time_step: 00:00:00
@@ -225,5 +240,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: null
+  exp: "exp03"
   grid: null

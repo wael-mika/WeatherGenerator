@@ -1,15 +1,41 @@
-# MAE masking config: MIXED (standalone with base settings)
-# Randomly selects one sub-strategy per sample according to strategy_weights.
+# Experiment 05: Full XV-MAE stack — mixed spatial + physics groups + learned mask tokens
+#
+# Hypothesis:
+#   This is the most capable XV-MAE configuration, stacking every component:
+#
+#     1. Mixed spatial masking (random + healpix + swath_sparse, equal weights)
+#        → geometric diversity: each sample trains a different reconstruction geometry
+#
+#     2. Physics-informed variable group masking
+#        → upper-air dynamics masked at 0.40, thermodynamics at 0.30, surface at 0.10
+#        → encoder must infer wind from temperature/humidity in realistic proportions
+#
+#     3. Learned per-variable mask tokens (Feature 2)
+#        → encoder receives a consistent unambiguous signal for hidden variables
+#        → prevents the encoder from confusing a masked channel with a true zero
+#
+#   The combination maximises the diversity of the pretraining task across both the
+#   spatial and variable axes simultaneously.  This is the config most likely to
+#   transfer well to IASI finetuning where both the spatial coverage AND the set of
+#   observable variables differ from ERA5.
+#
+# Trade-off:
+#   This is the most expensive config to tune — three interacting hyperparameters
+#   (spatial strategy weights, per-group dropout rates, mask token initialisation).
+#   Run exp01 and exp02 first to establish which axis (spatial diversity vs variable
+#   masking vs mask tokens) matters most before committing to this full stack.
+#
+# Suggested comparison sequence:
+#   random.yml               → baseline (no XV)
+#   random_xv.yml            → adds uniform variable masking
+#   exp01 (physics groups)   → tests physics-informed rates
+#   exp02 (mask tokens)      → tests Feature 2 in isolation
+#   exp05 (this)             → full stack combining all improvements
 
 # (C) Copyright 2025 WeatherGenerator contributors.
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-#
-# In applying this licence, ECMWF does not waive the privileges and immunities
-# granted to it by virtue of its status as an intergovernmental organisation
-# nor does it submit to any jurisdiction.
-#
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -34,8 +60,6 @@ ae_global_num_blocks: 2
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -90,6 +114,10 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 zarr_store: "zip"
 
+# Feature 2 enabled: StreamEmbedTransformer allocates variable_mask_values parameter.
+# Must also set use_mask_tokens: True inside variable_masking below.
+use_variable_mask_tokens: True
+
 #####################################
 
 streams_directory: "./config/streams/era5_1deg/"
@@ -103,7 +131,7 @@ general:
 
   multiprocessing_method: "fork"
 
-  desc: ""
+  desc: "exp05_mixed_xv_full_stack"
   run_id: ???
   run_history: []
 
@@ -164,18 +192,16 @@ training_config:
         },
     }
 
-  # model_input is defined by the masking strategy override file
   model_input:
-    "mae_mixed":
+    "mae_mixed_xv_full":
       masking_strategy: "mixed"
       num_samples: 1
       num_steps_input: 1
       masking_strategy_config:
-        strategies: ["random", "healpix", "satellite_swath", "satellite_swath_sparse"]
+        strategies: ["random", "healpix", "satellite_swath_sparse"]
         strategy_weights:
           random: 1.0
           healpix: 1.0
-          cropping_healpix: 1.0
           satellite_swath_sparse: 1.0
         hl_mask_levels: [0, 1, 2, 3]
         strategy_configs:
@@ -193,6 +219,22 @@ training_config:
             orbit_drift_deg: -25.0
             rate: 0.3
             rate_sampling: False
+      # Full XV-MAE: physics groups + learned mask tokens.
+      # Group rates encode physical prior: dynamics hard, surface easy.
+      # Fallback (unmatched channels): 0.20
+      variable_masking:
+        use_mask_tokens: True    # activates Feature 2
+        channel_dropout_rate: 0.20
+        variable_groups:
+          upper_air_dynamics:
+            variables: ["u_\\d+", "v_\\d+", "z_\\d+"]
+            dropout_rate: 0.40
+          thermodynamics:
+            variables: ["t_\\d+", "q_\\d+", "r_\\d+", "w_\\d+"]
+            dropout_rate: 0.30
+          surface:
+            variables: ["u_10m", "v_10m", "t_2m", "d_2m", "msl", "sp", "sst", "tcw", "tp"]
+            dropout_rate: 0.10
 
   forecast:
     time_step: 00:00:00
@@ -225,5 +267,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: null
+  exp: "exp05"
   grid: null

@@ -1,15 +1,27 @@
-# MAE masking config: MIXED (standalone with base settings)
-# Randomly selects one sub-strategy per sample according to strategy_weights.
+# Experiment 01: Random spatial MAE + XV variable masking with physics-informed group rates
+#
+# Hypothesis:
+#   Assigning higher masking probability to dynamical variables (wind, geopotential)
+#   than to thermodynamic or surface variables forces the model to infer large-scale
+#   dynamics from thermodynamic state — exactly what thermal wind balance and
+#   geostrophic adjustment describe.  Uniform masking treats all variables equally,
+#   which may under-train the physically most informative cross-variable couplings.
+#
+# What differs from random_xv.yml:
+#   - Three variable groups with distinct dropout rates (0.45 / 0.30 / 0.10)
+#   - Upper-air dynamics (u, v, z at all pressure levels) masked most aggressively
+#   - Surface variables masked lightly so the model always has boundary anchors
+#   - Spatial masking rate unchanged (0.15 keep — same as random_xv.yml)
+#
+# Expected outcome:
+#   Better 500hPa geopotential reconstruction; improved thermal wind balance in
+#   downstream finetune vs uniform-rate XV-MAE.  Compare directly against
+#   random_xv.yml (exp baseline).
 
 # (C) Copyright 2025 WeatherGenerator contributors.
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-#
-# In applying this licence, ECMWF does not waive the privileges and immunities
-# granted to it by virtue of its status as an intergovernmental organisation
-# nor does it submit to any jurisdiction.
-#
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -34,8 +46,6 @@ ae_global_num_blocks: 2
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -90,6 +100,8 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 zarr_store: "zip"
 
+use_variable_mask_tokens: False
+
 #####################################
 
 streams_directory: "./config/streams/era5_1deg/"
@@ -103,7 +115,7 @@ general:
 
   multiprocessing_method: "fork"
 
-  desc: ""
+  desc: "exp01_random_xv_physics_groups"
   run_id: ???
   run_history: []
 
@@ -164,35 +176,34 @@ training_config:
         },
     }
 
-  # model_input is defined by the masking strategy override file
   model_input:
-    "mae_mixed":
-      masking_strategy: "mixed"
+    "mae_random_xv_physics":
+      masking_strategy: "random"
       num_samples: 1
       num_steps_input: 1
       masking_strategy_config:
-        strategies: ["random", "healpix", "satellite_swath", "satellite_swath_sparse"]
-        strategy_weights:
-          random: 1.0
-          healpix: 1.0
-          cropping_healpix: 1.0
-          satellite_swath_sparse: 1.0
-        hl_mask_levels: [0, 1, 2, 3]
-        strategy_configs:
-          random:
-            rate: 0.15
-            rate_sampling: False
-            diffusion_rn: False
-          healpix:
-            rate: 0.15
-            hl_mask: 4
-            rate_sampling: False
-          satellite_swath_sparse:
-            num_swaths: 30
-            swath_width_deg: 10.0
-            orbit_drift_deg: -25.0
-            rate: 0.3
-            rate_sampling: False
+        rate: 0.15
+        rate_sampling: False
+        diffusion_rn: False
+      # Physics-informed variable group masking.
+      # Upper-air wind and geopotential: highest rate — the model must infer
+      # these from temperature/humidity, exercising thermal wind balance.
+      # Thermodynamics: moderate rate — temp + humidity are central state vars.
+      # Surface: lightest rate — boundary conditions anchor the reconstruction.
+      # Fallback (any unmatched channel): 0.20
+      variable_masking:
+        use_mask_tokens: False
+        channel_dropout_rate: 0.20
+        variable_groups:
+          upper_air_dynamics:
+            variables: ["u_\\d+", "v_\\d+", "z_\\d+"]
+            dropout_rate: 0.45
+          thermodynamics:
+            variables: ["t_\\d+", "q_\\d+", "r_\\d+", "w_\\d+"]
+            dropout_rate: 0.30
+          surface:
+            variables: ["u_10m", "v_10m", "t_2m", "d_2m", "msl", "sp", "sst", "tcw", "tp"]
+            dropout_rate: 0.10
 
   forecast:
     time_step: 00:00:00
@@ -225,5 +236,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: null
+  exp: "exp01"
   grid: null

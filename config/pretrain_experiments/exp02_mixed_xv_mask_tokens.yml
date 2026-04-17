@@ -1,15 +1,33 @@
-# MAE masking config: MIXED (standalone with base settings)
-# Randomly selects one sub-strategy per sample according to strategy_weights.
+# Experiment 02: Mixed spatial MAE + XV variable masking + learned mask tokens (Feature 2)
+#
+# Hypothesis:
+#   When a variable is hidden, leaving its token as 0.0 is ambiguous: the encoder
+#   can't distinguish "this variable was masked" from "the true value is zero".
+#   Replacing the zero with a learned per-variable scalar (Feature 2) gives the
+#   encoder an unambiguous "this slot is masked" signal, which may let it build a
+#   better latent representation of what IS present.
+#   Mixed spatial masking provides geometric diversity on top, forcing the model
+#   to handle both irregular observational coverage and missing variables.
+#
+# What differs from mixed_xv.yml:
+#   - use_variable_mask_tokens: True  →  allocates variable_mask_values in the embedder
+#   - variable_masking.use_mask_tokens: True  →  applies them at forward time
+#   - All other settings identical to mixed_xv.yml
+#
+# Expected outcome:
+#   Lower validation loss on masked channels compared to mixed_xv.yml (Feature 1 only).
+#   The variable_mask_values gradients should be non-zero after ~200 steps.
+#   If there is no improvement, it suggests zeroing is already sufficient and
+#   the model learns to route around it.
+#
+# Note: this experiment adds ~C extra parameters (one scalar per variable).
+#   These are very cheap; backward compatibility is maintained because
+#   use_variable_mask_tokens defaults to False in all other configs.
 
 # (C) Copyright 2025 WeatherGenerator contributors.
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-#
-# In applying this licence, ECMWF does not waive the privileges and immunities
-# granted to it by virtue of its status as an intergovernmental organisation
-# nor does it submit to any jurisdiction.
-#
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -34,8 +52,6 @@ ae_global_num_blocks: 2
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -90,6 +106,10 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 zarr_store: "zip"
 
+# Feature 2: enables variable_mask_values nn.Parameter in StreamEmbedTransformer.
+# Must be True here AND use_mask_tokens: True in variable_masking below.
+use_variable_mask_tokens: True
+
 #####################################
 
 streams_directory: "./config/streams/era5_1deg/"
@@ -103,7 +123,7 @@ general:
 
   multiprocessing_method: "fork"
 
-  desc: ""
+  desc: "exp02_mixed_xv_mask_tokens"
   run_id: ???
   run_history: []
 
@@ -164,18 +184,16 @@ training_config:
         },
     }
 
-  # model_input is defined by the masking strategy override file
   model_input:
-    "mae_mixed":
+    "mae_mixed_xv_masktok":
       masking_strategy: "mixed"
       num_samples: 1
       num_steps_input: 1
       masking_strategy_config:
-        strategies: ["random", "healpix", "satellite_swath", "satellite_swath_sparse"]
+        strategies: ["random", "healpix", "satellite_swath_sparse"]
         strategy_weights:
           random: 1.0
           healpix: 1.0
-          cropping_healpix: 1.0
           satellite_swath_sparse: 1.0
         hl_mask_levels: [0, 1, 2, 3]
         strategy_configs:
@@ -193,6 +211,9 @@ training_config:
             orbit_drift_deg: -25.0
             rate: 0.3
             rate_sampling: False
+      variable_masking:
+        use_mask_tokens: True   # activates Feature 2 (learned per-variable scalar)
+        channel_dropout_rate: 0.3
 
   forecast:
     time_step: 00:00:00
@@ -225,5 +246,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: null
+  exp: "exp02"
   grid: null

@@ -1,15 +1,37 @@
-# MAE masking config: MIXED (standalone with base settings)
-# Randomly selects one sub-strategy per sample according to strategy_weights.
+# Experiment 04: High spatial masking rate + high variable dropout — stress-test pretraining
+#
+# Hypothesis:
+#   BEiT and data2vec style pretraining uses very high masking ratios (60–75%) to
+#   prevent shortcut solutions.  With ERA5 at 1-degree resolution the model can
+#   exploit local autocorrelation at low masking rates — many masked cells lie
+#   within a few grid-lengths of a visible neighbour and can be trivially interpolated.
+#   Driving the spatial masking rate up (keep ~30% of cells) combined with aggressive
+#   variable masking (50% per channel) makes both shortcut paths simultaneously hard:
+#
+#     - Spatial shortcut (interpolation): harder because fewer visible neighbours
+#     - Variable shortcut (copying adjacent channels): harder because many channels gone
+#
+#   The two axes of difficulty are largely orthogonal, so their combination does not
+#   simply double the loss — instead it forces the model to build a genuinely physical
+#   global representation.
+#
+# Key design choices:
+#   - Random spatial masking at keep rate 0.30 (was 0.15 in baseline configs —
+#     note: rate here is the KEEP fraction, i.e. 30% visible)
+#   - Global variable dropout rate 0.50 (each channel hidden with p=0.5)
+#   - No per-group rate overrides — tests whether raw difficulty alone helps
+#   - Slightly increased LR warmup (384 steps) to stabilise the harder task
+#
+# Risk:
+#   At these masking rates the training task becomes genuinely hard.  Monitor
+#   the first 500 steps closely.  If the loss does not decrease below the initial
+#   value after ~300 steps, the task may be under-constrained — reduce variable
+#   dropout to 0.35 or spatial keep to 0.20 as a fallback.
 
 # (C) Copyright 2025 WeatherGenerator contributors.
 #
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
-#
-# In applying this licence, ECMWF does not waive the privileges and immunities
-# granted to it by virtue of its status as an intergovernmental organisation
-# nor does it submit to any jurisdiction.
-#
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -34,8 +56,6 @@ ae_global_num_blocks: 2
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
-# TODO: switching to < 1 triggers triton-related issues.
-# See https://github.com/ecmwf/WeatherGenerator/issues/1050
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
@@ -90,6 +110,8 @@ freeze_modules: ""
 norm_type: "LayerNorm"
 zarr_store: "zip"
 
+use_variable_mask_tokens: False
+
 #####################################
 
 streams_directory: "./config/streams/era5_1deg/"
@@ -103,7 +125,7 @@ general:
 
   multiprocessing_method: "fork"
 
-  desc: ""
+  desc: "exp04_high_mask_rate_xv"
   run_id: ???
   run_history: []
 
@@ -141,7 +163,7 @@ training_config:
     lr_max: 5e-5
     lr_final_decay: 2e-6
     lr_final: 0.0
-    num_steps_warmup: 256
+    num_steps_warmup: 384    # longer warmup for harder task
     num_steps_cooldown: 512
     policy_warmup: "cosine"
     policy_decay: "constant"
@@ -164,35 +186,21 @@ training_config:
         },
     }
 
-  # model_input is defined by the masking strategy override file
   model_input:
-    "mae_mixed":
-      masking_strategy: "mixed"
+    "mae_high_rate_xv":
+      masking_strategy: "random"
       num_samples: 1
       num_steps_input: 1
       masking_strategy_config:
-        strategies: ["random", "healpix", "satellite_swath", "satellite_swath_sparse"]
-        strategy_weights:
-          random: 1.0
-          healpix: 1.0
-          cropping_healpix: 1.0
-          satellite_swath_sparse: 1.0
-        hl_mask_levels: [0, 1, 2, 3]
-        strategy_configs:
-          random:
-            rate: 0.15
-            rate_sampling: False
-            diffusion_rn: False
-          healpix:
-            rate: 0.15
-            hl_mask: 4
-            rate_sampling: False
-          satellite_swath_sparse:
-            num_swaths: 30
-            swath_width_deg: 10.0
-            orbit_drift_deg: -25.0
-            rate: 0.3
-            rate_sampling: False
+        # 30% of cells visible — harder spatial task than baseline 15%
+        rate: 0.30
+        rate_sampling: False
+        diffusion_rn: False
+      # Aggressive uniform variable masking: p=0.5 per channel.
+      # Safety guarantee (at least 1 channel always visible) is always active.
+      variable_masking:
+        use_mask_tokens: False
+        channel_dropout_rate: 0.50
 
   forecast:
     time_step: 00:00:00
@@ -225,5 +233,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: null
+  exp: "exp04"
   grid: null
