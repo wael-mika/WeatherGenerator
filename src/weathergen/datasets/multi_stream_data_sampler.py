@@ -700,6 +700,15 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         if not channel_mask.any():
             return None
 
+        logger.debug(
+            "XV-MAE channel mask [%s]: %d/%d variables hidden (%.0f%%) — %s",
+            stream_name,
+            int(channel_mask.sum()),
+            len(channels),
+            100.0 * channel_mask.float().mean().item(),
+            [channels[k] for k in channel_mask.nonzero(as_tuple=True)[0].tolist()],
+        )
+
         return channel_mask
 
     def _get_source_target_masks(self, training_mode):

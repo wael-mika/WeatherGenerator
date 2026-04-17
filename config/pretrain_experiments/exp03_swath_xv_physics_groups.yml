@@ -200,13 +200,20 @@ training_config:
         channel_dropout_rate: 0.20
         variable_groups:
           upper_air_dynamics:
+            # u/v wind components and geopotential at all pressure levels (e.g. u_850, z_500)
             variables: ["u_\\d+", "v_\\d+", "z_\\d+"]
             dropout_rate: 0.45
           thermodynamics:
-            variables: ["t_\\d+", "q_\\d+", "r_\\d+", "w_\\d+"]
+            # Temperature and specific humidity at all pressure levels (e.g. t_500, q_850).
+            # r_ (relative humidity) and w_ (vertical velocity) are absent/excluded from
+            # the aifs-ea-an-oper O96 ERA5 dataset and will not match any channel.
+            variables: ["t_\\d+", "q_\\d+"]
             dropout_rate: 0.25
           surface:
-            variables: ["u_10m", "v_10m", "t_2m", "d_2m", "msl", "sp", "sst", "tcw", "tp"]
+            # Anemoi ERA5 O96 surface names: 10u/10v/2t/2d (NOT u_10m/v_10m/t_2m/d_2m).
+            # sst is included but may not be present in all dataset versions.
+            # tcw/tp are in source_exclude and will not match.
+            variables: ["10u", "10v", "2t", "2d", "msl", "sp", "sst"]
             dropout_rate: 0.10
 
   forecast:

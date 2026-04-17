@@ -201,10 +201,12 @@ training_config:
         #     variables: ["u_\\d+", "v_\\d+", "z_\\d+"]
         #     dropout_rate: 0.4
         #   thermodynamics:
-        #     variables: ["t_\\d+", "q_\\d+", "r_\\d+"]
+        #     # Anemoi ERA5 O96: r_ (RH) absent, w_ excluded — use only t_ and q_
+        #     variables: ["t_\\d+", "q_\\d+"]
         #     dropout_rate: 0.3
         #   surface:
-        #     variables: ["u_10m", "v_10m", "t_2m", "msl", "sp", "sst"]
+        #     # Anemoi ERA5 O96 uses ECMWF short names: 10u/10v/2t/2d (not u_10m/v_10m/t_2m/d_2m)
+        #     variables: ["10u", "10v", "2t", "2d", "msl", "sp", "sst"]
         #     dropout_rate: 0.2
 
   forecast:

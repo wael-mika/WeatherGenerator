@@ -494,6 +494,10 @@ class Trainer(TrainerBase):
                 if bidx % self.train_logging.metrics == 0:
                     self._log_instant_grad_norms(TRAIN)
 
+            # XV-MAE F2: always log variable_mask_values grad norms when present
+            if bidx % self.train_logging.metrics == 0:
+                self._log_xv_mask_token_grads(TRAIN)
+
             # optimizer step
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()
@@ -766,6 +770,21 @@ class Trainer(TrainerBase):
 
         if is_root():
             self.train_logger.log_metrics(stage, grad_norms)
+
+    def _log_xv_mask_token_grads(self, stage: Stage):
+        """Log gradient norms of XV-MAE Feature 2 (variable_mask_values) parameters.
+
+        Called unconditionally at every metrics logging step when F2 is active.
+        Allows early verification that the learned per-variable scalars are actually
+        receiving gradient signal (they start at zero and must depart via gradients).
+        """
+        xv_grads = {}
+        for name, param in self.model.named_parameters():
+            if "variable_mask_values" in name and param.grad is not None:
+                xv_grads["xv_mask_token_grad." + name] = self._get_tensor_item(param.grad.norm())
+                xv_grads["xv_mask_token_val." + name] = self._get_tensor_item(param.abs().mean())
+        if xv_grads and is_root():
+            self.train_logger.log_metrics(stage, xv_grads)
 
     def _log_terminal(self, bidx: int, mini_epoch: int, stage: Stage):
         print_freq = self.train_logging.terminal

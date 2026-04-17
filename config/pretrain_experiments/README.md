@@ -123,10 +123,17 @@ patterns to match your actual ERA5 channel names (check `stream_info.source_chan
 | Group | Pattern examples | Covers |
 |---|---|---|
 | `upper_air_dynamics` | `u_\\d+`, `v_\\d+`, `z_\\d+` | Wind components, geopotential at pressure levels |
-| `thermodynamics` | `t_\\d+`, `q_\\d+`, `r_\\d+`, `w_\\d+` | Temp, specific humidity, RH, vertical velocity |
-| `surface` | `u_10m`, `v_10m`, `t_2m`, `d_2m`, `msl`, `sp`, `sst`, `tcw`, `tp` | Surface/near-surface variables |
+| `thermodynamics` | `t_\\d+`, `q_\\d+` | Temp, specific humidity at pressure levels |
+| `surface` | `10u`, `10v`, `2t`, `2d`, `msl`, `sp`, `sst` | Surface/near-surface variables |
 
 `\\d+` matches any numeric pressure level suffix (e.g. `t_500`, `u_850`).
+
+**Anemoi ERA5 O96 naming notes**:
+- Surface variables use ECMWF short names (`10u`, `10v`, `2t`, `2d`), **not** `u_10m`/`v_10m`/`t_2m`/`d_2m`.
+- `r_\\d+` (relative humidity) and `w_\\d+` (vertical velocity) are not present in the
+  aifs-ea-an-oper O96 dataset: `w_` is in `source_exclude`, `r_` is not produced for this analysis.
+- `tcw`, `tp` are in `source_exclude` and will never match.
+- `sst` may or may not be present depending on dataset version; harmless if absent.
 
 ---
 

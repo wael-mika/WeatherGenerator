@@ -78,10 +78,13 @@ variable_masking:
       variables: ["u_\\d+", "v_\\d+", "z_\\d+"]   # wind + geopotential at all levels
       dropout_rate: 0.4
     thermodynamics:
-      variables: ["t_\\d+", "q_\\d+", "r_\\d+"]   # temp, humidity at all levels
+      # Anemoi ERA5 O96: only t_ and q_ are present at pressure levels.
+      # r_ (RH) is not produced; w_ is in source_exclude.
+      variables: ["t_\\d+", "q_\\d+"]   # temp, specific humidity at all levels
       dropout_rate: 0.3
     surface:
-      variables: ["u_10m", "v_10m", "t_2m", "msl", "sp", "sst"]
+      # Anemoi ERA5 O96 uses ECMWF short names: 10u/10v/2t/2d, not u_10m/v_10m/t_2m/d_2m.
+      variables: ["10u", "10v", "2t", "2d", "msl", "sp", "sst"]
       dropout_rate: 0.15           # mask surface less aggressively
 ```
 
@@ -147,7 +150,8 @@ variable_groups:
     variables: ["t_\\d+", "q_\\d+"]
     dropout_rate: 0.35
   surface:
-    variables: ["u_10m", "v_10m", "t_2m", "msl", "sp", "sst"]
+    # Anemoi ERA5 O96 naming: 10u/10v/2t/2d (not u_10m/v_10m/t_2m/d_2m)
+    variables: ["10u", "10v", "2t", "2d", "msl", "sp", "sst"]
     dropout_rate: 0.1    # conservative
 ```
 
