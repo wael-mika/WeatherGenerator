@@ -1,0 +1,170 @@
+# Variant: IASI retrieval fine-tuning from RANDOM+XV pretraining; disabled old input 'mae_random_xv'.
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# IASI retrieval fine-tuning starting from a random_xv MAE pre-trained checkpoint.
+# Task: predict IASI observations from ERA5 input (same time step, no forecast offset).
+#
+# Frozen:   encoder (ae_local, ae_global, ae_aggregation, embed_engine)
+# Trainable: forecast_engine (fe_blocks), pred_heads (decoder)
+
+fe_num_blocks: 0
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 0.0
+forecast_att_dense_rate: 1.0
+with_step_conditioning: True
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False
+ddp_find_unused_parameters: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*"
+norm_type: "LayerNorm"
+zarr_store: "zip"
+
+#####################################
+
+streams_directory: "./config/streams/era5_iasi_finetuning/"
+streams: ???
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: ""
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+  log_grad_norms: False
+
+data_loading:
+  num_workers: 12
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  memory_pinning: True
+
+training_config:
+
+  training_mode: ["masking"]
+
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  start_date: 2014-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  window_offset_prediction: 0
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  model_input: {
+    "mae_random_xv": {
+      enabled: False,
+      num_samples: 0,
+      },
+    "input": {
+      masking_strategy: "random",
+      masking_strategy_config: {
+        rate: 1.0,
+        rate_sampling: False,
+      },
+      },
+    }
+
+  target_input: {
+    "target": {
+      masking_strategy: "random",
+      masking_strategy_config: {
+        rate: 1.0,
+        rate_sampling: False,
+      },
+      },
+    }
+
+  forecast:
+    time_step: 00:00:00
+    num_steps: 0
+    policy: null
+
+
+validation_config:
+
+  samples_per_mini_epoch: 256
+  shuffle: False
+
+  start_date: 2023-10-01T00:00
+  end_date: 2023-12-31T00:00
+
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+  }
+
+  validate_before_training: False
+
+
+wgtags:
+  org: null
+  issue: null
+  exp: null
+  grid: null

@@ -89,6 +89,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.mask_value = 0.0
         self._stage = stage
+        self._channel_mask_log_count = 0
 
         self.streams = cf.streams
         self.rank = cf.rank
@@ -700,14 +701,18 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         if not channel_mask.any():
             return None
 
-        logger.debug(
-            "XV-MAE channel mask [%s]: %d/%d variables hidden (%.0f%%) — %s",
-            stream_name,
-            int(channel_mask.sum()),
-            len(channels),
-            100.0 * channel_mask.float().mean().item(),
-            [channels[k] for k in channel_mask.nonzero(as_tuple=True)[0].tolist()],
-        )
+        self._channel_mask_log_count += 1
+        if self._channel_mask_log_count <= 3 or self._channel_mask_log_count % 500 == 0:
+            masked_idxs = channel_mask.nonzero(as_tuple=True)[0].tolist()
+            logger.debug(
+                "XV-MAE channel mask [%s] #%d: %d/%d hidden (%.0f%%) e.g. %s",
+                stream_name,
+                self._channel_mask_log_count,
+                len(masked_idxs),
+                len(channels),
+                100.0 * channel_mask.float().mean().item(),
+                [channels[k] for k in masked_idxs[:3]],
+            )
 
         return channel_mask
 

@@ -1,21 +1,29 @@
 train: 
   plot:
-    c8i5plh4: 
+    pj4ct5ew: 
       slurm_id: 1
-      description: "Random, 15%, 32 epochs, forecast fine-tuning"
+      description: "Random physics group, forecast fine-tuning"
 
-    l7u9mh6q:
+    un5tx724:
       slurm_id: 3
-      description: "Healpix, 15%, 32 epochs, forecast fine-tuning"
+      description: "Swath sparse physics group, forecast fine-tuning"
 
-    dqruwnl4:
+    tdihnz9l:
       slurm_id: 5
-      description: "satellite_swath, 15%, 32 epochs, forecast fine-tuning"
+      description: "mixed physics group, forecast fine-tuning"
 
-    ewho5fyk:
+    toanjcry:
       slurm_id: 7
-      description: "satellite_swath_sparse, 15%, 32 epochs, forecast fine-tuning"
+      description: "mixed mask tokens, forecast fine-tuning"
 
-    jcokj5pg:
+    ctabvs0n:
       slurm_id: 2
-      description: "Mixed, ~ 15%, 32 epochs, forecast fine-tuning"
+      description: random XV , forecast fine-tuning"
+
+    bky3p79z:
+      slurm_id: 4
+      description: "Mixed XV, forecast fine-tuning"
+
+    mcrb8kyx:
+      slurm_id: 6
+      description: "Random with channel dropping, forecast fine-tuning"
