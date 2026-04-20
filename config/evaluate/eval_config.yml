@@ -20,12 +20,9 @@
 #      vmin: -40
 #      vmax: 40
 
-
-# max_workers: 36  # hard cap on parallel workers (I/O, plotting, scoring)
-
 evaluation:
-  metrics  : ["rmse", "mae"]
-  regions: ["global", "nhem"]
+  metrics  : ["rmse"]
+  regions: ["global"]
   summary_plots : true
   ratio_plots : false
   heat_maps : false
@@ -35,7 +32,7 @@ evaluation:
   print_summary: false #print out score values on screen. it can be verbose
   log_scale: false
   add_grid: false
-  score_cards: true
+  score_cards: false
   bar_plots: false
   num_processes: 0  #options: int, "auto", 0 means no parallelism (default)
   # baseline: "ar40mckx"
@@ -57,26 +54,70 @@ default_streams:
     #   plot_histograms: false
     #   plot_animations: true
 
-run_ids :
-  q4v9s2gj:
-    label: "random masking"
-    results_base_dir : "./results/q4v9s2gj"
-    #NEW: if "streams" is not specified, the default streams are used
+# run_ids :
+#   q4v9s2gj:
+#     label: "random masking"
+#     results_base_dir : "./results/q4v9s2gj"
+#     #NEW: if "streams" is not specified, the default streams are used
     
       
-  bwxrkz8j:
-    label: "healpix masking"
-    results_base_dir : "./results/bwxrkz8j"
-    #NEW: if "streams" is not specified, the default streams are used
+#   bwxrkz8j:
+#     label: "healpix masking"
+#     results_base_dir : "./results/bwxrkz8j"
+#     #NEW: if "streams" is not specified, the default streams are used
   
-  lk8osct2:
-    label: "Satellite masking"
-    results_base_dir : "./results/lk8osct2"
+#   lk8osct2:
+#     label: "Satellite masking"
+#     results_base_dir : "./results/lk8osct2"
 
-  y1q4b8e6:
-    label: "Satellite sparse masking"
-    results_base_dir : "./results/y1q4b8e6"
+#   y1q4b8e6:
+#     label: "Satellite sparse masking"
+#     results_base_dir : "./results/y1q4b8e6"
 
-  sad1ksz4:
-    label: "mixed masking"
-    results_base_dir : "./results/sad1ksz4" 
+#   sad1ksz4:
+#     label: "mixed masking"
+#     results_base_dir : "./results/sad1ksz4" 
+
+
+run_ids :
+  tq60natw:
+    label: "release model"
+    results_base_dir : "./results/tq60natw"
+    type: "json"
+    streams:
+      ERA5:
+        channels: ["2t", "10u", "10v", "z_500", "t_850", "u_850", "v_850", "q_850"]
+        evaluation:
+          forecast_step: "1-4"
+          sample: "all"
+          ensemble: "all" 
+
+  ltpj51fl:
+    label: "Random physics group"
+    results_base_dir : "./results/ltpj51fl"
+    type: "json" 
+
+  nud1ohi0:
+    label: "Swath sparse physics group"
+    results_base_dir : "./results/nud1ohi0"
+    type: "json" 
+  omlskcjb:
+    label: "mixed physics group"
+    results_base_dir : "./results/omlskcjb"
+    type: "json" 
+  sf6e8v4h:
+    label: "mixed mask tokens"
+    results_base_dir : "./results/sf6e8v4h"
+    type: "json" 
+  w85q7i2t:
+    label: "random XV"
+    results_base_dir : "./results/w85q7i2t" 
+    type: "json" 
+  vas3ju59:
+    label: "Mixed XV"
+    results_base_dir : "./results/vas3ju59"
+    type: "json" 
+  ys0awj7z:
+    label: "Random with channel dropping"
+    results_base_dir : "./results/ys0awj7z" 
+    type: "json" 

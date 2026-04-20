@@ -396,8 +396,6 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                 rdata = input_data[-(step + 1)]
                 token_data = input_tokens[-(step + 1)]
 
-                stream_data.source_is_spoof = rdata.is_spoof
-
                 # preprocess data for model input; channel_mask zeros masked variables
                 (source_cells, source_cells_lens) = self.tokenizer.get_source(
                     stream_info,
@@ -438,8 +436,6 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             # collect all targets for current stream
             rdata = output_data[step]
             token_data = output_tokens[step]
-
-            stream_data.target_is_spoof = rdata.is_spoof
 
             if "target_coords" in mode:
                 (tc, tc_l) = self.tokenizer.get_target_coords(
