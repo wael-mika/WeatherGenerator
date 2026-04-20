@@ -283,8 +283,9 @@ class MoERouter(torch.nn.Module):
             dim_in: Token embedding dimension.
             num_experts: Number of experts to score.
             top_k: How many experts each token is routed to.
-            jitter_noise: Half-width of the uniform multiplicative jitter
-                applied to router inputs during training (0 disables).
+            jitter_noise: Std-dev of additive Gaussian noise applied to router
+                logits during training (0 disables).  Matches the z2sfqaid
+                implementation which added noise on logits, not on features.
             router_bias: Whether the final router linear layer has a bias.
             router_hidden_dim: If >0, use a 2-layer MLP with this hidden
                 size instead of a single linear projection.
@@ -333,10 +334,10 @@ class MoERouter(torch.nn.Module):
         elif x.ndim != 2:
             raise ValueError(f"MoERouter expects [N, D] or [B, T, D], got {tuple(x.shape)}")
 
-        if self.training and self.jitter_noise > 0:
-            x = x * torch.empty_like(x).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
-
         router_logits = self.router_weights(x)
+
+        if self.training and self.jitter_noise > 0:
+            router_logits = router_logits + torch.randn_like(router_logits) * self.jitter_noise
 
         if token_mask is not None:
             token_mask = token_mask.to(torch.bool)
@@ -398,8 +399,8 @@ class SpatialMoERouter(torch.nn.Module):
             num_positions: Size of the spatial embedding table (typically the
                 number of HEALPix cells).
             top_k: How many experts each token is routed to.
-            jitter_noise: Half-width of the uniform multiplicative jitter
-                applied to content features during training (0 disables).
+            jitter_noise: Std-dev of additive Gaussian noise applied to the
+                combined router logits during training (0 disables).
             router_bias: Whether the final content-head linear has a bias.
             position_embed_dim: Dimension of each spatial position embedding.
             router_hidden_dim: If >0, use a 2-layer MLP for the content head.
@@ -539,10 +540,6 @@ class SpatialMoERouter(torch.nn.Module):
                 )
             position_ids = position_ids.to(device=x.device, dtype=torch.long)
 
-        # Multiplicative jitter on content features (before content head).
-        if self.training and self.jitter_noise > 0:
-            x = x * torch.empty_like(x).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
-
         # --- Content scores ---
         content_logits = self.content_head(x)  # [N, E]
 
@@ -557,6 +554,12 @@ class SpatialMoERouter(torch.nn.Module):
         # --- Gated combination ---
         alpha = torch.sigmoid(self.gate_proj(x))  # [N, 1]
         router_logits = alpha * content_logits + (1.0 - alpha) * spatial_logits
+
+        # Additive Gaussian jitter on combined logits (training only).
+        # Applied after combination to match z2sfqaid behaviour where noise
+        # was added directly to logits at a fixed scale.
+        if self.training and self.jitter_noise > 0:
+            router_logits = router_logits + torch.randn_like(router_logits) * self.jitter_noise
 
         if token_mask is not None:
             token_mask = token_mask.to(torch.bool)
@@ -629,8 +632,8 @@ class MoEBlock(torch.nn.Module):
             capacity_factor: Per-expert capacity as a fraction of
                 ``top_k * valid_tokens / num_experts``.  Set to ``0`` or
                 ``None`` to disable capacity enforcement.
-            jitter_noise: Half-width of uniform multiplicative jitter
-                applied to router inputs during training (0 disables).
+            jitter_noise: Std-dev of additive Gaussian noise applied to router
+                logits during training (0 disables).
             router_bias: Whether the router projection has a bias term.
             load_balance_weight: Scalar multiplier for the auxiliary
                 :class:`LoadBalancingLoss`.
