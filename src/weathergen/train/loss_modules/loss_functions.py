@@ -62,9 +62,31 @@ def stats_normalized_erf(target, ens, mu, stddev):
     return torch.mean(d * d)  # + torch.mean( torch.sqrt( stddev) )
 
 
-def mse_ens(target, ens, mu, stddev):
-    mse_loss = torch.nn.functional.mse_loss
-    return torch.stack([mse_loss(target, mem) for mem in ens], 0).mean()
+def mse_ens(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    MSE averaged across ensemble members — same as mean(mse_loss(target, mem) for mem in ens).
+
+    target : shape (num_data_points, num_channels)
+    pred   : shape (ens_dim, num_data_points, num_channels)
+    """
+    mask_nan = ~torch.isnan(target)
+    t = torch.where(mask_nan, target, torch.zeros_like(target))
+    p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
+
+    # [ens_dim, num_data_points, num_channels] -> average squared error per point/channel
+    diff_sq = (t.unsqueeze(0) - p).pow(2).mean(0)  # [num_data_points, num_channels]
+
+    if weights_points is not None:
+        diff_sq = (diff_sq.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    loss_chs = diff_sq.mean(0)  # [num_channels]
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
 
 
 def kernel_crps(
