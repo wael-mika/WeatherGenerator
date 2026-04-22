@@ -8,7 +8,7 @@
 # nor does it submit to any jurisdiction.
 #####################################
 
-streams_directory: "./config/streams/raina_trans/"
+streams_directory: "./config/streams/raina/"
 
 freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
 
@@ -40,7 +40,7 @@ training_config:
 
   num_mini_epochs: 32
 
-  start_date: 2014-01-01T00:00
+  start_date: 2000-01-01T00:00
   end_date: 2022-12-31T00:00
   
   learning_rate_scheduling :
@@ -60,3 +60,11 @@ training_config:
       offset: 1
       num_steps: 4
       policy: "fixed"
+
+  losses:
+    "physical":
+      type: "LossPhysical"
+      loss_fcts:
+        "mse": {}
+        "mse_ens": {}
+        "kernel_crps": {}

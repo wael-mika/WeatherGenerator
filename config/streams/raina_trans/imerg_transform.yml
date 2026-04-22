@@ -30,6 +30,38 @@ IMERG_ANEMOI:
   loss_weight: 1.0
   # Stream-specific loss functions — override the global loss_fcts for IMERG only.
   # ERA5 continues to use global loss_fcts (mse only).
+
+  # Option 1: mse_ens loss with 1.0 weight
+  # loss_fcts:
+  #   "mse_ens":
+  #     weight: 1.0
+
+  # Option 2: kernel_crps with fair to false with 1.0 weight
+  # loss_fcts:
+  #   "kernel_crps":
+  #     weight: 1.0
+  #     args:
+  #       fair: false
+
+  # Option 3: kernel_crps with fair to false with 0.5 weight and mse loss for 0.5 weight
+  # loss_fcts:
+  #   "kernel_crps":
+  #     weight: 0.5
+  #     args:
+  #       fair: false
+  #   "mse":
+  #     weight: 0.5
+
+  # Option 4: kernel_crps with fair to true with 0.5 weight and mse loss for 0.5 weight
+  # loss_fcts:
+  #   "kernel_crps":
+  #     weight: 0.5
+  #     args:
+  #       fair: true
+  #   "mse":
+  #     weight: 0.5
+
+  # Original examples:
   # loss_fcts:
   #   "mse":
   #     weight: 0.5
