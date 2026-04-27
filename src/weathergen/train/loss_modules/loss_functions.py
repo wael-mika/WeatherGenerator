@@ -89,6 +89,45 @@ def mse_ens(
     return loss, loss_chs
 
 
+def student_t_nll(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    nu: float = 3.0,
+    eps: float = 1e-6,
+):
+    """
+    Negative log-likelihood under a Student-t distribution.
+
+    Estimates location (μ) and scale (σ) from the ensemble. Heavier tails than
+    Gaussian NLL/MSE — useful for precipitation extremes. nu→∞ recovers Gaussian NLL.
+    Note: the normalization constant (depends on nu only) is omitted.
+
+    target : shape (num_data_points, num_channels)
+    pred   : shape (ens_dim, num_data_points, num_channels)
+    nu     : degrees of freedom; lower = heavier tails (typical range: 2–10)
+    eps    : minimum sigma for numerical stability
+    """
+    mask_nan = ~torch.isnan(target)
+    t = torch.where(mask_nan, target, torch.zeros_like(target))
+    p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
+
+    mu = p.mean(0)                      # [num_data_points, num_channels]
+    sigma = p.std(0).clamp(min=eps)     # [num_data_points, num_channels]
+
+    z = (t - mu) / sigma
+    nll = (nu + 1) / 2 * torch.log(1 + z.pow(2) / nu) + torch.log(sigma)
+    nll = torch.where(mask_nan, nll, torch.zeros_like(nll))
+
+    if weights_points is not None:
+        nll = (nll.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    loss_chs = nll.mean(0)  # [num_channels]
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
 def kernel_crps(
     targets,
     preds,
