@@ -51,6 +51,42 @@ def apply_fct_to_blocks(model, blocks, fct):
             fct(module)
 
 
+def _resolve_variable_groups(variable_groups_cfg, channel_names):
+    """Map variable-group config to (group_name, sorted_channel_indices, group_cfg) tuples.
+
+    _default group collects all unmatched channels.
+    Raises ValueError on overlapping patterns or missing _default when channels are unmatched.
+    """
+    assigned = set()
+    groups = []
+    default_cfg = None
+
+    for group_name, group_cfg in variable_groups_cfg.items():
+        if group_name == "_default":
+            default_cfg = group_cfg
+            continue
+        patterns = [re.compile(p) for p in group_cfg.get("variables", [])]
+        indices = [
+            i for i, ch in enumerate(channel_names) if any(pat.fullmatch(ch) for pat in patterns)
+        ]
+        overlap = set(indices) & assigned
+        if overlap:
+            raise ValueError(f"Channels at indices {overlap} matched by multiple variable groups")
+        assigned.update(indices)
+        groups.append((group_name, sorted(indices), group_cfg))
+
+    default_indices = [i for i in range(len(channel_names)) if i not in assigned]
+    if default_indices and default_cfg is None:
+        raise ValueError(
+            f"{len(default_indices)} channel(s) unmatched by any variable group "
+            "but no _default group is defined"
+        )
+    if default_cfg is not None:
+        groups.append(("_default", default_indices, default_cfg))
+
+    return groups
+
+
 class ActivationFactory:
     _registry = {
         "identity": nn.Identity,
