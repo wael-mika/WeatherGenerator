@@ -19,16 +19,35 @@ logger = logging.getLogger(__name__)
 class MaskData:
     masks: list[np.typing.NDArray] = []
     metadata: list[SampleMetaData] = []
+    # Per-mask optional channel drop mask: shape (num_channels,), True = keep.
+    channel_drop_masks: list[np.typing.NDArray | None] = []
+    # Per-mask optional per-group spatial masks: {group_name: (num_cells,) bool}.
+    group_spatial_masks: list[dict[str, np.typing.NDArray] | None] = []
 
     def __init__(self):
         self.masks = []
         self.metadata = []
+        self.channel_drop_masks = []
+        self.group_spatial_masks = []
 
     def __len__(self):
         return len(self.masks)
 
-    def add_mask(self, mask, params, cfg, losses, idx, correspondence, relationship):
+    def add_mask(
+        self,
+        mask,
+        params,
+        cfg,
+        losses,
+        idx,
+        correspondence,
+        relationship,
+        channel_drop_mask=None,
+        group_spatial_masks=None,
+    ):
         self.masks += [mask]
+        self.channel_drop_masks += [channel_drop_mask]
+        self.group_spatial_masks += [group_spatial_masks]
         self.metadata += [
             SampleMetaData(
                 params={**cfg, **params},
@@ -44,6 +63,12 @@ class MaskData:
 
     def get_mask(self, idx: int) -> np.typing.NDArray:
         return self.masks[idx]
+
+    def get_channel_drop_mask(self, idx: int) -> np.typing.NDArray | None:
+        return self.channel_drop_masks[idx]
+
+    def get_group_spatial_masks(self, idx: int) -> dict[str, np.typing.NDArray] | None:
+        return self.group_spatial_masks[idx]
 
 
 def get_num_samples(config) -> np.typing.NDArray:
@@ -74,8 +99,7 @@ def _filter_active_configs(cfgs) -> dict:
     return {
         k: v
         for k, v in cfgs.items()
-        if v.get("enabled", True) is not False
-        and v.get("num_samples", 1) != 0
+        if v.get("enabled", True) is not False and v.get("num_samples", 1) != 0
     }
 
 
@@ -194,14 +218,14 @@ class Masker:
         Computed once and reused across all masking calls.
         """
         if not hasattr(self, "_cell_coords_cache"):
-            nside = 2 ** self.healpix_level_data
+            nside = 2**self.healpix_level_data
             all_idx = np.arange(self.healpix_num_cells)
             lonlat = hp.healpix_to_lonlat(all_idx, nside, order="nested")
             lon, lat = lonlat[0], lonlat[1]
             # astropy returns Angle objects; .value gives radians
             lat_rad = lat.value if hasattr(lat, "value") else lat
             lon_rad = lon.value if hasattr(lon, "value") else lon
-            lats = np.degrees(lat_rad)                      # [-90, 90]
+            lats = np.degrees(lat_rad)  # [-90, 90]
             lons = (np.degrees(lon_rad) + 180.0) % 360.0 - 180.0  # [-180, 180]
             self._cell_coords_cache = (lats, lons)
         return self._cell_coords_cache
@@ -343,18 +367,42 @@ class Masker:
 
     def _get_sampling_rate(self, cfg):
         """
-        Get the sampling, if requested by sampling it itself
+        Get the sampling rate, optionally sampled from a distribution.
+
+        Supported distributions (``rate_distribution``):
+        - ``"normal"`` (default): clip(|N(rate, 1/(2.5π))|, 0.01, 0.99)
+        - ``"beta"``: Beta(rate_alpha, rate_beta) where rate_beta defaults to
+          ``rate_alpha * (1 - rate) / rate`` so the distribution mean equals ``rate``.
+          Set ``rate_flip: true`` to sample ``1 - Beta(alpha, beta)`` — useful when
+          the convention switches from keep_rate to masking_rate, since flipping
+          preserves the distribution shape while mirroring it around 0.5.
         """
 
         rate = cfg.get("rate", None)
         assert rate is not None, 'No sampling rate "rate" specified.'
 
         if cfg.get("rate_sampling", False):
-            rate = np.clip(
-                np.abs(self.rng.normal(loc=rate, scale=1.0 / (2.5 * np.pi))),
-                0.01,
-                0.99,
-            )
+            dist = cfg.get("rate_distribution", "normal")
+            if dist == "normal":
+                rate = np.clip(
+                    np.abs(self.rng.normal(loc=rate, scale=1.0 / (2.5 * np.pi))),
+                    0.01,
+                    0.99,
+                )
+            elif dist == "beta":
+                alpha = float(cfg.get("rate_alpha", 2.0))
+                # Auto-compute beta so mean = rate; override with rate_beta if provided.
+                default_beta = alpha * (1.0 - rate) / max(rate, 1e-9)
+                beta = float(cfg.get("rate_beta", default_beta))
+                sampled = float(self.rng.beta(alpha, beta))
+                if cfg.get("rate_flip", False):
+                    sampled = 1.0 - sampled
+                rate = float(np.clip(sampled, 0.01, 0.99))
+            else:
+                raise ValueError(
+                    f"Unknown rate_distribution {dist!r}. Supported: 'normal', 'beta'."
+                )
+
         assert 0.0 <= rate <= 1.0, f"keep_rate out of bounds: {rate}"
 
         return rate
@@ -465,11 +513,82 @@ class Masker:
 
         return corr_dict
 
+    # ── Per-variable-group spatial mask helpers ──────────────────────────────
+
+    def _generate_group_masks_stream(
+        self, stream_info: dict, num_cells: int
+    ) -> dict[str, np.typing.NDArray] | None:
+        """Mode A: generate per-group spatial masks from variable_groups.masking in stream config.
+
+        Returns a dict {group_name: (num_cells,) bool tensor} when at least one group has a
+        ``masking`` or ``masking_rate`` config key, otherwise returns None.
+
+        Supports two sub-variants:
+        - Full config: ``variable_groups.<group>.masking = {strategy: ..., config: {...}}``
+        - Rate-only:   ``variable_groups.<group>.masking_rate: 0.1``  (uses "random" strategy)
+        """
+        vgroups = stream_info.get("variable_groups", {})
+        if not vgroups:
+            return None
+        has_masking = any(
+            "masking" in gcfg or "masking_rate" in gcfg for gcfg in vgroups.values()
+        )
+        if not has_masking:
+            return None
+
+        group_masks: dict[str, np.typing.NDArray] = {}
+        for gname, gcfg in vgroups.items():
+            mcfg = gcfg.get("masking", None)
+            masking_rate = gcfg.get("masking_rate", None)
+            if mcfg is not None:
+                strategy = mcfg.get("strategy", "random")
+                config = dict(mcfg.get("config", {}))
+            elif masking_rate is not None:
+                strategy = "random"
+                config = {"rate": float(masking_rate)}
+            else:
+                continue
+            mask, _ = self._generate_cell_mask(num_cells, strategy, config)
+            group_masks[gname] = mask
+
+        return group_masks if group_masks else None
+
+    def _generate_group_masks_model_input(
+        self, source_cfgs: dict, num_cells: int
+    ) -> dict[str, np.typing.NDArray] | None:
+        """Mode B: generate per-group spatial masks from variable_groups tags in model_input.
+
+        Each model_input entry may carry a ``variable_groups`` list.  The entry's
+        masking_strategy is used to generate a spatial mask that is then assigned to every
+        group named in that list.  If multiple entries claim the same group, the last one wins.
+
+        Returns None when no entry has a ``variable_groups`` tag.
+        """
+        has_tags = any(cfg.get("variable_groups") for cfg in source_cfgs.values())
+        if not has_tags:
+            return None
+
+        group_masks: dict[str, np.typing.NDArray] = {}
+        for _, cfg in source_cfgs.items():
+            groups = cfg.get("variable_groups", None)
+            if not groups:
+                continue
+            mask, _ = self._generate_cell_mask(
+                num_cells,
+                cfg.get("masking_strategy"),
+                cfg.get("masking_strategy_config", {}),
+            )
+            for g in list(groups):
+                group_masks[g] = mask
+
+        return group_masks if group_masks else None
+
     def build_samples_for_stream(
         self,
         training_mode: str,
         num_cells: int,
         stream_info: dict,
+        num_channels: int | None = None,
     ) -> tuple[np.typing.NDArray, list[np.typing.NDArray], list[SampleMetaData]]:
         """Construct encoder/decoder keep-masks for one stream.
 
@@ -521,7 +640,7 @@ class Masker:
             for cfg in active_source_cfgs.values()
         )
         is_mode_a = target_auto_generated and not has_forecast_source  # MAE reconstruction
-        is_mode_b = target_auto_generated and has_forecast_source      # Forecasting
+        is_mode_b = target_auto_generated and has_forecast_source  # Forecasting
 
         # ── Phase 4: Build source_cfgs and target_cfgs ────────────────────────
         if is_mode_b:
@@ -558,6 +677,51 @@ class Masker:
             if self.stage == "train"
             else 0.0
         )
+
+        # ── Channel dropout (training only, source-side only) ─────────────────
+        # Drop individual channels with a very low probability, independently of
+        # spatial masking. Targets are never channel-dropped so the loss is always
+        # computed against full ground-truth channel values.
+        channel_drop_rate = (
+            stream_info.get("channel_drop_rate", 0.0) if self.stage == "train" else 0.0
+        )
+        source_channel_drop_mask = None
+        if channel_drop_rate > 0.0 and num_channels is not None and num_channels > 0:
+            # True = keep channel, False = drop (zero out) channel
+            source_channel_drop_mask = self.rng.random(num_channels) >= channel_drop_rate
+
+        # ── Phase 5.5: Per-group spatial masks ────────────────────────────────
+        # Mode A (stream config) takes priority over Mode B (model_input tags).
+        # Both produce {group_name: (num_cells,) bool tensor}; the stream-level mask
+        # then becomes the union so the encoder sees any cell covered by any group.
+        stream_group_masks = self._generate_group_masks_stream(stream_info, num_cells)
+        if stream_group_masks is not None:
+            # Guard: warn when Mode A (stream config masking) and Mode B (model_input tags) are
+            # both configured — Mode A wins silently, so alert the author.
+            has_mode_b_tags = any(cfg.get("variable_groups") for cfg in source_cfgs.values())
+            if has_mode_b_tags:
+                logger.warning(
+                    "Stream '%s': Mode A per-group masking (variable_groups.masking in stream "
+                    "config) takes priority — variable_groups tags in model_input (Mode B) are "
+                    "ignored. Remove one of the two configurations to silence this warning.",
+                    stream_info.get("name", "?"),
+                )
+        elif is_mode_a:
+            stream_group_masks = self._generate_group_masks_model_input(source_cfgs, num_cells)
+            # Guard: validate that Mode B group names match stream config variable_groups keys.
+            # A mismatch produces a silent no-op in the 2-D channel mask — catch it early.
+            if stream_group_masks is not None:
+                stream_vgroups = stream_info.get("variable_groups", {})
+                if stream_vgroups:
+                    unknown = [g for g in stream_group_masks if g not in stream_vgroups]
+                    if unknown:
+                        raise ValueError(
+                            f"model_input variable_groups tags {unknown!r} do not match any "
+                            f"variable_groups entry in the stream config for stream "
+                            f"'{stream_info.get('name', '?')}'. "
+                            f"Defined groups: {sorted(stream_vgroups)}. "
+                            "Group names must be spelled identically in both configs."
+                        )
 
         # ── Phase 7: Generate target masks ────────────────────────────────────
         target_masks = MaskData()
@@ -621,9 +785,21 @@ class Masker:
                 target_idx += i_sample % target_num_samples[target_cfg_idx].item()
 
                 # diagnostic stream or randomly dropped: encoder ignores this stream → all-False
-                if is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped:
+                is_skipped = is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
+                if is_skipped:
                     source_mask, mask_params = torch.zeros(num_cells, dtype=torch.bool), {}
+                    source_sample_group_masks = None
+                elif stream_group_masks is not None:
+                    # Per-group masking: encoder sees the union of all group masks.
+                    # The per-group masks are stored separately so the tokenizer can
+                    # apply different spatial visibility to each variable group.
+                    source_sample_group_masks = stream_group_masks
+                    source_mask = torch.stack(
+                        list(stream_group_masks.values())
+                    ).any(dim=0)
+                    mask_params = {"group_masking": True}
                 else:
+                    source_sample_group_masks = None
                     source_mask, mask_params = self._get_mask(
                         num_cells=num_cells,
                         strategy=source_cfg.get("masking_strategy"),
@@ -635,16 +811,34 @@ class Masker:
                 # encoder did not see.  Skipped for diagnostic/dropped streams (source
                 # mask is all-False, complement would be all-True which is wrong) and
                 # for Modes B/C (different timesteps or explicit target configured).
-                if is_mode_a and not (
-                    is_stream_diagnostic(stream_info, self.stage) or is_stream_dropped
-                ):
-                    complement = ~source_mask
-                    target_masks.masks[target_idx] = complement
-                    target_masks.metadata[target_idx].mask = complement
+                if is_mode_a and not is_skipped:
+                    if source_sample_group_masks is not None:
+                        # Per-group complement: each group's target is the cells NOT seen
+                        # by the encoder for that group.  Target union is the union of
+                        # all per-group complements (a superset of the source complement).
+                        target_group_masks = {g: ~m for g, m in source_sample_group_masks.items()}
+                        union_complement = torch.stack(
+                            list(target_group_masks.values())
+                        ).any(dim=0)
+                        target_masks.masks[target_idx] = union_complement
+                        target_masks.metadata[target_idx].mask = union_complement
+                        target_masks.group_spatial_masks[target_idx] = target_group_masks
+                    else:
+                        complement = ~source_mask
+                        target_masks.masks[target_idx] = complement
+                        target_masks.metadata[target_idx].mask = complement
 
                 corr = target_idx
                 source_masks.add_mask(
-                    source_mask, mask_params, source_cfg, losses, i_source, corr, relationship
+                    source_mask,
+                    mask_params,
+                    source_cfg,
+                    losses,
+                    i_source,
+                    corr,
+                    relationship,
+                    channel_drop_mask=source_channel_drop_mask,
+                    group_spatial_masks=source_sample_group_masks,
                 )
 
                 source_target_mapping += [target_idx]

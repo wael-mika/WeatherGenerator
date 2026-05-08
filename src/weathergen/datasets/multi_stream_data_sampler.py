@@ -398,6 +398,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         input_data: list,
         input_tokens: list,
         mask: torch.Tensor | None = None,
+        channel_drop_mask=None,
+        group_spatial_masks=None,
     ) -> tuple[StreamData, dict | None]:
         """
         Build model network input
@@ -436,6 +438,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     token_data,
                     (time_win_source.start, time_win_source.end),
                     mask,
+                    channel_drop_mask=channel_drop_mask,
+                    group_spatial_masks=group_spatial_masks,
                 )
 
                 stream_data.add_source(
@@ -511,6 +515,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_tokens: list,
         output_mask,
         input_mask,
+        input_channel_drop_mask=None,
+        input_group_spatial_masks=None,
     ) -> StreamData:
         """
         Return one batch of data
@@ -526,6 +532,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             output_mask : mask for output/prediction/target
             input_mask : mask for network input (can be source or target)
+            input_channel_drop_mask : optional (num_channels,) bool — True = keep channel.
 
 
         Returns:
@@ -549,6 +556,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             input_data,
             input_tokens,
             input_mask,
+            channel_drop_mask=input_channel_drop_mask,
+            group_spatial_masks=input_group_spatial_masks,
         )
 
         stream_data = self._build_stream_data_output(
@@ -623,11 +632,18 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         masks = {}
         for stream_name, stream_data in self.streams_datasets.items():
             stream_info = stream_data.info
+            # Resolve num_channels so the masker can generate per-channel drop masks.
+            num_channels = None
+            if stream_data.readers:
+                num_channels = stream_data.readers[0].get_source_num_channels() or None
+
+
             # Build source and target sample masks
             masks[stream_name] = self.tokenizer.build_samples_for_stream(
                 training_mode,
                 self.num_healpix_cells,
                 stream_info,
+                num_channels=num_channels,
             )
             # identical for all streams
             num_target_samples = len(masks[stream_name][0])
@@ -727,6 +743,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     output_tokens,
                     output_mask=target_masks.masks[tidx],
                     input_mask=source_mask,
+                    input_channel_drop_mask=source_masks.get_channel_drop_mask(sidx),
+                    input_group_spatial_masks=source_masks.get_group_spatial_masks(sidx),
                 )
 
                 batch.add_source_stream(sidx, tidx, stream_name, sdata, source_masks.metadata[sidx])
