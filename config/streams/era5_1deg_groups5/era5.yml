@@ -1,0 +1,290 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ERA5 stream — 5 physics groups, Option A (shared decoder, per-group heads)
+# No precipitation (tp / cp remain excluded).
+#
+# Groups and their role:
+#   synoptic_mass  T, Z (pressure), MSL        — smooth, redundant at O96
+#   dynamics       U all, V upper, 2D           — jet structure and large-scale circ.
+#   boundary       V lower, 10u/v, 2t, SP, SKT  — BL, orography, diurnal cycle
+#   moisture       Q 300–1000 hPa               — log-normal, frontal gradients
+#   _default       Q 50–250 hPa + remainder      — near-noise strat moisture / statics
+#
+# Masking mode: Mode A (per-group spatial masks from this file).
+# The model_input masking_strategy in the training config is NOT used for mask
+# generation — it is overridden by the masking blocks below.  Switch regimes by
+# swapping the active rate line in each group (see profile comments).
+#
+# Decoder mode: Option A — all groups share the stream-level target_readout.
+# Each group has its own pred_head with a physics-appropriate final activation.
+#
+# Usage with training config:
+#   uv run train --config config/config_mae_masking/random_rates_groups5.yml
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# RATE PROFILES  (change all groups together when switching profile)
+#
+#  Profile G  gentle      ~20% masked overall   ≈ keep=0.8 in random_rates.yml
+#  Profile N  normal      ~40% masked overall   ≈ keep=0.6 in random_rates.yml  ACTIVE
+#  Profile A  aggressive  ~80% masked overall   ≈ keep=0.2 in random_rates.yml
+#
+#  Per-group keep rates by profile:
+#
+#  Group           Profile G   Profile N   Profile A
+#  synoptic_mass     0.65        0.40        0.12
+#  dynamics          0.72        0.50        0.20
+#  boundary          0.80        0.65        0.30
+#  moisture          0.85        0.70        0.38
+#  _default          0.92        0.90        0.88
+#
+#  Within each group the Beta sampling section gives a fixed and two sampled
+#  variants (normal skew / tight).  Un-comment the desired block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ERA5:
+  type: anemoi
+  filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  stream_id: 0
+
+  # skt is source-excluded (encoder never sees it) but is still a reconstruction
+  # target — the decoder predicts it from context.  tcw / cp / tp remain fully
+  # excluded (not targets either).
+  source_exclude: ['w_', 'skt', 'tcw', 'cp', 'tp']
+  target_exclude: ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp']
+
+  loss_weight: 1.
+  location_weight: cosine_latitude
+
+  # Stream-level masking_rate is kept for backward compatibility.
+  # With Mode A active it has no effect on spatial mask generation.
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+
+  token_size: 8
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+
+  # Stream-level decoder shared by all groups (Option A).
+  # Required when any group omits target_readout.
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+
+  # Stream-level pred_head fallback — groups override this with their own block.
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+    final_activation: Identity
+
+  variable_groups:
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 1 — synoptic_mass
+    # Temperature (all levels), geopotential (pressure levels), MSL.
+    # Smoothest fields in the dataset; Z500 is reconstructible from ~10% of
+    # tokens.  Aggressive masking is appropriate — do not let these dominate
+    # the gradient.
+    # ─────────────────────────────────────────────────────────────────────
+    synoptic_mass:
+      variables:
+        - "t_\\d+"     # t_50 … t_1000 (13 levels)
+        - "z_\\d+"     # z_50 … z_1000 (pressure-level Z; surface z falls to _default)
+        - "msl"
+
+      masking:
+        strategy: random
+        config:
+          # — Profile N (ACTIVE): keep=0.40, 60% masked
+          rate: 0.40
+          # — Profile G (gentle):     rate: 0.65   # 35% masked
+          # — Profile A (aggressive): rate: 0.12   # 88% masked
+
+          # Beta sampling — un-comment ONE block and remove the fixed rate above.
+          #
+          # Normal skew (α=2.0): β≈3.0; mode≈0.33; mean=0.40
+          #   Broad distribution; occasional easy batches stabilise early training.
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Tight (α=4.0): β≈6.0; mode≈0.38; mean=0.40
+          #   Stays near 60% masking; recommended once training is stable.
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 2 — dynamics
+    # Zonal wind (all levels), meridional wind (upper troposphere 50–400 hPa),
+    # 2-metre dewpoint.
+    # Jet structure is persistent (U ACF₁ > 0.85 upper levels).  V is eddy-
+    # driven and harder to reconstruct than U at the same level.
+    # ─────────────────────────────────────────────────────────────────────
+    dynamics:
+      variables:
+        - "u_\\d+"                               # u_50 … u_1000 (all levels)
+        - "v_(50|100|150|200|250|300|400)"        # upper-troposphere V only
+        - "2d"                                    # 2-m dewpoint; ACF₁=0.973, large-scale
+
+      masking:
+        strategy: random
+        config:
+          # — Profile N (ACTIVE): keep=0.50, 50% masked
+          rate: 0.50
+          # — Profile G (gentle):     rate: 0.72   # 28% masked
+          # — Profile A (aggressive): rate: 0.20   # 80% masked
+
+          # Beta sampling — normal skew (α=2.0): β=2.0; mode≈0.50; mean=0.50
+          # rate: 0.50
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Tight (α=4.0): β=4.0; mode≈0.50; mean=0.50 (symmetric — less useful here)
+          # rate: 0.50
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 3 — boundary
+    # Lower-troposphere V (700–1000 hPa), 10-metre winds, 2-metre temperature,
+    # surface pressure, skin temperature.
+    # These fields are modulated by the planetary boundary layer, orography,
+    # and the diurnal cycle.  2T and SKT have ACF₁ ≈ 0.10–0.24 at 6-hourly
+    # resolution due to diurnal forcing — they are spatially smooth but require
+    # the temporal encoding (always-visible) for disambiguation.
+    # SKT is source-excluded; the encoder never sees it but the decoder predicts it.
+    # ─────────────────────────────────────────────────────────────────────
+    boundary:
+      variables:
+        - "v_(700|850|925|1000)"   # lower-troposphere meridional wind
+        - "10u"                    # 10-m zonal wind
+        - "10v"                    # 10-m meridional wind
+        - "2t"                     # 2-m temperature (strong diurnal)
+        - "sp"                     # surface pressure
+        - "skt"                    # skin temperature (source-excluded, target only)
+
+      masking:
+        strategy: random
+        config:
+          # — Profile N (ACTIVE): keep=0.65, 35% masked
+          rate: 0.65
+          # — Profile G (gentle):     rate: 0.80   # 20% masked
+          # — Profile A (aggressive): rate: 0.30   # 70% masked
+
+          # Beta sampling — normal skew (α=2.5): β≈1.35; mode≈0.76; mean=0.65
+          #   Slightly tighter than α=2.0; BL fields benefit from consistent context.
+          # rate: 0.65
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.5
+          #
+          # Tight (α=4.0): β≈2.15; mode≈0.70; mean=0.65
+          # rate: 0.65
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 4 — moisture
+    # Specific humidity 300–1000 hPa (tropospheric).
+    # Bounded below at zero; right-skewed; frontal gradients are sharp at the
+    # upper levels.  Softplus ensures non-negative output.
+    # Stratospheric Q (50–250 hPa) is handled by _default because it is
+    # essentially float32 noise at those levels (ACF₁ ≈ 0.00–0.03).
+    # ─────────────────────────────────────────────────────────────────────
+    moisture:
+      variables:
+        - "q_(300|400|500|600|700|850|925|1000)"   # tropospheric Q (8 levels)
+
+      masking:
+        strategy: random
+        config:
+          # — Profile N (ACTIVE): keep=0.70, 30% masked
+          rate: 0.70
+          # — Profile G (gentle):     rate: 0.85   # 15% masked
+          # — Profile A (aggressive): rate: 0.38   # 62% masked
+
+          # Beta sampling — normal skew (α=3.0): β≈1.29; mode≈0.87; mean=0.70
+          #   Wide left tail; model occasionally reconstructs most of the moisture
+          #   field — a hard task given its log-normal distribution.
+          # rate: 0.70
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 3.0
+          #
+          # Tight (α=5.0): β≈2.14; mode≈0.80; mean=0.70
+          #   Narrower; stays near 30% masking more consistently.
+          # rate: 0.70
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 5.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Softplus   # q ≥ 0
+
+    # ─────────────────────────────────────────────────────────────────────
+    # _default — stratospheric Q and any remaining channels
+    # Catches: q_50, q_100, q_150, q_200, q_250 (ACF₁ ≈ 0.000–0.033;
+    # essentially float32 noise), lsm (constant), surface geopotential, and any
+    # channel not matched above.
+    # High keep rate: encoder almost always sees these — they act as conditioning
+    # context rather than reconstruction targets.
+    # ─────────────────────────────────────────────────────────────────────
+    _default:
+      masking:
+        strategy: random
+        config:
+          # Keep near 1.0 across all profiles; strat-Q should always be visible.
+          rate: 0.90
+          # — Profile G: rate: 0.92
+          # — Profile A: rate: 0.88
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
