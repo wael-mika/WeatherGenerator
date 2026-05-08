@@ -274,8 +274,9 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     sources_size = dataset.get_sources_size()
     targets_num_channels = dataset.get_targets_num_channels()
     targets_coords_size = dataset.get_targets_coords_size()
+    targets_channels = dataset.get_target_channels()
 
     cf_with_overrides = merge_configs(cf, overrides)
     return Model(
-        cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
+        cf_with_overrides, sources_size, targets_num_channels, targets_coords_size, targets_channels
     ).create()

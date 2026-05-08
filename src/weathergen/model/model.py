@@ -38,7 +38,12 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.utils import get_num_parameters
+from weathergen.model.positional_encoding import (
+    build_spherical_rope_coeff_tensors,
+    get_rope_mode,
+    get_rope_spherical_band,
+)
+from weathergen.model.utils import _resolve_variable_groups, get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
@@ -301,7 +306,14 @@ class Model(torch.nn.Module):
         coordinates to its physical space.
     """
 
-    def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size):
+    def __init__(
+        self,
+        cf: Config,
+        sources_size,
+        targets_num_channels,
+        targets_coords_size,
+        targets_channels=None,
+    ):
         """
         Args:
             cf : Configuration with model parameters
@@ -310,6 +322,7 @@ class Model(torch.nn.Module):
                 embedding
             targets_coords_size : List with size of each input sample for coordinates target
                 embedding
+            targets_channels : List of list[str] of channel names per stream (for variable_groups)
         """
         super(Model, self).__init__()
 
@@ -321,6 +334,9 @@ class Model(torch.nn.Module):
         self.sources_size = sources_size
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
+        self.targets_channels = targets_channels or [[] for _ in sources_size]
+        # maps stream_name -> [(group_name, ch_indices, has_own_tte), ...] when variable_groups used
+        self.stream_groups: dict[str, list] = {}
 
         self.embed_target_coords = None
         self.encoder: EncoderModule | None = None
@@ -447,47 +463,111 @@ class Model(torch.nn.Module):
                     else:
                         assert False
 
-                    if cf.decoder_type == "Linear":
-                        tte = BilinearDecoder(
-                            stream_name,
-                            dims_embed[0],
-                            cf.ae_global_dim_embed,
-                            self.targets_num_channels[i_stream],
+                    # Resolve variable groups upfront so TTE creation can be skipped if unneeded
+                    if "variable_groups" in si and self.targets_channels[i_stream]:
+                        groups = _resolve_variable_groups(
+                            si["variable_groups"], self.targets_channels[i_stream]
+                        )
+                        # Shared TTE only needed when at least one group has no own target_readout
+                        needs_shared_tte = any(
+                            "target_readout" not in grp_cfg for _, _, grp_cfg in groups
                         )
                     else:
-                        # target prediction engines
-                        tte_version = (
-                            TargetPredictionEngine
-                            if cf.decoder_type != "PerceiverIOCoordConditioning"
-                            else TargetPredictionEngineClassic
-                        )
-                        tte = tte_version(
-                            cf,
-                            dims_embed,
-                            dim_coord_in,
-                            tr_dim_head_proj,
-                            tr_mlp_hidden_factor,
-                            softcap,
-                            stream_config=si,
-                        )
+                        groups = None
+                        needs_shared_tte = True
 
-                    self.target_token_engines[stream_name] = tte
+                    # Shared TTE — used by ungrouped path or by Option-A groups
+                    if needs_shared_tte:
+                        if cf.decoder_type == "Linear":
+                            tte = BilinearDecoder(
+                                stream_name,
+                                dims_embed[0],
+                                cf.ae_global_dim_embed,
+                                self.targets_num_channels[i_stream],
+                            )
+                        else:
+                            tte_cls = (
+                                TargetPredictionEngine
+                                if cf.decoder_type != "PerceiverIOCoordConditioning"
+                                else TargetPredictionEngineClassic
+                            )
+                            tte = tte_cls(
+                                cf,
+                                dims_embed,
+                                dim_coord_in,
+                                tr_dim_head_proj,
+                                tr_mlp_hidden_factor,
+                                softcap,
+                                stream_config=si,
+                            )
+                        self.target_token_engines[stream_name] = tte
 
-                    # ensemble prediction heads to provide probabilistic prediction
-                    final_activation = si["pred_head"].get("final_activation", "Identity")
-                    if is_root():
-                        logger.debug(
-                            f"{final_activation} activation of pred head of {si['name']} stream"
+                    if groups is not None:
+                        # Build per-group TTEs (Option B) and per-group pred heads
+                        stream_group_meta = []
+                        for group_name, ch_indices, group_cfg in groups:
+                            has_own_tte = "target_readout" in group_cfg
+                            if has_own_tte:
+                                if cf.decoder_type == "Linear":
+                                    raise ValueError(
+                                        f"decoder_type='Linear' does not support per-group "
+                                        f"target_readout (stream {stream_name!r}, "
+                                        f"group {group_name!r})"
+                                    )
+                                grp_tr = group_cfg["target_readout"]
+                                grp_dims = [dims_embed[0]] * (grp_tr["num_layers"] + 1)
+                                grp_stream_cfg = {
+                                    "name": f"{stream_name}/{group_name}",
+                                    "target_readout": grp_tr,
+                                }
+                                self.target_token_engines[f"{stream_name}/{group_name}"] = (
+                                    TargetPredictionEngineClassic(
+                                        cf,
+                                        grp_dims,
+                                        dim_coord_in,
+                                        tr_dim_head_proj,
+                                        tr_mlp_hidden_factor,
+                                        softcap,
+                                        stream_config=grp_stream_cfg,
+                                    )
+                                )
+
+                            n_ch = len(ch_indices)
+                            ph_cfg = group_cfg.get("pred_head") or si.get("pred_head")
+                            if ph_cfg is None:
+                                raise ValueError(
+                                    f"Group {group_name!r} in stream {stream_name!r} has no "
+                                    "pred_head config, and the stream has no top-level "
+                                    "pred_head to fall back to."
+                                )
+                            final_activation = ph_cfg.get("final_activation", "Identity")
+                            self.pred_heads[f"{stream_name}/{group_name}"] = EnsPredictionHead(
+                                dims_embed[-1],
+                                n_ch,
+                                ph_cfg["num_layers"],
+                                ph_cfg["ens_size"],
+                                norm_type=cf.norm_type,
+                                final_activation=final_activation,
+                                stream_name=f"{stream_name}/{group_name}",
+                            )
+                            stream_group_meta.append((group_name, ch_indices, has_own_tte))
+
+                        self.stream_groups[stream_name] = stream_group_meta
+                    else:
+                        final_activation = si["pred_head"].get("final_activation", "Identity")
+                        if is_root():
+                            logger.debug(
+                                f"{final_activation} activation of pred head of {si['name']} stream"
+                            )
+                        self.pred_heads[stream_name] = EnsPredictionHead(
+                            dims_embed[-1],
+                            self.targets_num_channels[i_stream],
+                            si["pred_head"]["num_layers"],
+                            si["pred_head"]["ens_size"],
+                            norm_type=cf.norm_type,
+                            final_activation=final_activation,
+                            stream_name=stream_name,
                         )
-                    self.pred_heads[stream_name] = EnsPredictionHead(
-                        dims_embed[-1],
-                        self.targets_num_channels[i_stream],
-                        si["pred_head"]["num_layers"],
-                        si["pred_head"]["ens_size"],
-                        norm_type=cf.norm_type,
-                        final_activation=final_activation,
-                        stream_name=stream_name,
-                    )
 
             # iterate again to setup shared spatial pred heads if specified in config
             for i_stream, (stream_name, si) in enumerate(self.streams.items()):
@@ -620,15 +700,36 @@ class Model(torch.nn.Module):
             for name in self.streams.keys()
         ]
         mdict = self.target_token_engines
-        num_params_tte = [
-            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
-        ]
+        num_params_tte = []
+        for name in self.stream_names:
+            if not mdict:
+                num_params_tte.append(0)
+                continue
+            total = get_num_parameters(mdict[name]) if name in mdict else 0
+            if name in self.stream_groups:
+                total += sum(
+                    get_num_parameters(mdict[f"{name}/{grp}"])
+                    for grp, _, has_own in self.stream_groups[name]
+                    if has_own and f"{name}/{grp}" in mdict
+                )
+            num_params_tte.append(total)
         mdict = self.pred_heads
-        num_params_preds = [
-            get_num_parameters(mdict[name]) if mdict and name in mdict else 0
-            for name in self.streams.keys()
-        ]
+        num_params_preds = []
+        for name in self.stream_names:
+            if not mdict:
+                num_params_preds.append(0)
+            elif name in mdict:
+                num_params_preds.append(get_num_parameters(mdict[name]))
+            elif name in self.stream_groups:
+                num_params_preds.append(
+                    sum(
+                        get_num_parameters(mdict[f"{name}/{grp}"])
+                        for grp, _, _ in self.stream_groups[name]
+                        if f"{name}/{grp}" in mdict
+                    )
+                )
+            else:
+                num_params_preds.append(0)
 
         print("-----------------")
         print(f"Total number of trainable parameters: {num_params_total:,}")
@@ -821,16 +922,63 @@ class Model(torch.nn.Module):
                         tcs_lens,
                     ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
                 else:
-                    tc_tokens = self.target_token_engines[stream_name](
-                        latent=tokens_nbors,
-                        output=tc_tokens,
-                        latent_lens=tokens_nbors_lens,
-                        output_lens=tcs_lens,
-                        coordinates=t_coords,
-                    )
-
-                    # final prediction head to map back to physical space
-                    pred = self.pred_heads[stream_name](tc_tokens)
+                    if stream_name in self.stream_groups:
+                        # Coord embedding is shared; each group uses its own TTE (Option B) or the
+                        # shared TTE (Option A). The shared TTE output is cached across groups.
+                        tc_tokens_init = tc_tokens
+                        i_stream = self.stream_names.index(stream_name)
+                        n_ch_total = self.targets_num_channels[i_stream]
+                        n_toks = tc_tokens_init.shape[0]
+                        first_grp_name = self.stream_groups[stream_name][0][0]
+                        ens_size = len(
+                            self.pred_heads[f"{stream_name}/{first_grp_name}"].pred_heads
+                        )
+                        # pred is allocated lazily from the first grp_pred so its dtype
+                        # matches the pred_head output (float32) rather than the
+                        # mixed-precision token dtype (bfloat16).
+                        pred = None
+                        shared_tc_tokens = None
+                        for group_name, ch_indices, has_own_tte in self.stream_groups[stream_name]:
+                            if has_own_tte:
+                                tc_tokens_grp = self.target_token_engines[
+                                    f"{stream_name}/{group_name}"
+                                ](
+                                    latent=tokens_nbors,
+                                    output=tc_tokens_init,
+                                    latent_lens=tokens_nbors_lens,
+                                    output_lens=tcs_lens,
+                                    coordinates=t_coords,
+                                )
+                            else:
+                                if shared_tc_tokens is None:
+                                    shared_tc_tokens = self.target_token_engines[stream_name](
+                                        latent=tokens_nbors,
+                                        output=tc_tokens_init,
+                                        latent_lens=tokens_nbors_lens,
+                                        output_lens=tcs_lens,
+                                        coordinates=t_coords,
+                                    )
+                                tc_tokens_grp = shared_tc_tokens
+                            grp_pred = self.pred_heads[f"{stream_name}/{group_name}"](tc_tokens_grp)
+                            if pred is None:
+                                pred = torch.zeros(
+                                    ens_size,
+                                    n_toks,
+                                    n_ch_total,
+                                    device=grp_pred.device,
+                                    dtype=grp_pred.dtype,
+                                )
+                            ch_idx = torch.tensor(ch_indices, device=pred.device, dtype=torch.long)
+                            pred[:, :, ch_idx] = grp_pred.to(pred.dtype)
+                    else:
+                        tc_tokens = self.target_token_engines[stream_name](
+                            latent=tokens_nbors,
+                            output=tc_tokens,
+                            latent_lens=tokens_nbors_lens,
+                            output_lens=tcs_lens,
+                            coordinates=t_coords,
+                        )
+                        pred = self.pred_heads[stream_name](tc_tokens)
 
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)
