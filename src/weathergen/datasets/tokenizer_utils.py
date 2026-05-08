@@ -280,8 +280,20 @@ def tokenize_apply_mask_source(
     data = data_padded[idxs_data]
 
     if mask_channels is not None:
-        assert False, "to be implemented"
-        # data = data_padded[ : channel_mask]
+        if mask_channels.ndim == 1:
+            # 1-D: same channel mask for every visible data-point (channel dropout).
+            # mask_channels[c] = True means "keep channel c", False means "zero it out".
+            data = data.clone()
+            data[:, ~mask_channels] = 0.0
+        else:
+            # 2-D: (num_visible_tokens, num_channels) — per-group spatial masking.
+            # Expand from token level to data-point level using idxs_data_lens, then zero.
+            points_per_token = idxs_data_lens.tolist()
+            channel_mask_per_point = torch.repeat_interleave(
+                mask_channels, torch.tensor(points_per_token), dim=0
+            )
+            data = data.clone()
+            data[~channel_mask_per_point] = 0.0
 
     # local coords
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
@@ -365,8 +377,15 @@ def tokenize_apply_mask_target(
     data = rdata.data[idxs_data]
 
     if mask_channels is not None:
-        assert False, "to be implemented"
-        # data = data_padded[ : channel_mask]
+        if mask_channels.ndim == 1:
+            data = data.clone()
+            data[:, ~mask_channels] = 0.0
+        else:
+            # 2-D per-group spatial masking: expand from token to data-point level.
+            pts = torch.tensor([t for t, m in zip(idxs_lens, mask_tokens, strict=True) if m])
+            channel_mask_per_point = torch.repeat_interleave(mask_channels, pts, dim=0)
+            data = data.clone()
+            data[~channel_mask_per_point] = 0.0
 
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
     mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
