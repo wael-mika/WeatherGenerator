@@ -1,0 +1,245 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ERA5 stream — 5 physics groups, Option A (shared decoder, per-group heads)
+# v2: Profile N rates (identical to v1) — moisture activation changed Softplus → Identity
+#
+# WHAT CHANGED FROM v1 (era5_1deg_groups5):
+#   moisture.pred_head.final_activation: Softplus → Identity
+#
+# WHY: The model operates in z-score normalised space where Q_norm = (Q - mean) / std.
+# Approximately 50% of normalised Q values are negative (dry anomalies below climatology).
+# Softplus output ∈ (0, +∞) can never represent negative normalised values, so the model
+# is structurally unable to predict below-mean humidity.  This caused terrible Q forecasting
+# skill in v1.  Identity removes the constraint; physical non-negativity is recovered via
+# the dataset denormalisation (Q_phys = Q_norm × std + mean) which is always positive for
+# Q values within a few standard deviations of the mean.
+#
+# PURPOSE (ablation isolation):
+#   v1 (existing) — Profile N rates + Softplus  → v1 baseline
+#   v2 (this)     — Profile N rates + Identity  → isolate activation effect
+#   v3             — aggressive rates + Identity  → isolate rate effect (see groups5_v3)
+#
+# Comparing v1 vs v2 shows the effect of Softplus alone.
+# Comparing v2 vs v3 shows the effect of rate aggressiveness alone.
+#
+# Usage with training config:
+#   uv run train --config config/config_mae_masking/random_rates_groups5_v2.yml
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# RATE PROFILES — unchanged from v1
+#
+#  Profile G  gentle      ~20% masked overall
+#  Profile N  normal      ~40% masked overall  ACTIVE
+#  Profile A  aggressive  ~80% masked overall
+#
+#  Group           Profile G   Profile N   Profile A
+#  synoptic_mass     0.65        0.40        0.12
+#  dynamics          0.72        0.50        0.20
+#  boundary          0.80        0.65        0.30
+#  moisture          0.85        0.70        0.38
+#  _default          0.92        0.90        0.88
+# ─────────────────────────────────────────────────────────────────────────────
+
+ERA5:
+  type: anemoi
+  filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  stream_id: 0
+
+  source_exclude: ['w_', 'skt', 'tcw', 'cp', 'tp']
+  target_exclude: ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp']
+
+  loss_weight: 1.
+  location_weight: cosine_latitude
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+
+  token_size: 8
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+    final_activation: Identity
+
+  variable_groups:
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 1 — synoptic_mass  (unchanged from v1)
+    # ─────────────────────────────────────────────────────────────────────
+    synoptic_mass:
+      variables:
+        - "t_\\d+"
+        - "z_\\d+"
+        - "msl"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.40
+          # — Profile G: rate: 0.65
+          # — Profile A: rate: 0.12
+          #
+          # Beta normal (α=2.0): β≈3.0; mode≈0.33; mean=0.40
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Beta tight (α=4.0): β≈6.0; mode≈0.38; mean=0.40
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 2 — dynamics  (unchanged from v1)
+    # ─────────────────────────────────────────────────────────────────────
+    dynamics:
+      variables:
+        - "u_\\d+"
+        - "v_(50|100|150|200|250|300|400)"
+        - "2d"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          # — Profile G: rate: 0.72
+          # — Profile A: rate: 0.20
+          #
+          # Beta normal (α=2.0): β=2.0; mode≈0.50; mean=0.50
+          # rate: 0.50
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Beta tight (α=4.0): β=4.0; mode≈0.50; mean=0.50
+          # rate: 0.50
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 3 — boundary  (unchanged from v1)
+    # ─────────────────────────────────────────────────────────────────────
+    boundary:
+      variables:
+        - "v_(700|850|925|1000)"
+        - "10u"
+        - "10v"
+        - "2t"
+        - "sp"
+        - "skt"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.65
+          # — Profile G: rate: 0.80
+          # — Profile A: rate: 0.30
+          #
+          # Beta normal (α=2.5): β≈1.35; mode≈0.76; mean=0.65
+          # rate: 0.65
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.5
+          #
+          # Beta tight (α=4.0): β≈2.15; mode≈0.70; mean=0.65
+          # rate: 0.65
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 4 — moisture
+    # CHANGED FROM v1: final_activation Softplus → Identity
+    # See header for full reasoning.
+    # Keep rate unchanged (Profile N keep=0.70) to isolate activation effect.
+    # ─────────────────────────────────────────────────────────────────────
+    moisture:
+      variables:
+        - "q_(300|400|500|600|700|850|925|1000)"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.70
+          # — Profile G: rate: 0.85
+          # — Profile A: rate: 0.38
+          #
+          # Beta normal (α=3.0): β≈1.29; mode≈0.87; mean=0.70
+          # rate: 0.70
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 3.0
+          #
+          # Beta tight (α=5.0): β≈2.14; mode≈0.80; mean=0.70
+          # rate: 0.70
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 5.0
+
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity   # was Softplus in v1 — wrong in z-score space
+
+    # ─────────────────────────────────────────────────────────────────────
+    # _default  (unchanged from v1)
+    # ─────────────────────────────────────────────────────────────────────
+    _default:
+      masking:
+        strategy: random
+        config:
+          rate: 0.90
+          # — Profile G: rate: 0.92
+          # — Profile A: rate: 0.88
+          rate_sampling: false
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
