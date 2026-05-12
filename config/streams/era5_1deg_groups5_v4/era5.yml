@@ -1,0 +1,271 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ERA5 stream — 5 physics groups, Option B (per-group decoders + per-group heads)
+# v4: aggressive rates + Identity moisture + per-group cross-attention TTEs
+#
+# WHAT CHANGED FROM v3 (era5_1deg_groups5_v3):
+#   Each group now has its own target_readout (cross-attention decoder TTE).
+#   This is Option B from decoder_groups_guide.md.
+#
+# WHY OPTION B: In the shared-decoder setup (Option A, v1–v3), all groups use
+# the same cross-attention weights to map from the latent to predictions.  The
+# decoder query carries only spatial position — it has no variable identity signal.
+# When predicting Q at position X, the decoder uses the same cross-attention as
+# for T at position X, and cannot selectively extract moisture-specific latent
+# features.  Per-group TTEs give Q its own cross-attention weight matrix,
+# allowing it to learn a Q-specific latent-to-output mapping.
+#
+# Per-group decoder depths (rationale in each group comment):
+#   synoptic_mass  2 layers, 8 heads  — large-scale coherent structure
+#   dynamics       2 layers, 8 heads  — jet + eddy scale
+#   boundary       1 layer,  4 heads  — locally determined, shallow is sufficient
+#   moisture       3 layers, 4 heads  — hardest to decode; extra depth for Q
+#   _default       1 layer,  4 heads  — strat-Q as context, not primary target
+#
+# STREAM note: stream-level target_readout is retained for schema completeness.
+# It is NOT instantiated at runtime because every group carries its own TTE.
+#
+# MASKING: same aggressive rates as v3 (Mode A, per-group).
+# ACTIVATION: Identity for all groups (no Softplus — same fix as v2/v3).
+#
+# Usage with training config:
+#   uv run train --config config/config_mae_masking/random_rates_groups5_v4.yml
+
+ERA5:
+  type: anemoi
+  filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  stream_id: 0
+
+  source_exclude: ['w_', 'skt', 'tcw', 'cp', 'tp']
+  target_exclude: ['w_', 'slor', 'sdor', 'tcw', 'cp', 'tp']
+
+  loss_weight: 1.
+  location_weight: cosine_latitude
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+
+  token_size: 8
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+
+  # Stream-level target_readout — required by schema; NOT instantiated at runtime
+  # because every group below carries its own target_readout (Option B).
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+    final_activation: Identity
+
+  variable_groups:
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 1 — synoptic_mass
+    # T/Z/MSL: smoothest fields; aggressive masking (85%).
+    # 2-layer 8-head decoder: large-scale Rossby wave structure warrants
+    # deeper latent routing than locally-determined fields.
+    # ─────────────────────────────────────────────────────────────────────
+    synoptic_mass:
+      variables:
+        - "t_\\d+"
+        - "z_\\d+"
+        - "msl"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.15
+          # — Profile G (reference, v1 equivalent): rate: 0.40
+          # — Profile A (very aggressive): rate: 0.08
+          #
+          # Beta normal (α=2.0): β≈11.3; mode≈0.09; mean=0.15
+          # rate: 0.15
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Beta tight (α=4.0): β≈22.7; mode≈0.13; mean=0.15
+          # rate: 0.15
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      target_readout:        # Option B: own TTE for synoptic_mass
+        num_layers: 2
+        num_heads: 8
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 2 — dynamics
+    # U all / V upper / 2D: jet + eddy scale; 75% masked.
+    # 2-layer 8-head decoder: same reasoning as synoptic_mass.
+    # ─────────────────────────────────────────────────────────────────────
+    dynamics:
+      variables:
+        - "u_\\d+"
+        - "v_(50|100|150|200|250|300|400)"
+        - "2d"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.25
+          # — Profile G: rate: 0.50
+          # — Profile A: rate: 0.12
+          #
+          # Beta normal (α=2.0): β=6.0; mode≈0.17; mean=0.25
+          # rate: 0.25
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.0
+          #
+          # Beta tight (α=4.0): β=12.0; mode≈0.23; mean=0.25
+          # rate: 0.25
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      target_readout:        # Option B: own TTE for dynamics
+        num_layers: 2
+        num_heads: 8
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 3 — boundary
+    # V lower / 10u/v / 2T / SP / SKT: BL + diurnal; 60% masked.
+    # 1-layer 4-head decoder: BL fields are locally determined — shallow
+    # decoding is sufficient and avoids overfitting.
+    # ─────────────────────────────────────────────────────────────────────
+    boundary:
+      variables:
+        - "v_(700|850|925|1000)"
+        - "10u"
+        - "10v"
+        - "2t"
+        - "sp"
+        - "skt"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.40
+          # — Profile G: rate: 0.65
+          # — Profile A: rate: 0.20
+          #
+          # Beta normal (α=2.5): β=3.75; mode≈0.36; mean=0.40
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 2.5
+          #
+          # Beta tight (α=4.0): β=6.0; mode≈0.38; mean=0.40
+          # rate: 0.40
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 4.0
+
+          rate_sampling: false
+
+      target_readout:        # Option B: own TTE for boundary
+        num_layers: 1
+        num_heads: 4
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GROUP 4 — moisture
+    # Q 300–1000 hPa: 62% masked.
+    # 3-layer 4-head decoder: the deepest decoder in this stream.
+    # Extra depth gives Q its own specialized latent routing: each additional
+    # cross-attention layer allows the TTE to refine its extraction of
+    # moisture-specific signals from the latent (which mixes Q with T/Z).
+    # final_activation: Identity — correct for z-score normalized Q.
+    # ─────────────────────────────────────────────────────────────────────
+    moisture:
+      variables:
+        - "q_(300|400|500|600|700|850|925|1000)"
+
+      masking:
+        strategy: random
+        config:
+          rate: 0.38
+          # — Profile G (v1 equivalent): rate: 0.70
+          # — Profile A: rate: 0.22
+          #
+          # Beta normal (α=3.0): β≈4.90; mode≈0.31; mean=0.38
+          # rate: 0.38
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 3.0
+          #
+          # Beta tight (α=5.0): β≈8.16; mode≈0.35; mean=0.38
+          # rate: 0.38
+          # rate_sampling: true
+          # rate_distribution: beta
+          # rate_alpha: 5.0
+
+          rate_sampling: false
+
+      target_readout:        # Option B: own TTE for moisture — 3 layers (deepest)
+        num_layers: 3
+        num_heads: 4
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity   # Identity — Softplus is wrong in z-score space
+
+    # ─────────────────────────────────────────────────────────────────────
+    # _default — stratospheric Q and remainder
+    # 12% masked (near-context); 1-layer 4-head decoder.
+    # ─────────────────────────────────────────────────────────────────────
+    _default:
+      masking:
+        strategy: random
+        config:
+          rate: 0.88
+          # — Profile G: rate: 0.90
+          # — Profile A: rate: 0.85
+
+          rate_sampling: false
+
+      target_readout:        # Option B: own TTE for _default
+        num_layers: 1
+        num_heads: 4
+
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+        final_activation: Identity
