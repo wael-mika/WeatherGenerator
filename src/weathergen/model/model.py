@@ -36,6 +36,7 @@ from weathergen.model.engines import (
     LatentState,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
+    TargetPredictionEngineMLP,
 )
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.utils import get_num_parameters
@@ -460,6 +461,18 @@ class Model(torch.nn.Module):
                             dims_embed[0],
                             cf.ae_global_dim_embed,
                             self.targets_num_channels[i_stream],
+                        )
+                    elif cf.decoder_type == "MLPDecoder":
+                        # New decoder: single cross-attention + deep MLP stack.
+                        # See engines.TargetPredictionEngineMLP for architecture rationale.
+                        tte = TargetPredictionEngineMLP(
+                            cf,
+                            dims_embed,
+                            dim_coord_in,
+                            tr_dim_head_proj,
+                            tr_mlp_hidden_factor,
+                            softcap,
+                            stream_config=si,
                         )
                     else:
                         # target prediction engines
