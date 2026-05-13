@@ -51,6 +51,11 @@ from weathergen.utils.utils import get_dtype, is_stream_forcing
 logger = logging.getLogger(__name__)
 
 
+# Number of cells in a 2-ring HEALPix neighbourhood (self + 8 ring-1 + 16 ring-2).
+# Interior cells have exactly 25; boundary cells are padded with self-cell.
+_RING2_SIZE = 25
+
+
 def _pick_tte_cls(decoder_type: str):
     """Return the TTE class that corresponds to decoder_type.
 
@@ -170,6 +175,11 @@ class ModelParams(torch.nn.Module):
             torch.empty((temp.shape[0], (temp.shape[1] + 1)), dtype=torch.int32),
             requires_grad=False,
         )
+        # 2-ring neighbourhood for Decoder B1 (see _RING2_SIZE).
+        self.hp_nbours_2ring = torch.nn.Parameter(
+            torch.empty((self.num_healpix_cells, _RING2_SIZE), dtype=torch.int32),
+            requires_grad=False,
+        )
 
         self.q_cells_lens = torch.nn.Parameter(
             torch.ones(self.num_healpix_cells + 1, dtype=torch.int32), requires_grad=False
@@ -273,6 +283,21 @@ class ModelParams(torch.nn.Module):
         self.hp_nbours.data[:, 0] = torch.arange(temp.shape[0], device=self.hp_nbours.device)
         self.hp_nbours.data[:, 1:] = torch.from_numpy(temp).to(self.hp_nbours.device)
 
+        # 2-ring neighbourhood: union of 1-rings of all 1-ring cells, padded to _RING2_SIZE.
+        # Uses hp_nbours (just populated above) as the 1-ring lookup.
+        ring1_np = self.hp_nbours.data.cpu().numpy()  # (num_cells, 9): [self, n1..n8]
+        ring2_padded = np.empty((num_healpix_cells, _RING2_SIZE), dtype=np.int32)
+        for _i in range(num_healpix_cells):
+            candidates = ring1_np[ring1_np[_i]].ravel()  # 9 cells × 9 each = 81 candidates
+            unique_cells = np.unique(candidates)  # deduplicated; at most 25 for interior cells
+            _n = len(unique_cells)
+            ring2_padded[_i, :_n] = unique_cells
+            if _n < _RING2_SIZE:
+                ring2_padded[_i, _n:] = _i  # pad with self
+        self.hp_nbours_2ring.data.copy_(
+            torch.from_numpy(ring2_padded).to(self.hp_nbours_2ring.device)
+        )
+
         # precompute for varlen attention
         self.q_cells_lens.data.fill_(1)
         self.q_cells_lens.data[0] = 0
@@ -350,7 +375,8 @@ class Model(torch.nn.Module):
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
         self.targets_channels = targets_channels or [[] for _ in sources_size]
-        # maps stream_name -> [(group_name, ch_indices, has_own_tte), ...] when variable_groups used
+        # maps stream_name -> [(group_name, ch_indices, has_own_tte, ring_size), ...]
+        # ring_size: 1 = default 1-ring KV (Decoder B default), 2 = 2-ring KV (Decoder B1)
         self.stream_groups: dict[str, list] = {}
 
         self.embed_target_coords = None
@@ -419,6 +445,9 @@ class Model(torch.nn.Module):
         self.embed_target_coords = torch.nn.ModuleDict()
         self.target_token_engines = torch.nn.ModuleDict()
         self.pred_heads = torch.nn.ModuleDict()
+        # Decoder A: per-stream group-identity query embeddings (one vector per group).
+        # Populated when decoder_group_query: true; empty dict otherwise (no overhead).
+        self.group_query_embeds = torch.nn.ModuleDict()
 
         # determine stream names once so downstream components use consistent keys
         loss_terms = [
@@ -562,9 +591,19 @@ class Model(torch.nn.Module):
                                 final_activation=final_activation,
                                 stream_name=f"{stream_name}/{group_name}",
                             )
-                            stream_group_meta.append((group_name, ch_indices, has_own_tte))
+                            ring_size = int(group_cfg.get("neighbourhood_ring", 1))
+                            stream_group_meta.append(
+                                (group_name, ch_indices, has_own_tte, ring_size)
+                            )
 
                         self.stream_groups[stream_name] = stream_group_meta
+
+                        # Decoder A: one learnable embedding per group gives the query
+                        # a variable-identity signal so Q and T generate different queries.
+                        if cf.get("decoder_group_query", False):
+                            self.group_query_embeds[stream_name] = torch.nn.Embedding(
+                                len(stream_group_meta), dims_embed[0]
+                            )
                     else:
                         final_activation = si["pred_head"].get("final_activation", "Identity")
                         if is_root():
@@ -721,7 +760,7 @@ class Model(torch.nn.Module):
             if name in self.stream_groups:
                 total += sum(
                     get_num_parameters(mdict[f"{name}/{grp}"])
-                    for grp, _, has_own in self.stream_groups[name]
+                    for grp, _, has_own, *_ in self.stream_groups[name]
                     if has_own and f"{name}/{grp}" in mdict
                 )
             num_params_tte.append(total)
@@ -736,7 +775,7 @@ class Model(torch.nn.Module):
                 num_params_preds.append(
                     sum(
                         get_num_parameters(mdict[f"{name}/{grp}"])
-                        for grp, _, _ in self.stream_groups[name]
+                        for grp, *_ in self.stream_groups[name]
                         if f"{name}/{grp}" in mdict
                     )
                 )
@@ -950,27 +989,93 @@ class Model(torch.nn.Module):
                         # mixed-precision token dtype (bfloat16).
                         pred = None
                         shared_tc_tokens = None
-                        for group_name, ch_indices, has_own_tte in self.stream_groups[stream_name]:
+                        tokens_nbors_2ring = None  # lazy-computed for Decoder B1
+                        tokens_nbors_2ring_lens = None
+                        use_grp_query = stream_name in self.group_query_embeds
+
+                        for i_grp, (group_name, ch_indices, has_own_tte, ring_size) in enumerate(
+                            self.stream_groups[stream_name]
+                        ):
+                            # ── Decoder A: group-identity query ──────────────────────────
+                            # Add a learnable group embedding to the coordinate query so that
+                            # each variable group generates a distinct query direction and
+                            # the cross-attention can route to group-relevant latent features.
+                            if use_grp_query:
+                                grp_idx = torch.tensor([i_grp], device=tc_tokens_init.device)
+                                grp_q = self.group_query_embeds[stream_name](grp_idx)
+                                tc_tokens_query = tc_tokens_init + grp_q  # [N, dim] + [1, dim]
+                            else:
+                                tc_tokens_query = tc_tokens_init
+
+                            # ── Decoder B1: 2-ring KV selection ──────────────────────────
+                            # Groups with neighbourhood_ring: 2 in their stream config get
+                            # a wider spatial context (25 cells vs 9).  Only supported for
+                            # Option-B groups (has_own_tte=True); Option-A groups warn and
+                            # fall back to 1-ring (can't break the shared-TTE cache).
+                            if ring_size == 2 and has_own_tte:
+                                if tokens_nbors_2ring is None:
+                                    idxs_2ring = (
+                                        model_params.hp_nbours_2ring.unsqueeze(0)
+                                        .repeat((batch_size, 1, 1))
+                                        .flatten(0, 1)
+                                    )
+                                    tokens_nbors_2ring = (
+                                        tokens.reshape(s)
+                                        .flatten(0, 1)[idxs_2ring.flatten()]
+                                        .flatten(0, 1)
+                                    )
+                                    tokens_nbors_2ring_lens = torch.full(
+                                        (s[0] * s[1] + 1,),
+                                        fill_value=_RING2_SIZE,
+                                        dtype=torch.int32,
+                                        device=tokens_nbors_2ring.device,
+                                    )
+                                    tokens_nbors_2ring_lens[0] = 0
+                                kv_tokens = tokens_nbors_2ring
+                                kv_lens = tokens_nbors_2ring_lens
+                            else:
+                                if ring_size == 2 and not has_own_tte:
+                                    logger.warning(
+                                        f"Group {group_name!r} in stream {stream_name!r}: "
+                                        "neighbourhood_ring=2 requires Option-B (target_readout "
+                                        "per group). Falling back to 1-ring for this group."
+                                    )
+                                kv_tokens = tokens_nbors
+                                kv_lens = tokens_nbors_lens
+
+                            # ── TTE dispatch ──────────────────────────────────────────────
                             if has_own_tte:
                                 tc_tokens_grp = self.target_token_engines[
                                     f"{stream_name}/{group_name}"
                                 ](
-                                    latent=tokens_nbors,
-                                    output=tc_tokens_init,
-                                    latent_lens=tokens_nbors_lens,
+                                    latent=kv_tokens,
+                                    output=tc_tokens_query,
+                                    latent_lens=kv_lens,
                                     output_lens=tcs_lens,
                                     coordinates=t_coords,
                                 )
                             else:
-                                if shared_tc_tokens is None:
-                                    shared_tc_tokens = self.target_token_engines[stream_name](
-                                        latent=tokens_nbors,
-                                        output=tc_tokens_init,
-                                        latent_lens=tokens_nbors_lens,
+                                # Option A: shared TTE.  Cache is valid only when group query
+                                # is disabled (same query for all groups) and ring_size=1.
+                                if not use_grp_query and ring_size == 1:
+                                    if shared_tc_tokens is None:
+                                        shared_tc_tokens = self.target_token_engines[stream_name](
+                                            latent=kv_tokens,
+                                            output=tc_tokens_query,
+                                            latent_lens=kv_lens,
+                                            output_lens=tcs_lens,
+                                            coordinates=t_coords,
+                                        )
+                                    tc_tokens_grp = shared_tc_tokens
+                                else:
+                                    # Group query active: each group needs its own TTE run.
+                                    tc_tokens_grp = self.target_token_engines[stream_name](
+                                        latent=kv_tokens,
+                                        output=tc_tokens_query,
+                                        latent_lens=kv_lens,
                                         output_lens=tcs_lens,
                                         coordinates=t_coords,
                                     )
-                                tc_tokens_grp = shared_tc_tokens
                             grp_pred = self.pred_heads[f"{stream_name}/{group_name}"](tc_tokens_grp)
                             if pred is None:
                                 pred = torch.zeros(
