@@ -36,6 +36,7 @@ from weathergen.model.engines import (
     LatentState,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
+    TargetPredictionEngineMLP,
 )
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.positional_encoding import (
@@ -48,6 +49,20 @@ from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
 logger = logging.getLogger(__name__)
+
+
+def _pick_tte_cls(decoder_type: str):
+    """Return the TTE class that corresponds to decoder_type.
+
+    Used for both the shared-TTE path and per-group Option-B TTEs so the
+    same decoder_type applies consistently across all routing paths.
+    """
+    if decoder_type == "MLPDecoder":
+        return TargetPredictionEngineMLP
+    if decoder_type == "PerceiverIOCoordConditioning":
+        return TargetPredictionEngineClassic
+    return TargetPredictionEngine
+
 
 type StreamName = str
 
@@ -486,11 +501,7 @@ class Model(torch.nn.Module):
                                 self.targets_num_channels[i_stream],
                             )
                         else:
-                            tte_cls = (
-                                TargetPredictionEngine
-                                if cf.decoder_type != "PerceiverIOCoordConditioning"
-                                else TargetPredictionEngineClassic
-                            )
+                            tte_cls = _pick_tte_cls(cf.decoder_type)
                             tte = tte_cls(
                                 cf,
                                 dims_embed,
@@ -520,8 +531,9 @@ class Model(torch.nn.Module):
                                     "name": f"{stream_name}/{group_name}",
                                     "target_readout": grp_tr,
                                 }
+                                grp_tte_cls = _pick_tte_cls(cf.decoder_type)
                                 self.target_token_engines[f"{stream_name}/{group_name}"] = (
-                                    TargetPredictionEngineClassic(
+                                    grp_tte_cls(
                                         cf,
                                         grp_dims,
                                         dim_coord_in,
