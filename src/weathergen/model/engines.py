@@ -983,6 +983,102 @@ class TargetPredictionEngine(nn.Module):
         return output
 
 
+class TargetPredictionEngineMLP(nn.Module):
+    """
+    Alternative target prediction engine: single cross-attention + deep MLP stack.
+
+    Architecture:
+        output (target query embeddings)
+            │
+            ↓ ONE cross-attention layer  ← gathers from latent 1-ring neighbourhood
+            ↓ MLP block 1                 ← optional coord conditioning via AdaLN
+            ↓ MLP block 2
+            ↓ ...
+            → final output [N_q, dims_embed[-1]]
+
+    Contrast with TargetPredictionEngineClassic which alternates cross-attention
+    and MLP at every layer.  One attention lookup followed by deeper MLP processing
+    is the key architectural difference.
+
+    Enabled via:  decoder_type: MLPDecoder   in the training config.
+
+    Forward signature is identical to TargetPredictionEngineClassic so this class
+    is a drop-in replacement in both the shared-TTE path and the per-group
+    Option-B path (variable_groups with target_readout).
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+    ):
+        super(TargetPredictionEngineMLP, self).__init__()
+        self.name = f"TargetPredictionEngineMLP_{stream_config['name']}"
+
+        self.cf = cf
+        self.dims_embed = dims_embed
+        self.dim_coord_in = dim_coord_in
+        self.tr_dim_head_proj = tr_dim_head_proj
+        self.tr_mlp_hidden_factor = tr_mlp_hidden_factor
+        self.softcap = softcap
+
+        # Single cross-attention layer — gathers latent context per query.
+        # Coord conditioning applied via AdaLN (dim_aux=dim_coord_in).
+        self.cross_attn = MultiCrossAttentionHeadVarlen(
+            dim_embed_q=self.dims_embed[0],
+            dim_embed_kv=self.cf.ae_global_dim_embed,
+            num_heads=stream_config["target_readout"]["num_heads"],
+            dim_head_proj=self.tr_dim_head_proj,
+            with_residual=True,
+            with_qk_lnorm=True,
+            dropout_rate=0.1,
+            with_flash=self.cf.with_flash_attention,
+            norm_type=self.cf.norm_type,
+            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+            softcap=self.softcap,
+            dim_aux=self.dim_coord_in,
+            norm_eps=self.cf.norm_eps,
+            attention_dtype=get_dtype(self.cf.attention_dtype),
+        )
+
+        # Deep MLP stack — one block per dim transition.
+        self.mlp_blocks = torch.nn.ModuleList()
+        for i in range(len(self.dims_embed) - 1):
+            self.mlp_blocks.append(
+                MLP(
+                    self.dims_embed[i],
+                    self.dims_embed[i + 1],
+                    with_residual=True,
+                    hidden_factor=self.tr_mlp_hidden_factor,
+                    dropout_rate=0.1,
+                    norm_type=self.cf.norm_type,
+                    dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
+                    norm_eps=self.cf.mlp_norm_eps,
+                )
+            )
+
+    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+        # Single cross-attention lookup with coord conditioning.
+        x = checkpoint(
+            self.cross_attn,
+            output,
+            latent,
+            output_lens,
+            latent_lens,
+            coordinates,
+            use_reentrant=False,
+        )
+        # Deep MLP stack — each block optionally conditions on coords via AdaLN.
+        for block in self.mlp_blocks:
+            x = checkpoint(block, x, coordinates, use_reentrant=False)
+        return x
+
+
 @dataclasses.dataclass
 class LatentState:
     """
