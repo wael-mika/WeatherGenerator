@@ -38,7 +38,7 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
     TargetPredictionEngineMLP,
 )
-from weathergen.model.layers import MLP, NamedLinear
+from weathergen.model.layers import MLP, NamedLinear, StructuredCoordEmbedding
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
@@ -452,8 +452,19 @@ class Model(torch.nn.Module):
                             norm_eps=self.cf.mlp_norm_eps,
                             name=f"embed_target_coords_{stream_name}",
                         )
+                    elif etc["net"] == "structured":
+                        self.embed_target_coords[stream_name] = StructuredCoordEmbedding(
+                            dim_coord_in=dim_coord_in,
+                            dim_embed=dims_embed[0],
+                            d_group=etc.get("d_group", 64),
+                            dropout_rate=dropout_rate,
+                            name=f"embed_target_coords_{stream_name}",
+                        )
                     else:
-                        assert False
+                        assert False, (
+                            f"Unknown embed_target_coords net '{etc['net']}'. "
+                            "Valid options: 'linear', 'mlp', 'structured'."
+                        )
 
                     if cf.decoder_type == "Linear":
                         tte = BilinearDecoder(
