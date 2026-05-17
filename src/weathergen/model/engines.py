@@ -1102,6 +1102,122 @@ class TargetPredictionEngineMLP(nn.Module):
         return x
 
 
+class TargetPredictionEngineMLPMultiStage(nn.Module):
+    """
+    Multi-stage variant of TargetPredictionEngineMLP.
+
+    Instead of a single cross-attention lookup followed by a deep MLP stack, this decoder
+    splits the MLP stack into K equal stages, each preceded by its own cross-attention lookup
+    into the same latent 1-ring neighbourhood.  The second (and later) lookups allow the
+    decoder to re-attend to the latent after MLP processing, testing whether iterative
+    spatial refinement helps over a single lookup.
+
+    Architecture (num_cross_attn=2, num_layers=4 example):
+        CrossAttn_0 → MLP_0 → MLP_1 → CrossAttn_1 → MLP_2 → MLP_3
+
+    Forward signature is identical to TargetPredictionEngineClassic / TargetPredictionEngineMLP:
+        forward(latent, output, latent_lens, output_lens, coordinates)
+
+    Config consumed (from cf and stream_config):
+        - cf.ae_global_dim_embed       : KV embedding dimension
+        - cf.with_flash_attention      : flash attention toggle
+        - cf.norm_type                 : LayerNorm or RMSNorm
+        - cf.norm_eps, cf.mlp_norm_eps : norm epsilons
+        - cf.pred_mlp_adaln            : enable coord conditioning in MLPs
+        - cf.attention_dtype           : attention dtype (bf16 recommended)
+        - stream_config["target_readout"]["num_layers"]    : total MLP blocks; must be divisible
+                                                             by num_cross_attn
+        - stream_config["target_readout"]["num_heads"]     : attention heads
+        - stream_config["target_readout"]["num_cross_attn"]: number of stages (default: 2)
+    Optional in cf:
+        - cf.qk_norm_type              : qk-lnorm type override (defaults to norm_type)
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+    ):
+        super(TargetPredictionEngineMLPMultiStage, self).__init__()
+        self.name = f"TargetPredictionEngineMLPMultiStage_{stream_config['name']}"
+
+        self.cf = cf
+        self.dims_embed = dims_embed
+        self.dim_coord_in = dim_coord_in
+        self.tr_dim_head_proj = tr_dim_head_proj
+        self.tr_mlp_hidden_factor = tr_mlp_hidden_factor
+        self.softcap = softcap
+
+        num_cross_attn = stream_config["target_readout"].get("num_cross_attn", 2)
+        num_mlp_blocks = len(self.dims_embed) - 1
+        assert num_mlp_blocks % num_cross_attn == 0, (
+            f"num_layers ({num_mlp_blocks}) must be divisible by num_cross_attn ({num_cross_attn})"
+        )
+
+        cross_attn_kwargs = dict(
+            dim_embed_q=self.dims_embed[0],
+            dim_embed_kv=self.cf.ae_global_dim_embed,
+            num_heads=stream_config["target_readout"]["num_heads"],
+            dim_head_proj=self.tr_dim_head_proj,
+            with_residual=True,
+            with_qk_lnorm=True,
+            dropout_rate=0.1,
+            with_flash=self.cf.with_flash_attention,
+            norm_type=self.cf.norm_type,
+            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+            softcap=self.softcap,
+            dim_aux=self.dim_coord_in,
+            norm_eps=self.cf.norm_eps,
+            attention_dtype=get_dtype(self.cf.attention_dtype),
+        )
+        self.cross_attns = torch.nn.ModuleList(
+            [MultiCrossAttentionHeadVarlen(**cross_attn_kwargs) for _ in range(num_cross_attn)]
+        )
+
+        self.mlp_blocks = torch.nn.ModuleList()
+        for i in range(num_mlp_blocks):
+            self.mlp_blocks.append(
+                MLP(
+                    self.dims_embed[i],
+                    self.dims_embed[i + 1],
+                    with_residual=True,
+                    hidden_factor=self.tr_mlp_hidden_factor,
+                    dropout_rate=0.1,
+                    norm_type=self.cf.norm_type,
+                    dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
+                    norm_eps=self.cf.mlp_norm_eps,
+                )
+            )
+
+    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+        """
+        Args:
+            latent       : [total_kv_tokens, ae_global_dim_embed] flattened 1-ring KV tokens.
+            output       : [total_query_tokens, dims_embed[0]] query embeddings (target coords).
+            latent_lens  : [num_groups + 1] per-cell KV lens (typically 9 for 1-ring).
+            output_lens  : [num_groups + 1] per-cell query lens.
+            coordinates  : [total_query_tokens, dim_coord_in] raw coordinates for AdaLN.
+
+        Returns:
+            [total_query_tokens, dims_embed[-1]] decoded per-query embeddings ready for pred_head.
+        """
+        x = output
+        mlps_per_stage = len(self.mlp_blocks) // len(self.cross_attns)
+        for stage_idx, ca in enumerate(self.cross_attns):
+            x = checkpoint(
+                ca, x, latent, output_lens, latent_lens, coordinates, use_reentrant=False
+            )
+            start = stage_idx * mlps_per_stage
+            for mlp in self.mlp_blocks[start : start + mlps_per_stage]:
+                x = checkpoint(mlp, x, coordinates, use_reentrant=False)
+        return x
+
+
 @dataclasses.dataclass
 class LatentState:
     """

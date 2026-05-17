@@ -37,6 +37,7 @@ from weathergen.model.engines import (
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
     TargetPredictionEngineMLP,
+    TargetPredictionEngineMLPMultiStage,
 )
 from weathergen.model.layers import MLP, NamedLinear, StructuredCoordEmbedding
 from weathergen.model.utils import get_num_parameters
@@ -477,6 +478,18 @@ class Model(torch.nn.Module):
                         # New decoder: single cross-attention + deep MLP stack.
                         # See engines.TargetPredictionEngineMLP for architecture rationale.
                         tte = TargetPredictionEngineMLP(
+                            cf,
+                            dims_embed,
+                            dim_coord_in,
+                            tr_dim_head_proj,
+                            tr_mlp_hidden_factor,
+                            softcap,
+                            stream_config=si,
+                        )
+                    elif cf.decoder_type == "MLPDecoderMultiStage":
+                        # Multi-stage: K cross-attention lookups interleaved with MLP blocks.
+                        # See engines.TargetPredictionEngineMLPMultiStage for rationale.
+                        tte = TargetPredictionEngineMLPMultiStage(
                             cf,
                             dims_embed,
                             dim_coord_in,
