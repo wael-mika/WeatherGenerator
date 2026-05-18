@@ -225,6 +225,7 @@ class LocalAssimilationEngine(torch.nn.Module):
                     qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
                     norm_eps=self.cf.norm_eps,
                     attention_dtype=get_dtype(self.cf.attention_dtype),
+                    use_xsa=self.cf.get("use_xsa", False),
                 )
             )
             self.ae_local_blocks.append(
@@ -235,6 +236,7 @@ class LocalAssimilationEngine(torch.nn.Module):
                     dropout_rate=self.cf.ae_local_dropout_rate,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
 
@@ -285,6 +287,7 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
                     dropout_rate=self.cf.ae_adapter_dropout_rate,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
             self.ae_adapter.append(
@@ -344,6 +347,7 @@ class Local2GlobalSumEngine(torch.nn.Module):
                     dropout_rate=cf.ae_adapter_dropout_rate,
                     norm_type=cf.norm_type,
                     norm_eps=cf.mlp_norm_eps,
+                    mlp_type=cf.get("mlp_type", "mlp"),
                 )
             )
 
@@ -410,6 +414,7 @@ class QueryAggregationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         with_2d_rope=self.cf.get("rope_2D", False),
+                        use_xsa=self.cf.get("use_xsa", False),
                     )
                 )
             else:
@@ -427,6 +432,7 @@ class QueryAggregationEngine(torch.nn.Module):
                         qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        use_xsa=self.cf.get("use_xsa", False),
                     )
                 )
             # MLP block
@@ -439,6 +445,7 @@ class QueryAggregationEngine(torch.nn.Module):
                     hidden_factor=self.cf.ae_aggregation_mlp_hidden_factor,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
 
@@ -486,6 +493,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         with_2d_rope=self.cf.get("rope_2D", False),
+                        use_xsa=self.cf.get("use_xsa", False),
                     )
                 )
             else:
@@ -503,6 +511,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
                         with_2d_rope=self.cf.get("rope_2D", False),
+                        use_xsa=self.cf.get("use_xsa", False),
                     )
                 )
             # MLP block
@@ -515,6 +524,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     hidden_factor=self.cf.ae_global_mlp_hidden_factor,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
         if self.cf.get("ae_global_trailing_layer_norm", False):
@@ -573,6 +583,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             with_2d_rope=self.cf.get("rope_2D", False),
+                            use_xsa=self.cf.get("use_xsa", False),
                         )
                     )
                 else:
@@ -591,6 +602,7 @@ class ForecastingEngine(torch.nn.Module):
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
                             with_2d_rope=self.cf.get("rope_2D", False),
+                            use_xsa=self.cf.get("use_xsa", False),
                         )
                     )
                 # Add MLP block
@@ -603,6 +615,7 @@ class ForecastingEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         dim_aux=dim_aux,
                         norm_eps=self.cf.mlp_norm_eps,
+                        mlp_type=self.cf.get("mlp_type", "mlp"),
                     )
                 )
                 # Optionally, add LayerNorm after i-th layer
@@ -758,6 +771,7 @@ class TargetPredictionEngineClassic(nn.Module):
                         dim_aux=self.dim_coord_in,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        use_xsa=self.cf.get("use_xsa", False),
                     )
                 )
 
@@ -772,6 +786,7 @@ class TargetPredictionEngineClassic(nn.Module):
                     norm_type=self.cf.norm_type,
                     dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
 
@@ -855,6 +870,7 @@ class TargetPredictionEngine(nn.Module):
             "dim_aux": self.dim_coord_in,
             "norm_eps": self.cf.norm_eps,
             "attention_dtype": get_dtype(self.cf.attention_dtype),
+            "use_xsa": self.cf.get("use_xsa", False),
         }
         self.tte = nn.ModuleList()
         self.output_in_norm = nn.LayerNorm(self.dims_embed[0])
@@ -878,6 +894,7 @@ class TargetPredictionEngine(nn.Module):
                         with_adanorm=False,
                         with_mlp=False,
                         attention_kwargs=attention_kwargs,
+                        mlp_type=self.cf.get("mlp_type", "mlp"),
                     )
                 )
             elif self.cf.decoder_type == "AdaLayerNormConditioning":
@@ -889,6 +906,7 @@ class TargetPredictionEngine(nn.Module):
                         attention_kwargs=attention_kwargs,
                         with_adanorm=True,
                         dropout_rate=0.1,
+                        mlp_type=self.cf.get("mlp_type", "mlp"),
                     )
                 )
             elif self.cf.decoder_type == "CrossAttentionConditioning":
@@ -903,6 +921,7 @@ class TargetPredictionEngine(nn.Module):
                         with_mlp=True,
                         dropout_rate=0.1,
                         attention_kwargs=attention_kwargs,
+                        mlp_type=self.cf.get("mlp_type", "mlp"),
                     )
                 )
             elif self.cf.decoder_type == "CrossAttentionAdaNormConditioning":
@@ -917,6 +936,7 @@ class TargetPredictionEngine(nn.Module):
                         with_mlp=True,
                         dropout_rate=0.1,
                         attention_kwargs=attention_kwargs,
+                        mlp_type=self.cf.get("mlp_type", "mlp"),
                     )
                 )
             elif self.cf.decoder_type == "PerceiverIOCoordConditioning":
@@ -1058,6 +1078,7 @@ class TargetPredictionEngineMLP(nn.Module):
                     norm_type=self.cf.norm_type,
                     dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
                     norm_eps=self.cf.mlp_norm_eps,
+                    mlp_type=self.cf.get("mlp_type", "mlp"),
                 )
             )
 
@@ -1135,6 +1156,7 @@ class LatentPredictionHeadTransformer(nn.Module):
                     # dim_aux=dim_aux,
                     norm_eps=self.global_cf.norm_eps,
                     attention_dtype=get_dtype(self.global_cf.attention_dtype),
+                    use_xsa=self.global_cf.get("use_xsa", False),
                 )
             )
             # Add MLP block
@@ -1148,6 +1170,7 @@ class LatentPredictionHeadTransformer(nn.Module):
                     norm_type=self.global_cf.norm_type,
                     # dim_aux=dim_aux,
                     norm_eps=self.global_cf.mlp_norm_eps,
+                    mlp_type=self.global_cf.get("mlp_type", "mlp"),
                 )
             )
 

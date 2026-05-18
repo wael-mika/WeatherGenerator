@@ -11,7 +11,7 @@
 import torch
 import torch.nn as nn
 
-from weathergen.model.norms import AdaLayerNorm, RMSNorm
+from weathergen.model.norms import AdaLayerNorm, RMSNorm, SwiGLU
 
 
 class NamedLinear(torch.nn.Module):
@@ -42,6 +42,7 @@ class MLP(torch.nn.Module):
         norm_type="LayerNorm",
         dim_aux=None,
         norm_eps=1e-5,
+        mlp_type: str = "mlp",
         name: str | None = None,
     ):
         """Constructor"""
@@ -55,6 +56,7 @@ class MLP(torch.nn.Module):
 
         self.with_residual = with_residual
         self.with_aux = dim_aux is not None
+        self.mlp_type = mlp_type.lower()
         dim_hidden = int(dim_in * hidden_factor)
 
         self.layers = torch.nn.ModuleList()
@@ -68,14 +70,24 @@ class MLP(torch.nn.Module):
                 else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps)
             )
 
-        self.layers.append(torch.nn.Linear(dim_in, dim_hidden))
-        self.layers.append(nonlin())
-        self.layers.append(torch.nn.Dropout(p=dropout_rate))
-
-        for _ in range(num_layers - 2):
-            self.layers.append(torch.nn.Linear(dim_hidden, dim_hidden))
+        if self.mlp_type == "swiglu":
+            # LLaMA hidden-dim rule: compensate for the doubled linear projection
+            dim_hidden = max(1, int(2 * dim_hidden / 3))
+            self.layers.append(torch.nn.Linear(dim_in, 2 * dim_hidden))
+            self.layers.append(SwiGLU())
+            self.layers.append(torch.nn.Dropout(p=dropout_rate))
+            for _ in range(num_layers - 2):
+                self.layers.append(torch.nn.Linear(dim_hidden, 2 * dim_hidden))
+                self.layers.append(SwiGLU())
+                self.layers.append(torch.nn.Dropout(p=dropout_rate))
+        else:
+            self.layers.append(torch.nn.Linear(dim_in, dim_hidden))
             self.layers.append(nonlin())
             self.layers.append(torch.nn.Dropout(p=dropout_rate))
+            for _ in range(num_layers - 2):
+                self.layers.append(torch.nn.Linear(dim_hidden, dim_hidden))
+                self.layers.append(nonlin())
+                self.layers.append(torch.nn.Dropout(p=dropout_rate))
 
         self.layers.append(torch.nn.Linear(dim_hidden, dim_out))
 

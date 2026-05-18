@@ -25,7 +25,9 @@ class SelfAttentionBlock(nn.Module):
     layer norm with a FFN.
     """
 
-    def __init__(self, dim, dim_aux, with_adanorm, num_heads, dropout_rate, **kwargs):
+    def __init__(
+        self, dim, dim_aux, with_adanorm, num_heads, dropout_rate, mlp_type="mlp", **kwargs
+    ):
         super().__init__()
 
         self.with_adanorm = with_adanorm
@@ -50,6 +52,7 @@ class SelfAttentionBlock(nn.Module):
             dropout_rate=0.1,
             nonlin=approx_gelu,
             with_residual=False,
+            mlp_type=mlp_type,
         )
         if self.with_adanorm:
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
@@ -98,6 +101,7 @@ class CrossAttentionBlock(nn.Module):
         with_mlp,
         num_heads,
         dropout_rate,
+        mlp_type="mlp",
         **kwargs,
     ):
         super().__init__()
@@ -142,6 +146,7 @@ class CrossAttentionBlock(nn.Module):
                 hidden_factor=4,
                 nonlin=approx_gelu,
                 with_residual=False,
+                mlp_type=mlp_type,
             )
             if self.with_adanorm:
                 self.mlp_fn = lambda x, **kwargs: self.mlp(x)
@@ -251,6 +256,7 @@ class OriginalPredictionBlock(nn.Module):
                 norm_type=self.cf.norm_type,
                 dim_aux=(dim_aux if self.cf.pred_mlp_adaln else None),
                 norm_eps=self.cf.mlp_norm_eps,
+                mlp_type=self.cf.get("mlp_type", "mlp"),
             )
         )
 
