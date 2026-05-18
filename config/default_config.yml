@@ -92,6 +92,8 @@ load_chkpt: {}
 
 norm_type: "LayerNorm"
 qk_norm_type: null  # if null, defaults to norm_type
+mlp_type: mlp        # "mlp" (GELU) or "swiglu"
+use_xsa: False       # orthogonalise self-attention output against self-values
 
 #####################################
 
