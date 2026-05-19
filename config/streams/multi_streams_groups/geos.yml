@@ -1,0 +1,360 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERIMENT 1 — Geostationary satellite streams, grouped by physics class.
+#
+# Channel names: `obsvalue_rawbt_<NNN>` = wavelength in tenths of μm
+#   065 → 0.65 μm, 086 → 0.86 μm, 160 → 1.60 μm, 380 → 3.80 μm,
+#   620 → 6.20 μm, 730 → 7.30 μm, 850 → 8.50 μm, 960 → 9.60 μm,
+#   105 → 10.5 μm, 120 → 12.0 μm, 133 → 13.3 μm.
+#
+# Group rates: gentler than ERA5_in (which is 0.12–0.38 keep). WV and CO₂_T
+# channels masked moderately (0.50) to prevent copy from highly-correlated
+# ERA5 t_* / q_*. Window and aux gently (0.65 / 0.75).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+METEOSAT_SEVIRI_IR:
+  type: obs
+  stream_id: 10
+  filenames: ['observations-file-2014-2024-seviri-o256-wegen-v3.zarr']
+  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.5
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 262144
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+
+  variable_groups:
+    # Water vapor sounders: WV062 (upper trop), WV073 (mid trop)
+    geo_wv:
+      variables:
+        - "obsvalue_rawbt_(620|730)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    # Window channels: IR108 (10.5 μm), IR120 (12.0 μm) — skt + split window
+    geo_window:
+      variables:
+        - "obsvalue_rawbt_(105|120)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.65
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    # CO₂ T-sounder: IR134 (13.3 μm) — low-trop T
+    geo_co2_T:
+      variables:
+        - "obsvalue_rawbt_133"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    # Aux: VIS006, VIS008, NIR016, IR039, IR087, IR097 — cloud / O₃ / surface
+    geo_aux:
+      variables:
+        - "obsvalue_rawbt_(065|086|160|380|850|960)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.75
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    _default:
+      masking:
+        strategy: random
+        config:
+          rate: 0.85
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+
+
+GOES_ABI_IR:
+  type: obs
+  stream_id: 11
+  filenames: ['observations-file-2017-2024-abi-goes16-IR-o256-v2.zarr']
+  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.5
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 262144
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+
+  variable_groups:
+    geo_wv:
+      variables:
+        - "obsvalue_rawbt_(620|730)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    geo_window:
+      variables:
+        - "obsvalue_rawbt_(105|120)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.65
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    geo_co2_T:
+      variables:
+        - "obsvalue_rawbt_133"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    # ABI IR has NO VIS bands and NO IR087 cloud-phase here — only IR039 / IR087 / O₃.
+    # The 065/086/160 are not in the IR zarr (they live in *VIS* zarrs).
+    geo_aux:
+      variables:
+        - "obsvalue_rawbt_(380|850|960)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.75
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    _default:
+      masking:
+        strategy: random
+        config:
+          rate: 0.85
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+
+
+HIMAWARI_AHI_IR:
+  type: obs
+  stream_id: 12
+  filenames:
+    - 'observations-file-2015-2022-himawari8-IR-o256-v1.zarr'
+    - 'observations-file-2022-2024-himawari9-IR-o256-v1.zarr'
+  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.5
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 262144
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+
+  variable_groups:
+    geo_wv:
+      variables:
+        - "obsvalue_rawbt_(620|730)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    geo_window:
+      variables:
+        - "obsvalue_rawbt_(105|120)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.65
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    geo_co2_T:
+      variables:
+        - "obsvalue_rawbt_133"
+      masking:
+        strategy: random
+        config:
+          rate: 0.50
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    geo_aux:
+      variables:
+        - "obsvalue_rawbt_(380|850|960)"
+      masking:
+        strategy: random
+        config:
+          rate: 0.75
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+    _default:
+      masking:
+        strategy: random
+        config:
+          rate: 0.85
+          rate_sampling: false
+      pred_head:
+        ens_size: 1
+        num_layers: 1
+
+
+# VIS streams — only 2 channels each (NIR 0.86 μm + SWIR 1.60 μm).
+# No spatial-group structure is added; the inventory shows that visible-band
+# albedo (0.47 / 0.64) is NOT in these zarrs — what's stored is really near-IR
+# + SWIR cloud / cirrus discrimination. Stream-level moderate rate + light
+# channel dropout (channels are already absent at night).
+
+GOES_ABI_VIS:
+  type: obs
+  stream_id: 13
+  filenames: ['observations-file-2017-2024-abi-goes16-VIS-o256-v2.zarr']
+  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  channel_drop_rate: 0.15
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.6                 # 40% masked
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 262144
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+
+
+HIMAWARI_AHI_VIS:
+  type: obs
+  stream_id: 14
+  filenames:
+    - 'observations-file-2015-2022-himawari8-VIS-o256-v1.zarr'
+    - 'observations-file-2022-2024-himawari9-VIS-o256-v1.zarr'
+  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  channel_drop_rate: 0.15
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.6
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 262144
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
