@@ -28,6 +28,7 @@ from weathergen.model.engines import (
     MAX_NUMBER_TOKENS_LOCAL_PER_CELL,
     BilinearDecoder,
     EnsPredictionHead,
+    EnsPredictionHeadAdaLN,
     ForecastingEngine,
     IdentityEngine,
     LatentPredictionHeadIdentity,
@@ -523,15 +524,28 @@ class Model(torch.nn.Module):
                         logger.debug(
                             f"{final_activation} activation of pred head of {si['name']} stream"
                         )
-                    self.pred_heads[stream_name] = EnsPredictionHead(
-                        dims_embed[-1],
-                        self.targets_num_channels[i_stream],
-                        si["pred_head"]["num_layers"],
-                        si["pred_head"]["ens_size"],
-                        norm_type=cf.norm_type,
-                        final_activation=final_activation,
-                        stream_name=stream_name,
-                    )
+                    if si["pred_head"].get("with_coord_adaln", False):
+                        # New: coord-conditioned head. Activated only by explicit opt-in.
+                        self.pred_heads[stream_name] = EnsPredictionHeadAdaLN(
+                            dims_embed[-1],
+                            self.targets_num_channels[i_stream],
+                            self.targets_coords_size[i_stream],
+                            si["pred_head"]["num_layers"],
+                            si["pred_head"]["ens_size"],
+                            norm_type=cf.norm_type,
+                            final_activation=final_activation,
+                            stream_name=stream_name,
+                        )
+                    else:
+                        self.pred_heads[stream_name] = EnsPredictionHead(
+                            dims_embed[-1],
+                            self.targets_num_channels[i_stream],
+                            si["pred_head"]["num_layers"],
+                            si["pred_head"]["ens_size"],
+                            norm_type=cf.norm_type,
+                            final_activation=final_activation,
+                            stream_name=stream_name,
+                        )
 
             # iterate again to setup shared spatial pred heads if specified in config
             for i_stream, si in enumerate(cf.streams):
@@ -577,15 +591,28 @@ class Model(torch.nn.Module):
                         logger.debug(
                             f"{final_activation} activation of pred head of {si['name']} stream"
                         )
-                    self.pred_heads[stream_name] = EnsPredictionHead(
-                        dims_embed[-1],
-                        self.targets_num_channels[i_stream],
-                        si["pred_head"]["num_layers"],
-                        si["pred_head"]["ens_size"],
-                        norm_type=cf.norm_type,
-                        final_activation=final_activation,
-                        stream_name=stream_name,
-                    )
+                    if si["pred_head"].get("with_coord_adaln", False):
+                        # New: coord-conditioned head. Activated only by explicit opt-in.
+                        self.pred_heads[stream_name] = EnsPredictionHeadAdaLN(
+                            dims_embed[-1],
+                            self.targets_num_channels[i_stream],
+                            self.targets_coords_size[i_stream],
+                            si["pred_head"]["num_layers"],
+                            si["pred_head"]["ens_size"],
+                            norm_type=cf.norm_type,
+                            final_activation=final_activation,
+                            stream_name=stream_name,
+                        )
+                    else:
+                        self.pred_heads[stream_name] = EnsPredictionHead(
+                            dims_embed[-1],
+                            self.targets_num_channels[i_stream],
+                            si["pred_head"]["num_layers"],
+                            si["pred_head"]["ens_size"],
+                            norm_type=cf.norm_type,
+                            final_activation=final_activation,
+                            stream_name=stream_name,
+                        )
 
         # Latent heads for losses
         self.latent_heads = nn.ModuleDict()
@@ -881,7 +908,11 @@ class Model(torch.nn.Module):
                     )
 
                     # final prediction head to map back to physical space
-                    pred = self.pred_heads[stream_name](tc_tokens)
+                    ph = self.pred_heads[stream_name]
+                    if isinstance(ph, EnsPredictionHeadAdaLN):
+                        pred = ph(tc_tokens, t_coords)
+                    else:
+                        pred = ph(tc_tokens)
 
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)

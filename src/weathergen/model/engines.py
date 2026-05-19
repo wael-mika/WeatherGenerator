@@ -29,6 +29,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.norms import AdaLayerNorm
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -689,6 +690,65 @@ class EnsPredictionHead(torch.nn.Module):
         preds = torch.stack(preds, 0)
 
         return preds
+
+
+class EnsPredictionHeadAdaLN(torch.nn.Module):
+    """
+    Coord-conditioned variant of EnsPredictionHead.
+
+    Applies AdaLN(dim_embed, dim_coord_in) to the input tokens before the MLP stack,
+    so the per-location physical mapping is coord-aware (e.g. temperature mapping
+    can differ at the pole vs the equator).
+
+    Constructor signature mirrors EnsPredictionHead with one extra arg, dim_coord_in.
+    Forward signature accepts an additional `coords` tensor (raw target coordinates).
+    """
+
+    def __init__(
+        self,
+        dim_embed: int,
+        dim_out: int,
+        dim_coord_in: int,
+        ens_num_layers: int,
+        ens_size: int,
+        stream_name: str,
+        norm_type: str = "LayerNorm",
+        hidden_factor: int = 2,
+        final_activation: None | str = None,
+    ):
+        super().__init__()
+        self.name = f"EnsPredictionHeadAdaLN_{stream_name}"
+
+        dim_internal = dim_embed * hidden_factor
+        enl = ens_num_layers
+
+        # One AdaLN per ensemble member, conditioned on raw coords (dim_coord_in)
+        self.adalns = torch.nn.ModuleList(
+            [AdaLayerNorm(dim_embed, dim_coord_in) for _ in range(ens_size)]
+        )
+
+        # Per-ensemble MLP stack — mirrors EnsPredictionHead's construction
+        self.pred_heads = torch.nn.ModuleList()
+        for _ in range(ens_size):
+            head = torch.nn.ModuleList()
+            head.append(torch.nn.Linear(dim_embed, dim_out if enl == 1 else dim_internal))
+            for i in range(ens_num_layers - 1):
+                head.append(torch.nn.GELU())
+                head.append(
+                    torch.nn.Linear(dim_internal, dim_out if enl - 2 == i else dim_internal)
+                )
+            if final_activation is not None and enl >= 1:
+                head.append(ActivationFactory.get(final_activation))
+            self.pred_heads.append(head)
+
+    def forward(self, toks, coords):
+        preds = []
+        for adaln, pred_head in zip(self.adalns, self.pred_heads, strict=False):
+            cpred = adaln(toks, coords)
+            for block in pred_head:
+                cpred = block(cpred)
+            preds.append(cpred)
+        return torch.stack(preds, 0)
 
 
 class TargetPredictionEngineClassic(nn.Module):
