@@ -1,0 +1,82 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERIMENT 2 — Multi-stream MAE with uniform-rate per stream + aggressive
+#                channel dropout on ERA5_in.
+#
+# Hypothesis: a single random spatial mask per stream is sufficient to break
+# ERA5_in over-reliance IF channel dropout on the encoder is aggressive enough.
+# Channel dropout drops an entire variable across all visible tokens on a
+# fraction of samples — forcing the model to look at the obs streams whenever
+# the locally-correlated ERA5 variable is gone.
+#
+# Per-channel selectivity is not available in code, but the rationale for high
+# `channel_drop_rate` here is that several ERA5_in channels are radiometrically
+# observable from the obs streams (see analysis/multi_stream_physics_map.md §3):
+#   - t_*  is recoverable from IASI CO₂ (idx 16–271) + IR134 (SEVIRI/ABI/AHI 13)
+#   - q_300..700 is recoverable from WV062/WV073/IASI 7.0–7.3 μm
+#   - 2t / skt is recoverable from window-IR 10.5/12.0 μm
+# Channels with no obs proxy (10u, 10v, sp, u/v profile) will be hurt more —
+# that is the cost of using a uniform channel-drop rate.  This experiment
+# tests whether the average benefit outweighs the cost on a per-group basis.
+#
+# Settings vs Experiment 1:
+#   - NO `variable_groups` (single random spatial mask via masking_override)
+#   - rate 0.30 (70% masked spatially) — uniform across all channels
+#   - channel_drop_rate 0.15 (3× Exp 1's 0.05) — the aggressive dropout
+#   - forcing: True kept (only target side is gated by forcing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ERA5_in:
+  type: anemoi
+  filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
+  stream_id: 0
+
+  source_exclude: ['z', 'w_10', 'w_50', 'w_100', 'w_150', 'w_200', 'w_250', 'w_300', 'w_400', 'w_500', 'w_600', 'w_700', 'w_850', 'w_925', 'w_1000', 'skt', 'tcw', 'cp', 'tp', 'q_50', 'q_100']
+  target_exclude: ['z', 'w_10', 'w_50', 'w_100', 'w_150', 'w_200', 'w_250', 'w_300', 'w_400', 'w_500', 'w_600', 'w_700', 'w_850', 'w_925', 'w_1000', 'slor', 'sdor', 'tcw', 'cp', 'tp', 'q_50', 'q_100']
+  geoinfo_channels: ['z', 'lsm', 'slor', 'sdor', 'insolation', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day']
+
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  forcing: True
+  frequency: 06:00:00
+
+  # AGGRESSIVE channel dropout — every variable has a 15% chance of being
+  # zeroed entirely on a given sample.  This is the main differentiator of
+  # this experiment vs the baseline.
+  channel_drop_rate: 0.3
+
+  # Per-stream uniform spatial mask rate (no variable_groups).
+  # 0.30 keep ≈ Profile A average on ERA5_in side (vs current 0.1 baseline
+  # which corresponds to ~90% kept — too lenient).
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.2
+        rate_sampling: false
+
+  token_size: 8
+  tokenize_spacetime: True
+  max_num_targets: -1
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 512
+    num_blocks: 2
+
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+
+  pred_head:
+    ens_size: 1
+    num_layers: 1
