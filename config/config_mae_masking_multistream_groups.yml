@@ -121,7 +121,7 @@ train_logging:
   checkpoint: 250
 
 data_loading:
-  num_workers: 10
+  num_workers: 6
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 
@@ -132,7 +132,7 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 2016-01-01T00:00
+  start_date: 2014-01-01T00:00
   end_date: 2022-12-31T00:00
 
   time_window_step: 01:00:00
