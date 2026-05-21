@@ -242,6 +242,16 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
             for k in params.keys():
                 params_temp[k.replace("module.", "")] = params[k]
             params = params_temp
+        # filter out params with shape mismatches to allow partial loading (e.g. when
+        # the number of channels per group changes between pre-training and fine-tuning)
+        model_sd = model.state_dict()
+        for k, v in params.items():
+            if k in model_sd and model_sd[k].shape != v.shape:
+                logger.warning(
+                    f"Shape mismatch for {k}: checkpoint {tuple(v.shape)} vs model"
+                    f" {tuple(model_sd[k].shape)}, skipping."
+                )
+        params = {k: v for k, v in params.items() if k not in model_sd or model_sd[k].shape == v.shape}
         # load checkpoint
         mkeys, ukeys = model.load_state_dict(params, strict=False)
         model = model.to(device)
