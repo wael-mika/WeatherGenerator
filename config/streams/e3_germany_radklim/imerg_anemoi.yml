@@ -1,0 +1,48 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# E3: IMERG (anemoi, o96, 6 h) as sparse precipitation FORCING during
+# 1-h-window RADKLIM finetuning. At 6 h cadence vs. 1 h window step, most
+# windows have 0 timesteps of this stream — that's expected; the encoder
+# still benefits from the few windows where it is present.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
+  stream_id: 1
+
+  source: ['tp']
+  source_exclude: []
+  target: []
+  target_exclude: []
+
+  forcing: True
+  loss_weight: 0.0
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 16
+  tokenize_spacetime: True
+  max_num_targets: -1
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: "obs_value"
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
