@@ -47,6 +47,7 @@ class DataReaderImerg(DataReaderTimestep):
         tw_handler: TimeWindowHandler,
         filename: Path,
         stream_info: dict,
+        **kwargs,
     ) -> None:
         """
         Construct data reader for IMERG dataset

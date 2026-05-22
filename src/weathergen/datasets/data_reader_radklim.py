@@ -42,6 +42,7 @@ class DataReaderRadklim(DataReaderTimestep):
         tw_handler: TimeWindowHandler,
         filename: Path,
         stream_info: dict,
+        **kwargs,
     ) -> None:
         """
         Construct data reader for RADKLIM dataset

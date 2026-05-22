@@ -26,6 +26,7 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
+from weathergen.datasets.data_reader_icon_dream import DataReaderIconDream
 from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
 from weathergen.datasets.data_reader_radklim import DataReaderRadklim
@@ -230,6 +231,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 case "radklim":
                     dataset = DataReaderRadklim
                     datapath_cfg = cf.get("data_path_radklim", None)
+                case "icon_dream":
+                    dataset = DataReaderIconDream
+                    datapath_cfg = cf.get("data_path_icon_dream", None)
                 case type_name:
                     dataset = get_extra_reader(type_name)
                     if dataset is None:
@@ -605,16 +609,26 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         for timestep_idx in range(self.output_offset, num_output_steps):
             step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
 
-            rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
+            # Skip target collection for forcing-only streams (target_idx is empty
+            # by design); collecting would always return empty and trigger a
+            # misleading warning.
+            stream_has_targets = stream_ds[0].get_target_num_channels() > 0
 
-            if rdata.is_empty():
+            if stream_has_targets:
+                rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
+            else:
+                rdata = None
+
+            if rdata is None or rdata.is_empty():
                 # work around for https://github.com/pytorch/pytorch/issues/158719
                 # create non-empty mean data instead of empty tensor
                 time_win_target = self.time_window_handler.window(step_forecast_dt)
-                logger.warning(
-                    f"Stream fstep {timestep_idx}: "
-                    f"target data is EMPTY, spoofing. time_win={time_win_target}"
-                )
+                if stream_has_targets:
+                    # Target channels exist but reader returned nothing — unexpected.
+                    logger.warning(
+                        f"Stream fstep {timestep_idx}: "
+                        f"target data is EMPTY, spoofing. time_win={time_win_target}"
+                    )
                 rdata = spoof(
                     self.healpix_level,
                     time_win_target.start,
