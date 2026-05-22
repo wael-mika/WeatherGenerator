@@ -1,0 +1,55 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# E3: RADKLIM (DWD 1 km / 1 h radar composite, Germany) — DIAGNOSTIC target.
+# This is the highest-resolution precipitation ground truth in the experiment
+# ladder and the target the Tier-2 checkpoint is finetuned onto.
+
+RADKLIM:
+  type: radklim
+  filenames: ['']            # base dir from data_path_radklim
+  stream_id: 5
+
+  source: []                 # target-only
+  source_exclude: []
+  target: ['RR']
+  target_exclude: []
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "01:00:00"
+  spatial_stride: 4          # reduces 990 k → 247 k pts
+  index_file: config/streams/radklim/radklim_file_index.json
+
+  loss_fcts:
+    "mse":
+      weight: 1.0
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: -1
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 2
