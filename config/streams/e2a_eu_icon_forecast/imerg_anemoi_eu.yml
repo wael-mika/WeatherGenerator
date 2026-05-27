@@ -15,7 +15,7 @@ IMERG_ANEMOI:
   filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
   stream_id: 1
 
-  source: ['tp']
+  source: ['tp_imerg_0']
   source_exclude: []
   target: []
   target_exclude: []

@@ -16,7 +16,7 @@ IMERG_ANEMOI:
   filenames: ['imerg-nasa-grib-o96-1998-2024-6h-v1.zarr']
 
   # Source configuration - use precipitation as input
-  source: ['tp']  # Total precipitation
+  source: ['tp_imerg_0']  # Total precipitation
   source_exclude: []
 
   # Target configuration - empty list = no targets (input-only stream)

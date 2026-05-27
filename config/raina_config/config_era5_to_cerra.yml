@@ -35,8 +35,8 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
-ae_global_num_blocks: 2
+ae_global_dim_embed: 512
+ae_global_num_blocks: 1
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
@@ -131,10 +131,12 @@ training_config:
   start_date: 1985-01-01T00:00
   end_date: 2022-12-31T00:00
 
-  # 12h window: ERA5 (6h) contributes 2 steps (t=0h, t=6h);
-  # CERRA (3h) contributes 4 steps (t=0h, t=3h, t=6h, t=9h).
+  # 6h window: ERA5 (6h) contributes 1 step; CERRA (3h) contributes 2 steps.
+  # Pure spatial + temporal downscaling: 1 coarse ERA5 state → 2 fine CERRA states.
   time_window_step: 06:00:00
-  time_window_len: 12:00:00
+  time_window_len: 06:00:00
+  # -- 2-timestep ERA5 setup (kept for reference; requires token_size>=16 to avoid CUDA gridDim.y overflow) --
+  # time_window_len: 12:00:00  # ERA5 (6h): 2 steps; CERRA (3h): 4 steps per window
 
   learning_rate_scheduling:
     lr_start: 1e-6

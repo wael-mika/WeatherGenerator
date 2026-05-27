@@ -278,6 +278,23 @@ class DataReaderAnemoi(DataReaderTimestep):
             ]
         )
 
+        # Recover explicitly-requested channels dropped by the is_computed_forcing /
+        # is_constant_in_time filters (e.g. 'tp' in the IMERG zarr is tagged as
+        # is_computed_forcing=True and would otherwise be silently ignored).
+        if channels:
+            found_names = {ds0.variables[i] for i in chs_idx}
+            recovered = []
+            for ch in channels:
+                if ch not in found_names and ch not in (channels_exclude or []) and ch in ds0.name_to_index:
+                    recovered.append(ds0.name_to_index[ch])
+                    stream_name = self.stream_info["name"]
+                    _logger.warning(
+                        f"{stream_name}: '{ch}' skipped by is_computed_forcing/is_constant_in_time "
+                        f"filter but was explicitly requested — recovering it."
+                    )
+            if recovered:
+                chs_idx = np.sort(np.append(chs_idx, recovered))
+
         return np.array(chs_idx, dtype=np.int64)
 
     def select_geoinfo_channels(self, ds0: anemoi_datasets) -> NDArray[np.int64]:
