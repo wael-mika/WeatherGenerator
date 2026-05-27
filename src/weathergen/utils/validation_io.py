@@ -55,6 +55,15 @@ def write_output(
             # handle spoof data: do not write since it might corrupt validation (spoofing invisible
             # there)
             if target_aux_out.physical[t_idx][sname]["is_spoof"][0]:
+                # Alternative approach kept for reference in case we need to revert to it:
+                # preds = model_output.get_physical_prediction(t_idx, sname)
+                # if preds is None:
+                #     targets = target_aux_out.physical[t_idx][sname]["target"]
+                #     assert targets[0].shape[0] == 0, (
+                #         "Empty preds but non-empty targets in spoof branch."
+                #     )
+                #     preds = [target.clone().unsqueeze(0) for target in targets]
+                # preds_shape = preds[0].shape
                 targets = target_aux_out.physical[t_idx][sname]["target"]
                 # for-loop to make sure we have a consistent number of samples
                 preds_s = [np.zeros((1, 0, t.shape[1])) for t in targets]

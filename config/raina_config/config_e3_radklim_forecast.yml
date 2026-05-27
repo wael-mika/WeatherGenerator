@@ -58,7 +58,7 @@ pred_mlp_adaln: True
 num_class_tokens: 0
 num_register_tokens: 0
 
-fe_num_blocks: 8
+fe_num_blocks: 8            # production value; fits on DDP 4×A100 with grad checkpointing
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
@@ -73,7 +73,7 @@ rope_2D: False
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
-with_fsdp: True
+with_fsdp: False           # FSDP2 has a sharding bug with this block config; use DDP
 attention_dtype: bf16
 mixed_precision_dtype: bf16
 mlp_norm_eps: 1e-5

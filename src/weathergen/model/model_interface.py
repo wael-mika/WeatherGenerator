@@ -76,6 +76,11 @@ def init_model_and_shard(
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
         )
+        # Required when gradient checkpointing is used with DDP: the recompute
+        # pass in activation checkpointing triggers the same parameters a second
+        # time, which DDP interprets as "variable marked ready twice". Declaring
+        # the graph static tells DDP the computation graph is fixed across steps.
+        model._set_static_graph()
 
     elif with_ddp and with_fsdp:
         # with DDP *and() FSDP

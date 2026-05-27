@@ -25,7 +25,7 @@ RADKLIM:
   loss_weight: 1.0
 
   frequency: "01:00:00"
-  spatial_stride: 4          # reduces 990 k → 247 k pts
+  spatial_stride: 4          # 990 k → ~62 k pts; try stride 2 (247 k) only if memory allows
   index_file: config/streams/radklim/radklim_file_index.json
 
   loss_fcts:
