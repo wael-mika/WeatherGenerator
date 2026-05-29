@@ -48,20 +48,20 @@ evaluation:
 
 default_streams:
   ERA5:
-    channels: ["2t", "10u", "10v", "z_500", "t_850", "u_850", "v_850", "q_850"]
+    channels: ["10u", "10v","u_850", "v_850", "2t", "z_500", "t_850", "q_850"]
     evaluation:
       forecast_step: "all"
       sample: "all"
       ensemble: "all" #supported: "all", "mean", [0,1,2]
-    plotting:
-      sample: [12]
-      forecast_step: "all" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
-      ensemble: [0] #supported: "all", "mean", [0,1,2]
-      plot_maps: false
-      plot_bias: false
-      plot_target: false
-      plot_histograms: false
-      plot_animations: false
+    # plotting:
+    #   sample: [12]
+    #   forecast_step: "all" #supported: "all", [1,2,3,...], "1-50" (equivalent of [1,2,3,...50])
+    #   ensemble: [0] #supported: "all", "mean", [0,1,2]
+    #   plot_maps: true
+    #   plot_bias: true
+    #   plot_target: true
+    #   plot_histograms: true
+    #   plot_animations: true
   # CERRA:
   #   channels: ["z_500", "t_850", "u_850"] #, "blah"]
   #   evaluation:
@@ -77,19 +77,39 @@ default_streams:
   #     plot_animations: true
       
 run_ids :
-  quxle3jf:
+  uvtnw3u8:
     label: "IO decoder"
-    results_base_dir : "./results/quxle3jf"
+    results_base_dir : "./results/uvtnw3u8"
     #NEW: if "streams" is not specified, the default streams are used
 
-  ac1hpgfs:  
-    label: "IO decoder, structured embed_target_coords"
-    results_base_dir : "./results/ac1hpgfs"
+  mfp27zv8:
+    label: "IO decoder - fourier heads"
+    results_base_dir : "./results/mfp27zv8"
     #NEW: if "streams" is not specified, the default streams are used
 
-  yf4y0hw3:
+  n3xe9vud:
+    label: "IO decoder - fourier heads multiband"
+    results_base_dir : "./results/n3xe9vud"
+    #NEW: if "streams" is not specified, the default streams are used
+
+  # # ac1hpgfs:  
+  # #   label: "IO decoder, structured embed_target_coords"
+  # #   results_base_dir : "./results/ac1hpgfs"
+  # #   #NEW: if "streams" is not specified, the default streams are used
+
+  fwbd9ef4:
     label: "multistage MLP"
-    results_base_dir : "./results/yf4y0hw3"
+    results_base_dir : "./results/fwbd9ef4"
+    #NEW: if "streams" is not specified, the default streams are used
+
+  # jyzk3p58:
+  #   label: "multistage MLP - fourier heads"
+  #   results_base_dir : "./results/jyzk3p58"
+  #   #NEW: if "streams" is not specified, the default streams are used
+
+  tuynozm6:
+    label: "multistage MLP - fourier heads multiband"
+    results_base_dir : "./results/tuynozm6"
     #NEW: if "streams" is not specified, the default streams are used
 
   # vfc6xedo:

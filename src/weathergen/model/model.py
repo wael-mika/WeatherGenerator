@@ -28,7 +28,7 @@ from weathergen.model.engines import (
     MAX_NUMBER_TOKENS_LOCAL_PER_CELL,
     BilinearDecoder,
     EnsPredictionHead,
-    EnsPredictionHeadAdaLN,
+    EnsPredictionHeadFourier,
     ForecastingEngine,
     IdentityEngine,
     LatentPredictionHeadIdentity,
@@ -37,10 +37,9 @@ from weathergen.model.engines import (
     LatentState,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
-    TargetPredictionEngineMLP,
     TargetPredictionEngineMLPMultiStage,
 )
-from weathergen.model.layers import MLP, NamedLinear, StructuredCoordEmbedding
+from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
@@ -454,18 +453,10 @@ class Model(torch.nn.Module):
                             norm_eps=self.cf.mlp_norm_eps,
                             name=f"embed_target_coords_{stream_name}",
                         )
-                    elif etc["net"] == "structured":
-                        self.embed_target_coords[stream_name] = StructuredCoordEmbedding(
-                            dim_coord_in=dim_coord_in,
-                            dim_embed=dims_embed[0],
-                            d_group=etc.get("d_group", 64),
-                            dropout_rate=dropout_rate,
-                            name=f"embed_target_coords_{stream_name}",
-                        )
                     else:
                         assert False, (
                             f"Unknown embed_target_coords net '{etc['net']}'. "
-                            "Valid options: 'linear', 'mlp', 'structured'."
+                            "Valid options: 'linear', 'mlp'."
                         )
 
                     if cf.decoder_type == "Linear":
@@ -474,18 +465,6 @@ class Model(torch.nn.Module):
                             dims_embed[0],
                             cf.ae_global_dim_embed,
                             self.targets_num_channels[i_stream],
-                        )
-                    elif cf.decoder_type == "MLPDecoder":
-                        # New decoder: single cross-attention + deep MLP stack.
-                        # See engines.TargetPredictionEngineMLP for architecture rationale.
-                        tte = TargetPredictionEngineMLP(
-                            cf,
-                            dims_embed,
-                            dim_coord_in,
-                            tr_dim_head_proj,
-                            tr_mlp_hidden_factor,
-                            softcap,
-                            stream_config=si,
                         )
                     elif cf.decoder_type == "MLPDecoderMultiStage":
                         # Multi-stage: K cross-attention lookups interleaved with MLP blocks.
@@ -524,24 +503,28 @@ class Model(torch.nn.Module):
                         logger.debug(
                             f"{final_activation} activation of pred head of {si['name']} stream"
                         )
-                    if si["pred_head"].get("with_coord_adaln", False):
-                        # New: coord-conditioned head. Activated only by explicit opt-in.
-                        self.pred_heads[stream_name] = EnsPredictionHeadAdaLN(
+                    ph = si["pred_head"]
+                    if ph.get("with_fourier_features", False):
+                        # Fourier-feature head; freq_scales (default [10.0]) sets band count.
+                        self.pred_heads[stream_name] = EnsPredictionHeadFourier(
                             dims_embed[-1],
                             self.targets_num_channels[i_stream],
                             self.targets_coords_size[i_stream],
-                            si["pred_head"]["num_layers"],
-                            si["pred_head"]["ens_size"],
+                            ph["num_layers"],
+                            ph["ens_size"],
+                            stream_name=stream_name,
+                            num_freqs_per_band=ph.get("num_freqs_per_band", 64),
+                            freq_scales=ph.get("freq_scales", [10.0]),
+                            learnable_freqs=ph.get("learnable_freqs", False),
                             norm_type=cf.norm_type,
                             final_activation=final_activation,
-                            stream_name=stream_name,
                         )
                     else:
                         self.pred_heads[stream_name] = EnsPredictionHead(
                             dims_embed[-1],
                             self.targets_num_channels[i_stream],
-                            si["pred_head"]["num_layers"],
-                            si["pred_head"]["ens_size"],
+                            ph["num_layers"],
+                            ph["ens_size"],
                             norm_type=cf.norm_type,
                             final_activation=final_activation,
                             stream_name=stream_name,
@@ -591,24 +574,28 @@ class Model(torch.nn.Module):
                         logger.debug(
                             f"{final_activation} activation of pred head of {si['name']} stream"
                         )
-                    if si["pred_head"].get("with_coord_adaln", False):
-                        # New: coord-conditioned head. Activated only by explicit opt-in.
-                        self.pred_heads[stream_name] = EnsPredictionHeadAdaLN(
+                    ph = si["pred_head"]
+                    if ph.get("with_fourier_features", False):
+                        # Fourier-feature head; freq_scales (default [10.0]) sets band count.
+                        self.pred_heads[stream_name] = EnsPredictionHeadFourier(
                             dims_embed[-1],
                             self.targets_num_channels[i_stream],
                             self.targets_coords_size[i_stream],
-                            si["pred_head"]["num_layers"],
-                            si["pred_head"]["ens_size"],
+                            ph["num_layers"],
+                            ph["ens_size"],
+                            stream_name=stream_name,
+                            num_freqs_per_band=ph.get("num_freqs_per_band", 64),
+                            freq_scales=ph.get("freq_scales", [10.0]),
+                            learnable_freqs=ph.get("learnable_freqs", False),
                             norm_type=cf.norm_type,
                             final_activation=final_activation,
-                            stream_name=stream_name,
                         )
                     else:
                         self.pred_heads[stream_name] = EnsPredictionHead(
                             dims_embed[-1],
                             self.targets_num_channels[i_stream],
-                            si["pred_head"]["num_layers"],
-                            si["pred_head"]["ens_size"],
+                            ph["num_layers"],
+                            ph["ens_size"],
                             norm_type=cf.norm_type,
                             final_activation=final_activation,
                             stream_name=stream_name,
@@ -909,7 +896,7 @@ class Model(torch.nn.Module):
 
                     # final prediction head to map back to physical space
                     ph = self.pred_heads[stream_name]
-                    if isinstance(ph, EnsPredictionHeadAdaLN):
+                    if isinstance(ph, EnsPredictionHeadFourier):
                         pred = ph(tc_tokens, t_coords)
                     else:
                         pred = ph(tc_tokens)
