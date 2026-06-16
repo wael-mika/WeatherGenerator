@@ -1,0 +1,100 @@
+# Evaluation config for Experiment 2: ERA5 + ICON DREAM → CERRA
+# Run: g4gflxuw (continuation of b8x7gvh6)
+# Model: 48 mini-epochs, 800M params, forecasting 3h/6h/9h/12h ahead over Europe
+#
+# Run inference first:
+#   uv run inference --base-config config/raina_config/config_raina_era5_icon_cerra.yml \
+#     --from-run-id g4gflxuw
+# Then evaluate:
+#   uv run evaluate --eval-config config/evaluate/eval_config_raina_era5_icon_cerra.yml
+
+global_plotting_options:
+  image_format: "png"
+  animation_format: "gif"
+  dpi_val: 150
+  fps: 2
+  n_bins: 60
+  log_x: false
+  log_y: false
+  # Per-variable colour scales for European map plots
+  CERRA:
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0      # mm per 3h; log-scale histograms more useful than maps
+    sf:
+      vmin: 0.0
+      vmax: 5.0
+    2t:
+      vmin: 250
+      vmax: 310       # K
+    10si:
+      vmin: 0.0
+      vmax: 25.0      # m/s
+    10fg:
+      vmin: 0.0
+      vmax: 35.0      # m/s gust
+    tcc:
+      vmin: 0.0
+      vmax: 1.0       # fraction
+    msl:
+      vmin: 96000
+      vmax: 103000    # Pa
+    tciwv:
+      vmin: 0.0
+      vmax: 60.0      # kg/m²
+    ssrd:
+      vmin: 0.0
+      vmax: 3000000   # J/m² per 3h
+    strd:
+      vmin: 0.0
+      vmax: 1500000
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/g4gflxuw/"
+  plot_ensemble: "std"        # show spread as ±1 std — ensemble of 4 members
+  plot_score_maps: true       # spatial RMSE maps are critical for a high-res European model
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    # All 10 channels we trained on — evaluate everything
+    channels: ["tp", "2t", "10si", "10fg", "msl"]
+    evaluation:
+      forecast_step: "all"    # steps 1-4 → +3h, +6h, +9h, +12h
+      sample: "all"
+      ensemble: "all"         # ens_size=4; keep all members for CRPS-style scoring
+    plotting:
+      sample: [0, 1, 2]       # 3 case studies from the validation set
+      forecast_step: [1, 2, 4]  # +3h, +6h, +12h
+      ensemble: "all"    # load all 4 members; plot_ensemble: "std" controls display style
+      plot_maps: true
+      plot_bias: true         # bias maps reveal systematic errors at 5.5 km
+      plot_target: true       # overlay CERRA analysis for visual comparison
+      plot_histograms: true
+      plot_animations: true
+
+  # ERA5 intentionally excluded: it is a training anchor at 6h resolution but inference
+  # runs at 3h steps, so half the ERA5 samples are spoofed (empty). The evaluator cannot
+  # stack arrays of mismatched shapes across real and spoofed samples.
+
+
+run_ids:
+  i4uswn5j:
+    label: "ERA5 + ICON DREAM → CERRA (48 epochs)"
+    color: "steelblue"
+    results_base_dir: "./results/i4uswn5j"
+    # streams: not specified → uses default_streams above

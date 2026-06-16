@@ -378,17 +378,28 @@ class LossPhysical(LossModuleBase):
                     for ch_n, v in ch_dict.items():
                         reordered_losses[stream_name][loss_fct_name][ch_n][output_step] = v
 
-        # Calculate per stream, per lfct average across channels and output_steps
+        # Calculate per stream, per lfct average across channels and output_steps.
+        # NaN values arise from spoofed (empty) targets; skip them so that a stream
+        # which fires on only a fraction of samples (e.g. ERA5 at 6h with 1h windows)
+        # still produces a meaningful diagnostic average rather than propagating NaN.
         for stream_name, lfct_dict in reordered_losses.items():
             for loss_fct_name, ch_dict in lfct_dict.items():
-                reordered_losses[stream_name][loss_fct_name]["avg"] = 0
+                total = 0
                 count = 0
                 for ch_n, output_step_dict in ch_dict.items():
                     if ch_n != "avg":
                         for _, v in output_step_dict.items():
-                            reordered_losses[stream_name][loss_fct_name]["avg"] += v
-                            count += 1
-                reordered_losses[stream_name][loss_fct_name]["avg"] /= count
+                            is_nan = (
+                                isinstance(v, float) and v != v  # float NaN
+                            ) or (
+                                isinstance(v, torch.Tensor) and torch.isnan(v).item()
+                            )
+                            if not is_nan:
+                                total += v
+                                count += 1
+                reordered_losses[stream_name][loss_fct_name]["avg"] = (
+                    total / count if count > 0 else torch.nan
+                )
 
         # Return all computed loss components encapsulated in a ModelLoss dataclass
         return LossValues(loss=loss, losses_all=reordered_losses, stddev_all=None)
