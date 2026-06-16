@@ -3,23 +3,9 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# EXPERIMENT 1 — Geostationary satellite streams, grouped by physics class.
-#
-# Channel names: `obsvalue_rawbt_<NNN>` = wavelength in tenths of μm
-#   065 → 0.65 μm, 086 → 0.86 μm, 160 → 1.60 μm, 380 → 3.80 μm,
-#   620 → 6.20 μm, 730 → 7.30 μm, 850 → 8.50 μm, 960 → 9.60 μm,
-#   105 → 10.5 μm, 120 → 12.0 μm, 133 → 13.3 μm.
-#
-# Group rates: gentler than ERA5_in (which is 0.12–0.20 keep). WV and CO₂_T
-# channels masked moderately (0.50) to prevent copy from highly-correlated
-# ERA5 t_* / q_*. Window and aux gently (0.65 / 0.75).
-#
-# VIS streams (ABI_VIS, AHI_VIS): only NIR 0.86 μm + SWIR 1.60 μm present
-# (0.47/0.64 μm absent). Stream-level rate 0.60 + channel_drop_rate 0.15
-# since channels are absent at night.
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Geostationary satellite streams, grouped by physics class.
+# Identical to multi_streams_groups/geos.yml — same filenames, same per-group
+# masking rates. SEVIRI from 2014, ABI from 2017, AHI from 2015.
 
 METEOSAT_SEVIRI_IR:
   type: obs
@@ -28,7 +14,6 @@ METEOSAT_SEVIRI_IR:
   geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
   loss_weight: 1.0
   location_weight: cosine_latitude
-  # Stream-level rate kept for backward compat; per-group masks override.
   masking_override:
     model_input:
       masking_strategy_config:
@@ -54,7 +39,6 @@ METEOSAT_SEVIRI_IR:
     num_layers: 1
 
   variable_groups:
-    # Water vapor sounders: WV062 (upper trop), WV073 (mid trop)
     geo_wv:
       variables:
         - "obsvalue_rawbt_(620|730)"
@@ -66,7 +50,6 @@ METEOSAT_SEVIRI_IR:
       pred_head:
         ens_size: 1
         num_layers: 1
-    # Window channels: IR108 (10.5 μm), IR120 (12.0 μm) — skt + split window
     geo_window:
       variables:
         - "obsvalue_rawbt_(105|120)"
@@ -78,7 +61,6 @@ METEOSAT_SEVIRI_IR:
       pred_head:
         ens_size: 1
         num_layers: 1
-    # CO₂ T-sounder: IR134 (13.3 μm) — low-trop T
     geo_co2_T:
       variables:
         - "obsvalue_rawbt_133"
@@ -90,7 +72,6 @@ METEOSAT_SEVIRI_IR:
       pred_head:
         ens_size: 1
         num_layers: 1
-    # Aux: VIS006, VIS008, NIR016, IR039, IR087, IR097 — cloud / O₃ / surface
     geo_aux:
       variables:
         - "obsvalue_rawbt_(065|086|160|380|850|960)"
@@ -178,7 +159,7 @@ GOES_ABI_IR:
       pred_head:
         ens_size: 1
         num_layers: 1
-    # ABI IR has NO 065/086/160 (those live in VIS zarr) — only IR039/IR087/O₃.
+    # ABI IR has NO 065/086/160 (those live in VIS zarr).
     geo_aux:
       variables:
         - "obsvalue_rawbt_(380|850|960)"
@@ -290,8 +271,7 @@ HIMAWARI_AHI_IR:
         num_layers: 1
 
 
-# VIS streams — only NIR 0.86 μm + SWIR 1.60 μm (visible-band 0.47/0.64 absent).
-# No per-group structure; stream-level rate + channel_drop for night-absence.
+# VIS streams — NIR 0.86 μm + SWIR 1.60 μm only; stream-level rate + channel_drop.
 GOES_ABI_VIS:
   type: obs
   stream_id: 13

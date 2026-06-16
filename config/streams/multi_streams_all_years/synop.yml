@@ -1,0 +1,51 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Surface conventional observations (SYNOP) — new stream in the all-years setup.
+#
+# Data source: develop-ssl pretrain_multi_data_all_years/synop.yml.
+# Two zarr files: bulk 1979-2022 + 2023 held-out set.
+# Coverage is global land stations (lat 60S–70N, LSM > 0.9, alt < 1 km).
+#
+# Masking: kept mostly visible (rate 0.1 = 90% kept) — SYNOP provides precise
+# surface measurements that are a clean reconstruction target for ERA5 2t/10u/10v.
+#
+# Note: develop-ssl uses `geoinfos: ['reportype', 'stalt', 'lsm']`. Our obs
+# reader uses `geoinfo_channels` — adapted accordingly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SurfaceCombined:
+  type: obs
+  stream_id: 2
+  filenames:
+    - 'observations-ea-ofb-0001-1979-2022-combined-surface-v5-fixed-land-spatial80-min1km-lat60S70N-lsm09-min10.zarr'
+    - 'observations-ea-ofb-0001-2023-combined-surface-v5-fixed-land-heldout20-min1km-lat60S70N-lsm09-min10.zarr'
+  geoinfo_channels: ['reportype', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'stalt', 'lsm']
+  loss_weight: 0.5
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 0.1   # 90% visible — SYNOP is a reliable ground-truth anchor
+        rate_sampling: false
+  token_size: 64
+  tokenize_spacetime: False
+  max_num_targets: -1
+  forcing: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 2
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1

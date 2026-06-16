@@ -3,19 +3,9 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# EXPERIMENT 1 — IASI radiances (METOP A/B/C), grouped by physics class.
-#
-# Stream content from analysis/multi_stream_channel_inventory.md:
-#   18 channels total = 9 CO₂ T-sounding + 4 H₂O WV + 3 window + 1 SW-IR + 1 AVHRR VIS.
-#   IASI channel index encoding: wavenumber_cm-1 = 645 + 0.25 × idx.
-#
-# Group keep rates: obs streams are kept MORE visible than ERA5_in, so the
-# model has a usable alternative. CO₂_T and H₂O_WV groups are masked moderately
-# (rate 0.50) because they correlate strongly with ERA5 t_* / q_* — if left
-# fully visible the model could short-circuit to them when ERA5_in is masked.
-# Window and SW-IR/VIS are masked gently (0.75 / 0.70).
-# ─────────────────────────────────────────────────────────────────────────────
+# IASI radiances (METOP A/B/C), grouped by physics class.
+# Identical to multi_streams_groups/avhrr.yml — same filenames, same per-group
+# masking rates. Coverage: MetOp-A 2007–2021, MetOp-B 2013–2023, MetOp-C 2019–2023.
 
 METOP_ABC_AVHRR_IASI:
   type: obs
@@ -54,49 +44,42 @@ METOP_ABC_AVHRR_IASI:
 
   variable_groups:
 
-    # CO₂ ν₂ band — temperature sounding (strat → near-surface)
-    # IASI idx 16, 63, 138, 170, 185, 224, 249, 271, 445.
     iasi_co2_T:
       variables:
         - "obsvalue_rawbt_(16|63|138|170|185|224|249|271|445)"
       masking:
         strategy: random
         config:
-          rate: 0.50          # 50% masked — strong T proxy, prevent copy
+          rate: 0.50
           rate_sampling: false
       pred_head:
         ens_size: 1
         num_layers: 1
 
-    # H₂O ν₂ band — upper-tropospheric humidity sounding
-    # IASI idx 2907, 2991, 3093, 3160 (~6.97–7.29 μm).
     iasi_h2o_WV:
       variables:
         - "obsvalue_rawbt_(2907|2991|3093|3160)"
       masking:
         strategy: random
         config:
-          rate: 0.50          # 50% masked — strong q proxy, prevent copy
+          rate: 0.50
           rate_sampling: false
       pred_head:
         ens_size: 1
         num_layers: 1
 
-    # Atmospheric window — skt anchor under clear-sky / cloud-screened cases.
-    # IASI idx 756, 867, 921 (~11.4–12.0 μm).
     iasi_window:
       variables:
         - "obsvalue_rawbt_(756|867|921)"
       masking:
         strategy: random
         config:
-          rate: 0.75          # 25% masked — gentle, low information density
+          rate: 0.75
           rate_sampling: false
       pred_head:
         ens_size: 1
         num_layers: 1
 
-    # SW-IR + co-located AVHRR VIS — cloud / surface context.
     iasi_swir_vis:
       variables:
         - "obsvalue_rawbt_5383"
@@ -104,13 +87,12 @@ METOP_ABC_AVHRR_IASI:
       masking:
         strategy: random
         config:
-          rate: 0.70          # 30% masked — gentle, partial day-only signal
+          rate: 0.70
           rate_sampling: false
       pred_head:
         ens_size: 1
         num_layers: 1
 
-    # Catch-all for any channels that don't match the patterns above.
     _default:
       masking:
         strategy: random

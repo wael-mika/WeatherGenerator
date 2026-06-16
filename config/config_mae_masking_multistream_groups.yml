@@ -121,7 +121,7 @@ train_logging:
   checkpoint: 250
 
 data_loading:
-  num_workers: 6
+  num_workers: 10
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 
@@ -165,14 +165,15 @@ training_config:
       loss_fcts:
         mse: {}
 
-  # Mode A is active: each stream YAML defines its own per-group masks via
-  # `variable_groups.<g>.masking`.  The block below is only used for loss
-  # correspondence mapping — its rate / strategy is overridden per stream.
+  # Mode A is active: per-stream masking_override and per-group variable_groups
+  # masking take precedence over the top-level strategy below. This block is
+  # only the fallback for streams/groups without an explicit override.
   model_input:
     source_masking:
-      masking_strategy: "random"
+      masking_strategy: "healpix"
       masking_strategy_config:
         rate: 0.7
+        hl_mask: 2
         rate_sampling: False
 
   forecast:

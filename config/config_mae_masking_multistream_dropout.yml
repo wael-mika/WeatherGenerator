@@ -133,7 +133,7 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 2016-01-01T00:00
+  start_date: 2014-01-01T00:00
   end_date: 2022-12-31T00:00
 
   time_window_step: 01:00:00
@@ -167,12 +167,13 @@ training_config:
         mse: {}
 
   # Stream-level masking_override blocks in each stream YAML set the per-stream
-  # rates.  This top-level entry is the default before overrides apply.
+  # rates. This top-level entry is the fallback before overrides apply.
   model_input:
     source_masking:
-      masking_strategy: "random"
+      masking_strategy: "healpix"
       masking_strategy_config:
-        rate: 0.5
+        rate: 0.7
+        hl_mask: 2
         rate_sampling: False
 
   forecast:

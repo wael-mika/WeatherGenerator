@@ -31,8 +31,8 @@
 
 ERA5_in:
   type: anemoi
-  filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr']
-  # filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
+  # filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr']
+  filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
   stream_id: 0
 
   # Channels (from analysis/multi_stream_channel_inventory.md):
@@ -107,14 +107,18 @@ ERA5_in:
         num_layers: 1
         final_activation: Identity
 
-    # GROUP 2 — dynamics: u_*, v_50..400, 2d
-    # Winds are radiometrically UNobserved (no AMVs in this dataset). Model
-    # must reconstruct via hydrostatic / QG coupling to T, z, msl.
+    # GROUP 2 — dynamics: u_*, v_50..400, 10u, 10v, 2d
+    # Winds (including surface 10u/10v) are radiometrically UNobserved — no
+    # AMVs in this dataset. Grouped together so the model must reconstruct all
+    # wind levels via hydrostatic / QG coupling to T, z, msl. (V6 insight:
+    # unified wind group at 0.20 improves all wind channels without z_500 cost.)
     dynamics:
       variables:
         - "u_\\d+"
         - "v_(50|100|150|200|250|300|400)"
         - "2d"
+        - "10u"
+        - "10v"
       masking:
         strategy: random
         config:
@@ -125,15 +129,13 @@ ERA5_in:
         num_layers: 1
         final_activation: Identity
 
-    # GROUP 3 — boundary: v_700..1000, 10u, 10v, 2t, sp, skt
+    # GROUP 3 — boundary: v_700..1000, 2t, sp, skt
     # skt is source-excluded above but listed here so the target-side group
     # head is the right one. Window IR (10.5 / 12.0 μm) gives strong proxy
-    # for 2t / skt; 10u / 10v / sp have no radiometric proxy.
+    # for 2t / skt. 10u/10v moved to dynamics group (no radiometric proxy).
     boundary:
       variables:
         - "v_(700|850|925|1000)"
-        - "10u"
-        - "10v"
         - "2t"
         - "sp"
         - "skt"

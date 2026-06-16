@@ -3,8 +3,8 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# Finetuning config for Experiment 1 (multi-stream grouped masking).
-# Use with --run_id <pretrain_run_id> from config_mae_masking_multistream_groups.yml.
+# Finetuning config for Experiment 2 (multi-stream uniform dropout).
+# Use with --run_id <pretrain_run_id> from config_mae_masking_multistream_dropout.yml.
 # streams_directory is inherited from the pretrain run — do not set it here.
 #
 # Freeze strategy (validated as best by §5 analysis — ERA5 frozen wins):

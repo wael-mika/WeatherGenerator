@@ -1,0 +1,243 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# MTM (Masked Token Modeling) — multi-stream all-years, JEPA-comparable.
+#
+# Architecture is an EXACT MATCH to config_jepa_multi_data_all_years.yml
+# (develop-ssl branch), minus the two JEPA-only keys that don't exist on this
+# branch: `with_step_conditioning` and `noise_pre_predictor_std`.
+# All other model parameters (rope_2D, swiglu, xsa, RMSNorm, register_tokens,
+# ae dimensions) are identical — so the MTM vs JEPA comparison is a clean
+# single-variable experiment (learning paradigm only).
+#
+# Differences from the JEPA config that are intentional for MTM:
+#   - training_mode: ["masking"] not ["student_teacher"]
+#   - losses: LossPhysical/mse not LossLatentSSLStudentTeacher
+#   - model_input: healpix source masking (not JEPA random/cropping pair)
+#   - ERA5_in + ERA5_out two-stream design (MAE needs pixel-level targets;
+#     JEPA uses a single stream because its loss is latent-based)
+#   - with_fsdp: True (cluster requirement; JEPA uses False)
+#
+# Stream structure: config/streams/multi_streams_all_years/
+#   ERA5_in  (id 0)  — v3 zarr, Profile A grouped masking, channel_drop 0.10
+#   ERA5     (id 1)  — v3 zarr, diagnostic target, rate 1.0
+#   SYNOP    (id 2)  — surface obs 1979-2023, rate 0.10 (90% visible)
+#   SEVIRI   (id 10) — IR, 4 per-group masks
+#   ABI_IR   (id 11) — IR, 4 per-group masks
+#   AHI_IR   (id 12) — IR, 4 per-group masks
+#   ABI_VIS  (id 13) — rate 0.60 + channel_drop 0.15
+#   AHI_VIS  (id 14) — rate 0.60 + channel_drop 0.15
+#   IASI     (id 20) — 4 per-group masks
+#
+# Training compute: 32 mini-epochs × 8192 samples = 262,144 total
+#   (JEPA uses 16 × 8192 = 131,072; 2× gives MTM adequate convergence margin)
+# Date range: 1980-2022 (matches JEPA; ERA5_in v3 zarr covers 1979-2024).
+#   Geo streams (SEVIRI 2014+, ABI 2017+) are absent pre-2014 — that's OK,
+#   the sampler handles per-stream availability gracefully.
+#
+# Usage:
+#   uv run train --config config/config_mae_masking_multistream_all_years.yml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Architecture (JEPA-identical) ───────────────────────────────────────────
+
+embed_orientation: "channels"
+embed_unembed_mode: "block"       # JEPA: "block"  (our other configs use "full")
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024          # JEPA: 1024  (our other configs use 2048)
+ae_local_num_blocks: 4
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16          # JEPA: 16  (our other configs use 20)
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 5           # JEPA: 5  (our other configs use 4)
+ae_global_num_heads: 16           # JEPA: 16  (our other configs use 32)
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 4    # JEPA: 4  (our other configs use 2)
+ae_global_trailing_layer_norm: True  # JEPA: True  (our other configs: False)
+
+ae_aggregation_num_blocks: 5      # JEPA: 5  (our other configs use 4)
+ae_aggregation_num_heads: 16      # JEPA: 16  (our other configs use 32)
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 4  # JEPA: 4  (our other configs use 2)
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+num_class_tokens: 0
+num_register_tokens: 64           # JEPA: 64  (our other configs use 0)
+
+fe_num_blocks: 6                  # JEPA: 6  (our other configs use 16)
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 0.0   # JEPA: 0.0  (our other configs use 1e-4)
+forecast_att_dense_rate: 1.0
+
+healpix_level: 5
+rope_2D: True                     # JEPA: True  (our other configs use False)
+
+mlp_type: "swiglu"                # JEPA: "swiglu"  (our other configs: not set → "mlp")
+use_xsa: True                     # JEPA: True  (our other configs: not set)
+qk_norm_type: "RMSNorm"           # JEPA: "RMSNorm"  (our other configs: not set)
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: True                   # JEPA uses False; we keep True for cluster FSDP
+ddp_find_unused_parameters: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+# ── Data ────────────────────────────────────────────────────────────────────
+
+streams_directory: "./config/streams/multi_streams_all_years/"
+streams: ???
+
+zarr_store: "zip"
+
+# ── General ─────────────────────────────────────────────────────────────────
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "mtm_multistream_all_years_jepa_arch"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 50                    # JEPA: 50
+  metrics: 20
+  checkpoint: 500                 # JEPA: 500
+
+data_loading:
+  num_workers: 6                  # JEPA: 6
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+
+# ── Training ─────────────────────────────────────────────────────────────────
+
+training_config:
+  training_mode: ["masking"]
+
+  num_mini_epochs: 32             # 2× JEPA's 16; gives MTM adequate convergence margin
+  samples_per_mini_epoch: 8192   # JEPA: 8192
+  shuffle: True
+
+  start_date: 1980-01-01T00:00   # JEPA: 1980; v3 zarr covers 1979-2024
+  end_date: 2022-12-31T00:00
+
+  time_window_step: 01:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4                  # JEPA: 1e-4  (our other configs use 5e-5)
+    lr_final_decay: 1e-6
+    lr_final: 0.0
+    num_steps_warmup: 512         # JEPA: 512
+    num_steps_cooldown: 1024      # JEPA: 1024
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 0.25               # JEPA: 0.25  (our other configs use 1.0)
+    weight_decay: 0.05            # JEPA: 0.05  (our other configs use 0.1)
+    log_grad_norms: False
+    adamw:
+      beta1: 0.9875               # JEPA: 0.9875  (our other configs use 0.98125)
+      beta2: 0.994                # JEPA: 0.994   (our other configs use 0.9875)
+      eps: 2e-08
+
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  # Per-stream masking_override and per-group variable_groups masking take
+  # precedence. This top-level healpix entry is the fallback only.
+  model_input:
+    source_masking:
+      masking_strategy: "healpix"
+      masking_strategy_config:
+        rate: 0.7
+        hl_mask: 2
+        rate_sampling: False
+
+  forecast:
+    time_step: 06:00:00
+    offset: 0
+    num_steps: 0
+    policy: "fixed"
+
+
+# ── Validation ───────────────────────────────────────────────────────────────
+
+validation_config:
+  samples_per_mini_epoch: 256
+  shuffle: False
+
+  start_date: 2023-10-01T00:00
+  end_date: 2023-12-31T00:00
+
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+
+  output:
+    num_samples: 0
+    normalized_samples: False
+    streams: null
+
+  validate_before_training: False
+
+
+wgtags:
+  org: null
+  issue: null
+  exp: "mtm_multistream_all_years_jepa_arch"
+  grid: null
