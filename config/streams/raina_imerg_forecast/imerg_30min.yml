@@ -1,0 +1,64 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Exp 1 (IMERG hourly forecast): IMERG native 30min as DIAGNOSTIC precipitation target.
+# Output-only stream — never fed back as model input. The model predicts IMERG at every
+# 1h forecast step; each step covers ~2 native 30min IMERG snapshots within the 1h window.
+#
+# Spatial domain: Europe [35N–70N, 10W–40E] — ~325K grid points (vs 6.48M global).
+# max_num_targets: 30000 further subsamples per step to fit 4×A100 memory budget.
+# ens_size: 4 for probabilistic spread; kernel_crps (fair=false) + mse losses.
+
+IMERG:
+  type: imerg
+  filenames: ['raina-imerg-nasa-0p1-1998-2025-30m-v1.zarr']
+  stream_id: 2
+
+  source: []
+  source_exclude: []
+  target: ['precipitation']
+  target_exclude: []
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "00:30:00"
+
+  spatial_bbox: [35.0, 70.0, -10.0, 40.0]  # Europe — ~325K points
+  spatial_stride: 1
+
+  loss_fcts:
+    "kernel_crps":
+      weight: 0.5
+      args:
+        fair: false
+    "mse":
+      weight: 0.5
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 1024
+  tokenize_spacetime: True
+  max_num_targets: 30000
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 4
+    num_layers: 2
