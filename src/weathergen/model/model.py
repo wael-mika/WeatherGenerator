@@ -39,11 +39,6 @@ from weathergen.model.engines import (
     TargetPredictionEngineMLP,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.positional_encoding import (
-    build_spherical_rope_coeff_tensors,
-    get_rope_mode,
-    get_rope_spherical_band,
-)
 from weathergen.model.utils import _resolve_variable_groups, get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
@@ -385,6 +380,7 @@ class Model(torch.nn.Module):
         self.pred_heads = None
         self.q_cells: torch.Tensor | None = None
         self.streams: dict[str, typing.Any] = cf.streams
+        self.stream_names: list[str] = list(cf.streams.keys())
         self.target_token_engines = None
 
         assert cf.get("forecast", {}).get("att_dense_rate", 1.0) == 1.0, (

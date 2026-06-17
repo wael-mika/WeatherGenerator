@@ -92,24 +92,39 @@ class DataReaderObs(DataReaderBase):
         # geoinfo channels
         sname = stream_info["name"]
         if stream_info.get("geoinfo_channels") is not None:
+            requested_geoinfos = stream_info.get("geoinfo_channels")
             self.geoinfo_idx, self.geoinfo_channels = [], []
-            for c in stream_info.get("geoinfo_channels"):
+            # Tracks which output column index each real zarr column maps to.
+            # Columns missing from the zarr are zero-filled so all readers for the
+            # same stream produce the same geoinfo width (required by combine()).
+            self._geoinfo_real_out_pos: list[int] = []
+            for i, c in enumerate(requested_geoinfos):
                 if c not in self.colnames:
                     _logger.warning(f"{sname} : geoinfo {c} specified in config but not present.")
                 else:
+                    self._geoinfo_real_out_pos.append(i)
                     self.geoinfo_idx.append(self.colnames.index(c))
                     self.geoinfo_channels.append(c)
+            self._geoinfo_out_size = len(requested_geoinfos)
         else:
             self.geoinfo_idx = list(range(self.coords_idx[-1] + 1, data_idx[0]))
             self.geoinfo_channels = [self.colnames[i] for i in self.geoinfo_idx]
+            self._geoinfo_real_out_pos = list(range(len(self.geoinfo_idx)))
+            self._geoinfo_out_size = len(self.geoinfo_idx)
         _logger.info(f"{stream_info['name']} geoinfos : {self.geoinfo_channels}")
 
         # load additional properties (mean, var)
         self._load_properties()
         self.mean = np.array(self.properties["means"])  # [data_idx]
         self.stdev = np.sqrt(np.array(self.properties["vars"]))  # [data_idx])
-        self.mean_geoinfo = np.array(self.properties["means"])[self.geoinfo_idx]
-        self.stdev_geoinfo = np.sqrt(np.array(self.properties["vars"])[self.geoinfo_idx])
+        # Build full-width mean/stdev arrays; missing columns get 0/1 so normalisation
+        # produces 0 for those positions, which is a safe neutral value.
+        means_real = np.array(self.properties["means"])[self.geoinfo_idx]
+        stdevs_real = np.sqrt(np.array(self.properties["vars"])[self.geoinfo_idx])
+        self.mean_geoinfo = np.zeros(self._geoinfo_out_size, dtype=np.float32)
+        self.stdev_geoinfo = np.ones(self._geoinfo_out_size, dtype=np.float32)
+        self.mean_geoinfo[self._geoinfo_real_out_pos] = means_real
+        self.stdev_geoinfo[self._geoinfo_real_out_pos] = stdevs_real
 
         # Create index for samples
         self._setup_sample_index()
@@ -260,23 +275,24 @@ class DataReaderObs(DataReaderBase):
 
         if len(channels_idx) == 0:
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=len(channels_idx), num_geo_fields=self._geoinfo_out_size
             )
 
         if idx >= len(self.indices_start) or idx >= len(self.indices_end):
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=len(channels_idx), num_geo_fields=self._geoinfo_out_size
             )
 
         start_row = self.indices_start[idx]
         end_row = self.indices_end[idx]
 
         coords = self.data.oindex[start_row:end_row, self.coords_idx]
-        geoinfos = (
-            self.data.oindex[start_row:end_row, self.geoinfo_idx]
-            if len(self.geoinfo_idx) > 0
-            else np.zeros((coords.shape[0], 0), np.float32)
-        )
+        n_pts = coords.shape[0]
+        geoinfos = np.zeros((n_pts, self._geoinfo_out_size), dtype=np.float32)
+        if len(self.geoinfo_idx) > 0:
+            geoinfos[:, self._geoinfo_real_out_pos] = self.data.oindex[
+                start_row:end_row, self.geoinfo_idx
+            ]
 
         data = self.data.oindex[start_row:end_row, channels_idx]
         datetimes = self.dt[start_row:end_row][:, 0]

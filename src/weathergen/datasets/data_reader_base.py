@@ -480,7 +480,7 @@ class DataReaderBase(metaclass=ABCMeta):
         -------
         size of geoinfos
         """
-        return len(self.geoinfo_idx)
+        return getattr(self, "_geoinfo_out_size", len(self.geoinfo_idx))
 
     def parse_target_channel_weights(
         self,
@@ -612,8 +612,9 @@ class DataReaderBase(metaclass=ABCMeta):
         Normalized geoinfo
         """
 
-        assert geoinfos.shape[-1] == len(self.geoinfo_idx), "incorrect number of geoinfo channels"
-        for i, _ in enumerate(self.geoinfo_idx):
+        n_geo = getattr(self, "_geoinfo_out_size", len(self.geoinfo_idx))
+        assert geoinfos.shape[-1] == n_geo, "incorrect number of geoinfo channels"
+        for i in range(n_geo):
             # for constant fields, just center the data (resulting in 0s after subtracting mean)
             stdev = 1.0 if np.isclose(self.stdev_geoinfo[i], 0) else self.stdev_geoinfo[i]
             geoinfos[..., i] = (geoinfos[..., i] - self.mean_geoinfo[i]) / stdev
