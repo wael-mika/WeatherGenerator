@@ -122,7 +122,7 @@ train_logging:
   checkpoint: 250
 
 data_loading:
-  num_workers: 10
+  num_workers: 6
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 
