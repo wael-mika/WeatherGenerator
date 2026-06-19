@@ -31,10 +31,28 @@ IMERG_ANEMOI:
   # Stream-specific loss functions — override the global loss_fcts for IMERG only.
   # ERA5 continues to use global loss_fcts (mse only).
 
-  # Option 1: mse_ens loss with 1.0 weight
+  # Stage 1a (distribution-first): quantile-regression head. Interpret the ens_size=16 heads as
+  # conditional quantiles tau_k=(k+0.5)/16 and train with the pinball loss; monotone=true sorts
+  # the members so quantiles do not cross. Formalises the dry->wet member spread measured by the
+  # oracle audit (c2lonbt6) and yields a valid CRPS. ERA5 keeps the global mse.
+  # See docs/decoder_assessment.md §6 and the plan ok-now-i-want-woolly-newell.md.
   loss_fcts:
-    "mse_ens":
+    "quantile_pinball":
       weight: 1.0
+      args:
+        monotone: true
+
+  # Stage 1b arm (parallel; enable instead of the above to compare): per-point epsilon-WTA.
+  # loss_fcts:
+  #   "mse_wta":
+  #     weight: 1.0
+  #     args:
+  #       eps: 0.05
+
+  # Baseline (pre-Stage-1a): mean-of-per-member MSE
+  # loss_fcts:
+  #   "mse_ens":
+  #     weight: 1.0
 
   # # Option 2: kernel_crps with fair to false with 1.0 weight
   # loss_fcts:

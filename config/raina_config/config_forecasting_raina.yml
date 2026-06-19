@@ -173,6 +173,25 @@ training_config:
         type: LossPhysical,
         loss_fcts: { "mse": { }, },
         },
+    # Structure-function (variogram) loss — grid-free spectral-style sharpness term
+    # (docs/decoder_assessment.md §7). Additive to the physical loss; module-level `weight`
+    # is applied by the LossCalculator. Best applied to a FINE stream (CERRA tp 5.5km /
+    # native IMERG): set target_stream + bin_edges_km to straddle that stream's scales.
+    # On the coarse IMERG_ANEMOI (~1°≈111km) use larger bins, e.g. [100, 200, 400, 800].
+    # "structure": {
+    #     type: LossStructureFunction,
+    #     weight: 0.1,
+    #     target_and_aux_calc: Physical,
+    #     loss_fcts: {
+    #       "struct": {
+    #         target_stream: IMERG_ANEMOI,
+    #         num_pairs: 8192,
+    #         bin_edges_km: [100, 200, 400, 800],
+    #         increment_power: 2.0,
+    #         reduce: mean,
+    #         },
+    #       },
+    #     },
     }
   
   model_input: {

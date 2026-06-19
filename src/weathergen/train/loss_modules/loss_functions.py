@@ -113,8 +113,8 @@ def student_t_nll(
     t = torch.where(mask_nan, target, torch.zeros_like(target))
     p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
 
-    mu = p.mean(0)                      # [num_data_points, num_channels]
-    sigma = p.std(0).clamp(min=eps)     # [num_data_points, num_channels]
+    mu = p.mean(0)  # [num_data_points, num_channels]
+    sigma = p.std(0).clamp(min=eps)  # [num_data_points, num_channels]
 
     z = (t - mu) / sigma
     nll = (nu + 1) / 2 * torch.log(1 + z.pow(2) / nu) + torch.log(sigma)
@@ -182,6 +182,115 @@ def kernel_crps(
         kcrps_chs = kcrps_chs * weights_channels
 
     return torch.mean(kcrps_chs), kcrps_chs
+
+
+def quantile_pinball(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    monotone: bool = True,
+):
+    """
+    Pinball (quantile-regression) loss.
+
+    Interprets the ensemble dimension as a set of conditional quantiles at levels
+    tau_k = (k + 0.5) / K and applies the pinball loss per quantile. This formalises the
+    dry->wet member spread observed in the oracle audit (docs/decoder_assessment.md §2.1.1)
+    on purpose and calibrated, and yields a valid CRPS (= integral over tau of the pinball
+    loss), curing the degenerate kernel_crps (no stochastic source needed).
+
+    Params:
+        target : shape (num_data_points, num_channels)
+        pred   : shape (ens_dim, num_data_points, num_channels); ens_dim = number of quantiles K
+        monotone : if True, sort predictions along the ensemble dim so quantiles do not cross
+        weights_channels : shape (num_channels,) or None
+        weights_points : shape (num_data_points,) or None
+
+    Return:
+        loss : (weighted) scalar loss
+        loss_chs : per-channel loss
+    """
+    ens_size = pred.shape[0]
+    assert ens_size > 1, "quantile_pinball requires ens_size > 1 (one head per quantile)."
+
+    mask_nan = ~torch.isnan(target)
+    t = torch.where(mask_nan, target, torch.zeros_like(target))
+    p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
+
+    # enforce non-crossing quantiles by sorting along the quantile (ensemble) dim
+    if monotone:
+        p = torch.sort(p, dim=0).values
+
+    taus = (torch.arange(ens_size, device=pred.device, dtype=p.dtype) + 0.5) / ens_size
+    taus = taus.view(ens_size, 1, 1)
+
+    r = t.unsqueeze(0) - p  # [K, num_data_points, num_channels]
+    pinball = torch.maximum(taus * r, (taus - 1.0) * r)  # [K, num_data_points, num_channels]
+
+    # average over quantiles -> [num_data_points, num_channels]
+    pinball = pinball.mean(0)
+
+    if weights_points is not None:
+        pinball = (pinball.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    loss_chs = pinball.mean(0)  # [num_channels]
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
+def mse_wta(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    eps: float = 0.05,
+):
+    """
+    Per-point epsilon-relaxed Winner-Take-All (Multiple-Choice-Learning) MSE.
+
+    For each data point, only the best ensemble member (lowest squared error averaged over
+    channels) receives the dominant gradient, so members specialise per point instead of
+    collapsing to the ensemble mean (which is what plain `mse` does). The `eps * mean` term
+    keeps losing members alive and bounds runaway members. The winner is assigned per POINT:
+    the oracle audit (docs/decoder_assessment.md §2.1.1) showed per-sample selection is
+    worthless while per-point selection holds the entire prize.
+
+    Params:
+        target : shape (num_data_points, num_channels)
+        pred   : shape (ens_dim, num_data_points, num_channels)
+        eps    : weight on the mean-over-members term (0 = pure WTA). Typical 0.01-0.1.
+        weights_channels : shape (num_channels,) or None
+        weights_points : shape (num_data_points,) or None
+
+    Return:
+        loss : (weighted) scalar loss
+        loss_chs : per-channel loss
+    """
+    ens_size = pred.shape[0]
+    assert ens_size > 1, "mse_wta requires ens_size > 1."
+
+    mask_nan = ~torch.isnan(target)
+    t = torch.where(mask_nan, target, torch.zeros_like(target))
+    p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
+
+    se = (t.unsqueeze(0) - p).pow(2)  # [ens, num_data_points, num_channels]
+
+    # winner per point on the channel-averaged error; gradient flows only through the winning
+    # member (argmin is non-differentiable, but the gathered per-channel errors are not).
+    winner = se.mean(-1).argmin(0)  # [num_data_points]
+    idx = winner.view(1, -1, 1).expand(1, se.shape[1], se.shape[2])
+    se_best = se.gather(0, idx).squeeze(0)  # [num_data_points, num_channels]
+    se_mean = se.mean(0)  # [num_data_points, num_channels]
+
+    diff_sq = (1.0 - eps) * se_best + eps * se_mean
+
+    if weights_points is not None:
+        diff_sq = (diff_sq.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    loss_chs = diff_sq.mean(0)  # [num_channels]
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
 
 
 def lp_loss(
