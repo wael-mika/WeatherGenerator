@@ -1,0 +1,65 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Latent-upsampling A/B: CERRA total precipitation (tp) as the high-resolution DIAGNOSTIC
+# target (~5.5 km / 3h, Europe). Single channel on purpose — the blocky "blob" artifact is a
+# tp phenomenon, so tp-only removes any multi-channel metric masking and keeps the decode light.
+#
+# >>> THE A/B KNOB <<<
+#   decode_latent_expand: 16   -> TREATMENT  (16 learned sub-latents per L5 cell; L7-equivalent
+#                                             decode capacity via LatentUpsamplingEngine)
+#   decode_latent_expand: 1    -> BASELINE   (off; original 9-neighbour decode -> the blob)
+# Run both arms (edit this one line + general.desc) and compare CERRA.tp loss + tp quicklooks.
+# See playground/docs/latent_upsampling.md.
+
+CERRA:
+  type: anemoi
+  filenames: ["cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"]
+  stream_id: 5
+
+  source: []
+  source_exclude: []
+  target: ['tp']
+  target_exclude: ['tp_tp']
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "03:00:00"
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 2048
+  tokenize_spacetime: True
+  max_num_targets: 15000    # tp-only subsample; raise toward -1 for production
+
+  # >>> latent-upsampling A/B knob (16 = treatment, 1 = baseline) <<<
+  decode_latent_expand: 16
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 2
+
+  # Deterministic MSE only — the clean attribution arm.
+  loss_fcts:
+    "mse":
+      weight: 1.0
