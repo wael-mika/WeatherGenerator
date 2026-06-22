@@ -296,7 +296,9 @@ def save_quantiles_csv(out_dir: Path, transformed: dict[str, np.ndarray]) -> Pat
     return path
 
 
-def plot_mapping(raw_mm: np.ndarray, arcsinh_alphas: list[float], log10_offset: float, out_dir: Path):
+def plot_mapping(
+    raw_mm: np.ndarray, arcsinh_alphas: list[float], log10_offset: float, out_dir: Path
+):
     positive = raw_mm[raw_mm > 0.0]
     if positive.size == 0:
         raise ValueError("No positive precipitation values available for plotting.")

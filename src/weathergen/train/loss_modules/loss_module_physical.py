@@ -475,9 +475,7 @@ class LossPhysical(LossModuleBase):
                         for _, v in output_step_dict.items():
                             is_nan = (
                                 isinstance(v, float) and v != v  # float NaN
-                            ) or (
-                                isinstance(v, torch.Tensor) and torch.isnan(v).item()
-                            )
+                            ) or (isinstance(v, torch.Tensor) and torch.isnan(v).item())
                             if not is_nan:
                                 total += v
                                 count += 1

@@ -116,9 +116,11 @@ class DataReaderRadklim(DataReaderTimestep):
 
             # Apply spatial subsampling if stride > 1
             if self.spatial_stride > 1:
-                lat_2d = lat_2d[::self.spatial_stride, ::self.spatial_stride]
-                lon_2d = lon_2d[::self.spatial_stride, ::self.spatial_stride]
-                _logger.info(f"Applied spatial stride {self.spatial_stride}: grid reduced to {lat_2d.shape}")
+                lat_2d = lat_2d[:: self.spatial_stride, :: self.spatial_stride]
+                lon_2d = lon_2d[:: self.spatial_stride, :: self.spatial_stride]
+                _logger.info(
+                    f"Applied spatial stride {self.spatial_stride}: grid reduced to {lat_2d.shape}"
+                )
 
             # Flatten and create coordinate template
             lat_flat = lat_2d.flatten()
@@ -346,7 +348,7 @@ class DataReaderRadklim(DataReaderTimestep):
         self.grid_shape = (0, 0)
         self.file_index = []
         # Set properties for empty reader
-        if not hasattr(self, 'properties'):
+        if not hasattr(self, "properties"):
             self.properties = {"stream_id": 0}
 
     @override
@@ -413,22 +415,21 @@ class DataReaderRadklim(DataReaderTimestep):
             _logger.debug(f"RADKLIM: Dataset is empty (len=0)")
             return ReaderData.empty(
                 num_data_fields=max(len(channels_idx), len(self.target_idx)),
-                num_geo_fields=len(self.geoinfo_idx)
+                num_geo_fields=len(self.geoinfo_idx),
             )
 
         if len(t_idxs) == 0:
-            _logger.debug(f"RADKLIM: No time indices for window {idx}, range [{dtr.start}, {dtr.end})")
+            _logger.debug(
+                f"RADKLIM: No time indices for window {idx}, range [{dtr.start}, {dtr.end})"
+            )
             return ReaderData.empty(
                 num_data_fields=max(len(channels_idx), len(self.target_idx)),
-                num_geo_fields=len(self.geoinfo_idx)
+                num_geo_fields=len(self.geoinfo_idx),
             )
 
         if len(channels_idx) == 0:
             _logger.debug(f"RADKLIM: No channels selected (channels_idx is empty)")
-            return ReaderData.empty(
-                num_data_fields=0,
-                num_geo_fields=len(self.geoinfo_idx)
-            )
+            return ReaderData.empty(num_data_fields=0, num_geo_fields=len(self.geoinfo_idx))
 
         # Find files that contain data for this time range
         files_needed = self._get_files_for_time_range(dtr.start, dtr.end)
@@ -437,7 +438,7 @@ class DataReaderRadklim(DataReaderTimestep):
             _logger.warning(f"RADKLIM: No files found for time range {dtr.start} to {dtr.end}")
             return ReaderData.empty(
                 num_data_fields=max(len(channels_idx), len(self.target_idx)),
-                num_geo_fields=len(self.geoinfo_idx)
+                num_geo_fields=len(self.geoinfo_idx),
             )
 
         # Load data from each file
@@ -465,7 +466,7 @@ class DataReaderRadklim(DataReaderTimestep):
 
                     # Apply spatial subsampling if stride > 1
                     if self.spatial_stride > 1:
-                        rr_data = rr_data[:, ::self.spatial_stride, ::self.spatial_stride]
+                        rr_data = rr_data[:, :: self.spatial_stride, :: self.spatial_stride]
 
                     # Convert masked array to regular array, replacing fill values with NaN
                     if np.ma.is_masked(rr_data):
@@ -496,7 +497,7 @@ class DataReaderRadklim(DataReaderTimestep):
             _logger.warning(f"RADKLIM: No valid data found for time range {dtr.start} to {dtr.end}")
             return ReaderData.empty(
                 num_data_fields=max(len(channels_idx), len(self.target_idx)),
-                num_geo_fields=len(self.geoinfo_idx)
+                num_geo_fields=len(self.geoinfo_idx),
             )
 
         # Concatenate all chunks

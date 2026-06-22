@@ -65,6 +65,7 @@ _PRECIP_COLORS = [
     "#2d004b",  # > 50                → dark purple (extreme)
 ]
 
+
 def _make_precip_norm_cmap(vmax: float):
     """
     Build a BoundaryNorm + ListedColormap for precipitation.
@@ -81,7 +82,7 @@ def _make_precip_norm_cmap(vmax: float):
     interval_colors = _PRECIP_COLORS[1 : n_intervals + 1] or [_PRECIP_COLORS[1]]
 
     cmap = mcolors.ListedColormap(interval_colors, name="precip_blue")
-    cmap.set_under("#ffffff")          # below first level → white (trace / dry)
+    cmap.set_under("#ffffff")  # below first level → white (trace / dry)
     cmap.set_over(_PRECIP_COLORS[-1])  # above last level → darkest
 
     # Do NOT pass extend= to BoundaryNorm; under/over are in the cmap instead
@@ -141,7 +142,7 @@ def parse_args():
         type=float,
         default=99.5,
         help="Percentile of target used to set the top of the colour scale (default: 99.5). "
-             "Raise toward 100 to show more extreme values.",
+        "Raise toward 100 to show more extreme values.",
     )
     p.add_argument("--no-bias", action="store_true", help="Omit the bias panel")
     return p.parse_args()
@@ -165,17 +166,27 @@ def _add_map_features(ax, lon_min, lon_max, lat_min, lat_max):
     # White land patch drawn first so data renders on top cleanly
     ax.add_feature(
         cfeature.NaturalEarthFeature("physical", "land", "50m"),
-        facecolor="white", edgecolor="none", zorder=0,
+        facecolor="white",
+        edgecolor="none",
+        zorder=0,
     )
     ax.add_feature(
         cfeature.NaturalEarthFeature("physical", "ocean", "50m"),
-        facecolor="#f0f4f8", edgecolor="none", zorder=0,   # very light blue-grey for sea
+        facecolor="#f0f4f8",
+        edgecolor="none",
+        zorder=0,  # very light blue-grey for sea
     )
-    ax.add_feature(cfeature.COASTLINE.with_scale("50m"), linewidth=0.6, edgecolor="#333333", zorder=3)
+    ax.add_feature(
+        cfeature.COASTLINE.with_scale("50m"), linewidth=0.6, edgecolor="#333333", zorder=3
+    )
     ax.add_feature(cfeature.BORDERS.with_scale("50m"), linewidth=0.3, edgecolor="#666666", zorder=3)
     gl = ax.gridlines(
-        draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.7,
-        linestyle="--", zorder=2,
+        draw_labels=True,
+        linewidth=0.3,
+        color="#aaaaaa",
+        alpha=0.7,
+        linestyle="--",
+        zorder=2,
         xlocs=range(int(lon_min) - 1, int(lon_max) + 1, 10),
         ylocs=range(int(lat_min) - 1, int(lat_max) + 1, 5),
     )
@@ -184,11 +195,25 @@ def _add_map_features(ax, lon_min, lon_max, lat_min, lat_max):
 
 
 def plot_sample(
-    lats, lons, target_vals, pred_vals,
-    channel, sample, fstep, valid_time,
-    lat_grid, lon_grid,
-    lat_min, lat_max, lon_min, lon_max,
-    vmax_percentile, dpi, fmt, out_dir, no_bias,
+    lats,
+    lons,
+    target_vals,
+    pred_vals,
+    channel,
+    sample,
+    fstep,
+    valid_time,
+    lat_grid,
+    lon_grid,
+    lat_min,
+    lat_max,
+    lon_min,
+    lon_max,
+    vmax_percentile,
+    dpi,
+    fmt,
+    out_dir,
+    no_bias,
 ):
     print(f"  Regridding {len(lats):,} points to {len(lat_grid)}×{len(lon_grid)} grid...")
     tar_grid, lat_mesh, lon_mesh = _regrid(lats, lons, target_vals, lat_grid, lon_grid)
@@ -212,7 +237,8 @@ def plot_sample(
 
     ncols = 2 if no_bias else 3
     fig, axes = plt.subplots(
-        1, ncols,
+        1,
+        ncols,
         figsize=(7.5 * ncols, 6.5),
         subplot_kw={"projection": proj},
         dpi=dpi,
@@ -220,19 +246,26 @@ def plot_sample(
     )
 
     panels = (
-        [("Target", tar_grid, norm_precip, cmap_precip),
-         ("Prediction", prd_grid, norm_precip, cmap_precip)]
-        if no_bias else
-        [("Target", tar_grid, norm_precip, cmap_precip),
-         ("Prediction", prd_grid, norm_precip, cmap_precip),
-         ("Bias  pred − target", bias_grid, norm_bias, "RdBu_r")]
+        [
+            ("Target", tar_grid, norm_precip, cmap_precip),
+            ("Prediction", prd_grid, norm_precip, cmap_precip),
+        ]
+        if no_bias
+        else [
+            ("Target", tar_grid, norm_precip, cmap_precip),
+            ("Prediction", prd_grid, norm_precip, cmap_precip),
+            ("Bias  pred − target", bias_grid, norm_bias, "RdBu_r"),
+        ]
     )
 
     for ax, (title, grid, norm, cmap) in zip(axes, panels):
         _add_map_features(ax, lon_min, lon_max, lat_min, lat_max)
         im = ax.pcolormesh(
-            lon_mesh, lat_mesh, grid,
-            norm=norm, cmap=cmap,
+            lon_mesh,
+            lat_mesh,
+            grid,
+            norm=norm,
+            cmap=cmap,
             transform=ccrs.PlateCarree(),
             shading="auto",
             rasterized=True,
@@ -240,9 +273,11 @@ def plot_sample(
         )
         is_precip = cmap is cmap_precip
         cb = plt.colorbar(
-            im, ax=ax,
+            im,
+            ax=ax,
             orientation="horizontal",
-            pad=0.04, shrink=0.88,
+            pad=0.04,
+            shrink=0.88,
             extend="both",
         )
         cb.set_label(f"{channel} [mm]", fontsize=9)
@@ -254,7 +289,9 @@ def plot_sample(
     vt_str = str(valid_time)[:16].replace("T", " ") if valid_time is not None else "unknown"
     fig.suptitle(
         f"CERRA  {channel}  |  sample {sample}  fstep {fstep}  |  {vt_str}",
-        fontsize=12, fontweight="bold", y=1.02,
+        fontsize=12,
+        fontweight="bold",
+        y=1.02,
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -311,8 +348,10 @@ def main():
 
                 # Spatial mask to plot region (avoids gridding irrelevant ocean/land outside)
                 mask = (
-                    (lats >= args.lat_min) & (lats <= args.lat_max)
-                    & (lons >= args.lon_min) & (lons <= args.lon_max)
+                    (lats >= args.lat_min)
+                    & (lats <= args.lat_max)
+                    & (lons >= args.lon_min)
+                    & (lons <= args.lon_max)
                 )
                 lats, lons = lats[mask], lons[mask]
 
@@ -343,14 +382,23 @@ def main():
                         p_vals = pred.values[mask]
 
                     plot_sample(
-                        lats, lons, t_vals, p_vals,
-                        channel=ch, sample=sample, fstep=fstep,
+                        lats,
+                        lons,
+                        t_vals,
+                        p_vals,
+                        channel=ch,
+                        sample=sample,
+                        fstep=fstep,
                         valid_time=valid_time,
-                        lat_grid=lat_grid, lon_grid=lon_grid,
-                        lat_min=args.lat_min, lat_max=args.lat_max,
-                        lon_min=args.lon_min, lon_max=args.lon_max,
+                        lat_grid=lat_grid,
+                        lon_grid=lon_grid,
+                        lat_min=args.lat_min,
+                        lat_max=args.lat_max,
+                        lon_min=args.lon_min,
+                        lon_max=args.lon_max,
                         vmax_percentile=args.vmax_percentile,
-                        dpi=args.dpi, fmt=args.fmt,
+                        dpi=args.dpi,
+                        fmt=args.fmt,
                         out_dir=args.out,
                         no_bias=args.no_bias,
                     )
