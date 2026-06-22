@@ -50,6 +50,14 @@ pred_self_attention: True
 pred_dyadic_dims: False
 pred_mlp_adaln: True
 
+# Decode-time latent capacity expansion (LatentUpsamplingEngine). Number of learned sub-latents
+# per HEALPix cell the decoder attends to, replacing the 9-neighbour latent KV. 1 = off (current
+# behaviour). Can be overridden per stream via decode_latent_expand in the stream config; applies
+# only to the cross-attention decoder (decoder_type != "Linear"). num_blocks = cross-attention
+# (+MLP) blocks in the upsampler, used only when decode_latent_expand > 1.
+decode_latent_expand: 1
+decode_upsample_num_blocks: 1
+
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
 fe_num_blocks: 6
