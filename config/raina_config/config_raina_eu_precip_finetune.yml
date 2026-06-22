@@ -1,0 +1,71 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#####################################
+#
+# STAGE B (FINETUNE) — stub overlay, to run AFTER config_raina_eu_pretrain.yml.
+#
+# Usage pattern (mirrors config_forecasting_finetuning_raina.yml): apply this overlay ON TOP OF
+# config_raina_eu_precip_forecast.yml and supply the pretrained checkpoint via CLI / private
+# config (model_path / run_path / from_run_id). The backbone keys are inherited unchanged from
+# the consolidated config, so the checkpoint shapes match.
+#
+# freeze_modules below freezes the pretrained shared backbone + ERA5 stream, leaving the
+# ICON DREAM and CERRA stream embeddings + CERRA decoder/pred head free to adapt.
+#
+# TODO before running:
+#   * Set the pretrain checkpoint source (general.model_path / general.run_path, or --from_run_id).
+#   * Decide whether to unfreeze the forecast engine (.*forecast.*) for forecast adaptation.
+
+streams_directory: "./config/streams/raina_eu_precip_forecast/"
+
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  # model_path / run_path / from_run_id : set to the Stage-A pretrain checkpoint.
+  multiprocessing_method: "fork"
+  desc: ""
+  run_id: ???
+  run_history: []
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # Finetuning is shorter than pretraining; LR a touch higher for the new stream heads.
+  num_mini_epochs: 48
+
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  forecast:
+      time_step: 03:00:00
+      offset: 1
+      num_steps: 3
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: raina_eu_precip_finetune
+  grid: null

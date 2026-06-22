@@ -1,0 +1,79 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Consolidated EU precip forecast: CERRA multi-variable surface output as DIAGNOSTIC target
+# (output-only — the "disclosed" stream). CERRA covers Europe at ~5.5 km / 3h, 1985-2023.
+#
+# Run #1 loss = MSE only with ens_size 1 (deterministic). kernel_crps is intentionally NOT
+# used here: the WG ensemble has no stochastic source (deterministic heads on an identical
+# latent, latent noise disabled), so CRPS degenerates to ~MAE + gameable head-disagreement,
+# and it hard-asserts ens_size>1. A valid probabilistic setup (stochastic latents + ens>1 +
+# CRPS) is a separate follow-on workstream.
+#
+# channel_weights upweight precip (tp, sf) so the 8 smooth channels do not dominate the
+# averaged loss / metrics and hide poor precip skill (the Exp 2 metric-masking issue).
+#
+# Variables predicted (10 channels, all surface/near-surface, no NaN flags):
+#   tp, sf, ssrd, strd, 2t, 10si, 10fg, tcc, msl, tciwv
+# Duplicate-name zarr artefacts excluded via target_exclude.
+
+CERRA:
+  type: anemoi
+  filenames: ["cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"]
+  stream_id: 5
+
+  source: []
+  source_exclude: []
+  target: ['tp', 'sf', 'ssrd', 'strd', '2t', '10si', '10fg', 'tcc', 'msl', 'tciwv']
+  target_exclude: ['tp_tp', 'sf_sf', 'ssrd_ssrd', 'strd_strd']
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "03:00:00"
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 2048          # 1.14M cells / 2048 ≈ 557 tokens
+  tokenize_spacetime: True
+  max_num_targets: 30000    # subsample to 30k target pts/step — fits 8×A100; -1 for production
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    type: 'obs_value'
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 2
+
+  # Deterministic MSE only for run #1 (see header note).
+  loss_fcts:
+    "mse":
+      weight: 1.0
+
+  # Upweight precipitation so it is not drowned out by the 8 smooth channels.
+  channel_weights:
+    tp: 2.0
+    sf: 1.5
+    ssrd: 1.0
+    strd: 1.0
+    2t: 1.0
+    10si: 1.0
+    10fg: 1.0
+    tcc: 1.0
+    msl: 1.0
+    tciwv: 1.0
