@@ -34,6 +34,7 @@ from weathergen.model.engines import (
     LatentPredictionHeadMLP,
     LatentPredictionHeadTransformer,
     LatentState,
+    LatentUpsamplingEngine,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
 )
@@ -388,6 +389,9 @@ class Model(torch.nn.Module):
         self.embed_target_coords = torch.nn.ModuleDict()
         self.target_token_engines = torch.nn.ModuleDict()
         self.pred_heads = torch.nn.ModuleDict()
+        # optional per-stream decode-time latent capacity expansion (see LatentUpsamplingEngine);
+        # populated only for streams that set decode_latent_expand > 1, empty otherwise
+        self.latent_upsamplers = torch.nn.ModuleDict()
 
         # determine stream names once so downstream components use consistent keys
         loss_terms = [
@@ -472,6 +476,16 @@ class Model(torch.nn.Module):
                         )
 
                     self.target_token_engines[stream_name] = tte
+
+                    # optional decode-time latent capacity expansion: replace the 9-neighbour
+                    # decode KV with K learned sub-latents per cell. Per-stream override falls
+                    # back to the model-level default; only applies to the cross-attention
+                    # decode path (the Linear decoder does not use a per-cell latent KV).
+                    expand = si.get("decode_latent_expand", cf.get("decode_latent_expand", 1))
+                    if cf.decoder_type != "Linear" and expand and int(expand) > 1:
+                        self.latent_upsamplers[stream_name] = LatentUpsamplingEngine(
+                            cf, int(expand)
+                        )
 
                     # ensemble prediction heads to provide probabilistic prediction
                     final_activation = si["pred_head"].get("final_activation", "Identity")
@@ -821,10 +835,20 @@ class Model(torch.nn.Module):
                         tcs_lens,
                     ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
                 else:
+                    # optional decode-time latent capacity expansion: replace the per-cell
+                    # 9-neighbour KV with K learned sub-latents (see LatentUpsamplingEngine).
+                    # No-op (byte-identical) for streams without an upsampler.
+                    decode_latent = tokens_nbors
+                    decode_latent_lens = tokens_nbors_lens
+                    if stream_name in self.latent_upsamplers:
+                        decode_latent, decode_latent_lens = self.latent_upsamplers[stream_name](
+                            tokens_nbors, tokens_nbors_lens
+                        )
+
                     tc_tokens = self.target_token_engines[stream_name](
-                        latent=tokens_nbors,
+                        latent=decode_latent,
                         output=tc_tokens,
-                        latent_lens=tokens_nbors_lens,
+                        latent_lens=decode_latent_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
                     )
