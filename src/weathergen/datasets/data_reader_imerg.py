@@ -74,7 +74,9 @@ class DataReaderImerg(DataReaderTimestep):
         # Extract coordinates
         self.latitudes = self.z["latitude"][:].astype(np.float32)
         self.longitudes = self.z["longitude"][:].astype(np.float32)
-        _logger.info(f"Loaded coordinates: {len(self.latitudes)} lats × {len(self.longitudes)} lons")
+        _logger.info(
+            f"Loaded coordinates: {len(self.latitudes)} lats × {len(self.longitudes)} lons"
+        )
 
         # Parse time coordinate - LAZY LOADING: only read metadata, not actual times
         time_attrs = dict(self.z["time"].attrs)
@@ -114,18 +116,15 @@ class DataReaderImerg(DataReaderTimestep):
             self.len = 0
         else:
             # Calculate index range for training window (no loading, just math)
-            start_idx = max(
-                0, int((tw_handler.t_start - data_start_time) / period)
-            )
+            start_idx = max(0, int((tw_handler.t_start - data_start_time) / period))
             end_idx = min(
-                self.total_timesteps,
-                int((tw_handler.t_end - data_start_time) / period) + 1
+                self.total_timesteps, int((tw_handler.t_end - data_start_time) / period) + 1
             )
             self.len = end_idx - start_idx
 
             _logger.info(
                 f"Training window maps to indices [{start_idx}, {end_idx}) "
-                f"= {self.len:,} timesteps ({self.len/self.total_timesteps*100:.1f}% of total)"
+                f"= {self.len:,} timesteps ({self.len / self.total_timesteps * 100:.1f}% of total)"
             )
 
         # Store reference to precipitation array (lazy loading)
@@ -158,9 +157,9 @@ class DataReaderImerg(DataReaderTimestep):
         # Create meshgrid for coordinates (computed once, used repeatedly)
         # Uses filtered lat/lon arrays from _apply_spatial_filters
         lon_grid, lat_grid = np.meshgrid(self.longitudes, self.latitudes)
-        self.coords_template = np.stack(
-            [lat_grid.flatten(), lon_grid.flatten()], axis=1
-        ).astype(np.float32)
+        self.coords_template = np.stack([lat_grid.flatten(), lon_grid.flatten()], axis=1).astype(
+            np.float32
+        )
         self.n_grid_points = len(self.coords_template)
 
         # Select channels

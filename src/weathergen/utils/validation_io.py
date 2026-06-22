@@ -60,7 +60,9 @@ def write_output(
                 preds = model_output.get_physical_prediction(t_idx, sname)
                 if preds is None:
                     targets = target_aux_out.physical[t_idx][sname]["target"]
-                    assert targets[0].shape[0] == 0, "Empty preds but non-empty targets in spoof branch."
+                    assert targets[0].shape[0] == 0, (
+                        "Empty preds but non-empty targets in spoof branch."
+                    )
                     preds = [target.clone().unsqueeze(0) for target in targets]
                 preds_shape = preds[0].shape
                 # for-loop to make sure we have a consistent number of samples
