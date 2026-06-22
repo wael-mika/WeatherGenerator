@@ -25,8 +25,10 @@ CERRA:
 
   source: []
   source_exclude: []
-  target: ['tp']
-  target_exclude: ['tp_tp']
+  target: ['10si', '10wdir', 'tp', '2t']
+  target_exclude: ['tp_tp', 'sf_sf', 'ssrd_ssrd', 'strd_strd', 'mn2t', 'mx2t']
+
+  geoinfo_channels: ['lsm', 'orog']
 
   diagnostic: True
   loss_weight: 1.0
