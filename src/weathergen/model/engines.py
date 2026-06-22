@@ -373,6 +373,102 @@ class Local2GlobalSumEngine(torch.nn.Module):
         return out
 
 
+class LatentUpsamplingEngine(torch.nn.Module):
+    """Decode-time latent capacity expansion (per stream).
+
+    Maps each HEALPix cell's gathered 1-ring neighbourhood latent -- the KV that
+    ``Model.predict_decoders`` already builds: the cell plus its 8 neighbours at the source
+    HEALPix level -- into ``num_sub_latents`` (K) learned sub-latents via cross-attention. The
+    decoder then attends each target point to these K sub-latents instead of the 9 neighbour
+    latents, raising the per-cell decode capacity. The K learned queries carry their own
+    (learned) within-cell positional seed, so the K outputs can specialise to different
+    sub-regions of the ~150 km cell; the per-cell *content* comes from the cell-specific KV.
+
+    Deterministic and decode-only: the encoder / global / forecast backbone is untouched and
+    stays at the source level, so the expansion is cheap and added only where high resolution
+    is needed. This is the working, decode-side analogue of ``ae_local_num_queries`` (which is
+    unfinished/broken in the encoder; see docs/raina_knowledge_base.md sections 12-13).
+
+    Note: it runs over every cell, including cells with no target points (cheap empties in the
+    downstream varlen attention). Restricting it to active cells (``tcs_lens > 0``) is a future
+    memory optimisation and does not change the result.
+    """
+
+    name: "LatentUpsamplingEngine"
+
+    def __init__(self, cf: Config, num_sub_latents: int) -> None:
+        super().__init__()
+        self.cf = cf
+        self.num_sub_latents = num_sub_latents
+        dim = cf.ae_global_dim_embed
+
+        # K learned sub-latent queries, shared across cells (small init, as for encoder
+        # q_cells): the residual base is near-zero so the cross-attention over each cell's KV
+        # does the work and the K slots differentiate via their learned positional seed.
+        self.q_sub = torch.nn.Parameter(torch.randn(num_sub_latents, dim) / dim)
+
+        num_blocks = cf.get("decode_upsample_num_blocks", 1)
+        self.blocks = torch.nn.ModuleList()
+        for i in range(num_blocks):
+            if i > 0:
+                self.blocks.append(
+                    MLP(
+                        dim,
+                        dim,
+                        with_residual=True,
+                        dropout_rate=cf.ae_adapter_dropout_rate,
+                        norm_type=cf.norm_type,
+                        norm_eps=cf.mlp_norm_eps,
+                    )
+                )
+            self.blocks.append(
+                MultiCrossAttentionHeadVarlen(
+                    dim_embed_q=dim,
+                    dim_embed_kv=dim,
+                    num_heads=cf.ae_adapter_num_heads,
+                    dim_head_proj=cf.ae_adapter_embed,
+                    with_residual=True,
+                    with_qk_lnorm=cf.ae_adapter_with_qk_lnorm,
+                    dropout_rate=cf.ae_adapter_dropout_rate,
+                    with_flash=cf.with_flash_attention,
+                    norm_type=cf.norm_type,
+                    qk_norm_type=cf.get("qk_norm_type", cf.norm_type),
+                    norm_eps=cf.norm_eps,
+                    attention_dtype=get_dtype(cf.attention_dtype),
+                )
+            )
+
+    def forward(self, latent, latent_lens):
+        """Expand per-cell neighbourhood latent into K sub-latents.
+
+        Args:
+            latent: ``(sum(latent_lens), dim)`` KV tokens, grouped per cell by ``latent_lens``
+                (the ``tokens_nbors`` built in ``predict_decoders``, 9 neighbours per cell).
+            latent_lens: ``(num_cells + 1,)`` int32, ``latent_lens[0] == 0`` and the rest the
+                per-cell KV counts (9).
+
+        Returns:
+            sub_latent: ``(num_cells * K, dim)`` -- the K sub-latents per cell, flattened to
+                match the layout the decoder expects for ``latent``.
+            sub_lens: ``(num_cells + 1,)`` int32, ``[0] == 0`` and the rest ``== K``.
+        """
+        num_cells = latent_lens.shape[0] - 1
+        k = self.num_sub_latents
+        dim = latent.shape[-1]
+
+        sub = self.q_sub.unsqueeze(0).expand(num_cells, k, dim).reshape(num_cells * k, dim)
+        sub_lens = torch.full((num_cells + 1,), k, dtype=torch.int32, device=latent.device)
+        sub_lens[0] = 0
+
+        for block in self.blocks:
+            if isinstance(block, MLP):
+                sub = block(sub)
+            else:
+                sub = block(sub, latent, sub_lens, latent_lens)
+
+        return sub, sub_lens
+
+
 class QueryAggregationEngine(torch.nn.Module):
     name: "QueryAggregationEngine"
 
