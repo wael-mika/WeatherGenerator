@@ -108,6 +108,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.rank = cf.rank
         self.world_size = cf.world_size
         self.repeat_data = cf.data_loading.get("repeat_data_in_mini_epoch", False)
+        self.log_spoof_warnings = cf.data_loading.get("log_spoof_warnings", True)
 
         # initialise healpic
         self.healpix_level = cf.healpix_level
@@ -653,7 +654,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 time_win_target = self.time_window_handler.window(step_forecast_dt)
                 if stream_has_targets:
                     # Target channels exist but reader returned nothing — unexpected.
-                    logger.warning(
+                    log_fn = logger.warning if self.log_spoof_warnings else logger.debug
+                    log_fn(
                         f"Stream fstep {timestep_idx}: "
                         f"target data is EMPTY, spoofing. time_win={time_win_target}"
                     )

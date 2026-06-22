@@ -300,7 +300,11 @@ class DataReaderAnemoi(DataReaderTimestep):
             found_names = {ds0.variables[i] for i in chs_idx}
             recovered = []
             for ch in channels:
-                if ch not in found_names and ch not in (channels_exclude or []) and ch in ds0.name_to_index:
+                if (
+                    ch not in found_names
+                    and ch not in (channels_exclude or [])
+                    and ch in ds0.name_to_index
+                ):
                     recovered.append(ds0.name_to_index[ch])
                     stream_name = self.stream_info["name"]
                     _logger.warning(
