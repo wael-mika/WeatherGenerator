@@ -97,7 +97,7 @@ fe_impute_latent_noise_std: 0.0   # JEPA: 0.0  (our other configs use 1e-4)
 forecast_att_dense_rate: 1.0
 
 healpix_level: 5
-rope_2D: True                     # JEPA: True  (our other configs use False)
+rope_2D: False                     # JEPA: True  (our other configs use False)
 
 mlp_type: "swiglu"                # JEPA: "swiglu"  (our other configs: not set → "mlp")
 use_xsa: True                     # JEPA: True  (our other configs: not set)
@@ -106,7 +106,7 @@ qk_norm_type: "RMSNorm"           # JEPA: "RMSNorm"  (our other configs: not set
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
-with_fsdp: True                   # JEPA uses False; we keep True for cluster FSDP
+with_fsdp: False                   # JEPA uses False; we keep True for cluster FSDP
 ddp_find_unused_parameters: False
 attention_dtype: bf16
 mixed_precision_dtype: bf16
@@ -157,7 +157,7 @@ data_loading:
 training_config:
   training_mode: ["masking"]
 
-  num_mini_epochs: 32             # 2× JEPA's 16; gives MTM adequate convergence margin
+  num_mini_epochs: 16             # 2× JEPA's 16; gives MTM adequate convergence margin
   samples_per_mini_epoch: 8192   # JEPA: 8192
   shuffle: True
 
