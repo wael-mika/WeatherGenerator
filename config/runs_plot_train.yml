@@ -1,0 +1,8 @@
+train:
+  plot:
+    # kxuciv5w:
+    #   description: "mae multi wm/dev/mae-multi"
+    syhk46a1:
+      description: "exp part1"
+    kxuciv5w:
+      description: "exp part2"
