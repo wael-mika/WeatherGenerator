@@ -67,6 +67,9 @@ class LossPhysical(LossModuleBase):
         """Parse a loss_fcts config dict into a list of [fn, weight, name] triples."""
         result = []
         for name, params in loss_fcts_dict.items():
+            # skip unset entries (e.g. "mse": null) and the dynamic_loss control key
+            if params is None or name == "dynamic_loss":
+                continue
             loss_fn = getattr(loss_fns, name)
             extra_args = params.get("args", {})
             if extra_args:
