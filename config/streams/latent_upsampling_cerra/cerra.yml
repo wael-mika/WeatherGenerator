@@ -7,16 +7,19 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 #
-# Latent-upsampling A/B: CERRA total precipitation (tp) as the high-resolution DIAGNOSTIC
-# target (~5.5 km / 3h, Europe). Single channel on purpose — the blocky "blob" artifact is a
-# tp phenomenon, so tp-only removes any multi-channel metric masking and keeps the decode light.
+# Latent-upsampling A/B: CERRA (~5.5 km / 3h, Europe) as the high-resolution DIAGNOSTIC target.
+# Four channels on purpose — tp carries the canonical "blob", but if the capacity expansion is a
+# real routing fix the win should show up across the selected channels (2t and 10 m wind carry
+# strong orography/coastline structure the 9 shared latent slots also cannot route).
+# NOTE: 10wdir is circular — plain MSE mis-penalizes the 0/360 wrap; read its loss as indicative
+# only (or switch to u/v components if it dominates).
 #
 # >>> THE A/B KNOB <<<
 #   decode_latent_expand: 16   -> TREATMENT  (16 learned sub-latents per L5 cell; L7-equivalent
 #                                             decode capacity via LatentUpsamplingEngine)
 #   decode_latent_expand: 1    -> BASELINE   (off; original 9-neighbour decode -> the blob)
-# Run both arms (edit this one line + general.desc) and compare CERRA.tp loss + tp quicklooks.
-# See playground/docs/latent_upsampling.md.
+# Run both arms (edit this one line + general.desc) and compare per-channel CERRA loss (tp is
+# the headline) + tp quicklooks. See playground/docs/latent_upsampling.md.
 
 CERRA:
   type: anemoi
@@ -39,7 +42,7 @@ CERRA:
   masking_rate_none: 0.05
   token_size: 2048
   tokenize_spacetime: True
-  max_num_targets: 15000    # tp-only subsample; raise toward -1 for production
+  max_num_targets: 50000    # target-point subsample; raise toward -1 for production
 
   # >>> latent-upsampling A/B knob (16 = treatment, 1 = baseline) <<<
   decode_latent_expand: 16

@@ -11,20 +11,21 @@
 # EXPERIMENT: latent-upsampling A/B — does decode-time latent capacity expansion sharpen the
 #             CERRA precipitation blob?  (see playground/docs/latent_upsampling.md)
 # ===========================================================================================
-# Minimal, clean A/B that isolates the LatentUpsamplingEngine effect on the canonical blob:
+# Minimal, clean A/B that isolates the LatentUpsamplingEngine effect on the high-res decode:
 #   INPUT  : ERA5 (o96, 6h, global) input+output -> the macroscale anchor.
-#   TARGET : CERRA tp (5.5 km, Europe), DIAGNOSTIC, single channel.
-#   FORECAST: one 6h step (predict CERRA tp at t+6h).
+#   TARGET : CERRA (5.5 km, Europe), DIAGNOSTIC, channels [10si, 10wdir, tp, 2t].
+#   FORECAST: one 6h step (predict CERRA at t+6h).
 #
 # Why this is clean:
 #   * time_window_step=6h and ERA5 is 6h-cadence -> ERA5 is present in EVERY window, so the
 #     encoder is never starved (no spoofed-mean inputs). No second dense stream needed.
-#   * tp-only target -> the blob is the whole signal; no metric masking; lighter decode.
+#   * Both arms see the identical 4-channel target set; a routing fix should improve ALL of
+#     them (tp blob + orography-driven 2t / 10 m wind). Evaluate PER CHANNEL, not stream mean.
 #   * Deterministic: ens_size=1, MSE only -> the clean attribution arm.
 #
 # THE A/B KNOB lives in the CERRA stream config (config/streams/latent_upsampling_cerra/cerra.yml):
 #   decode_latent_expand: 16   (treatment, as shipped)   vs   1 (baseline).
-# Run both arms (different general.desc) and compare per-step CERRA.tp loss + tp quicklooks.
+# Run both arms (different general.desc) and compare per-channel CERRA loss + tp quicklooks.
 #
 # Backbone is identical to the proven config_raina_eu_precip_forecast.yml (L5, same dims), so it
 # runs on the same hardware. num_mini_epochs is reduced for a quick turnaround.

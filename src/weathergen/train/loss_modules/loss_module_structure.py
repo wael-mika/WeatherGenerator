@@ -40,7 +40,10 @@ Expected config (under ``training_config.losses``):
         loss_fcts: {
           "struct": {
             target_stream: CERRA,        # apply on a FINE stream (CERRA tp 5.5km / native IMERG)
-            num_pairs: 8192,
+            channels: ['tp'],            # optional: restrict to these target channels (by name);
+                                         # omit for all channels. Circular channels (10wdir) give
+                                         # spurious increments under |.|^p -- exclude them.
+            num_pairs: 262144,
             bin_edges_km: [10, 25, 50, 100, 200],
             increment_power: 2.0,        # 2 = standard structure function; 1 = robust (heavy tails)
             reduce: mean,                # ensemble reduction: "mean" (== member when ens=1) or int
@@ -50,6 +53,19 @@ Expected config (under ``training_config.losses``):
 
 Note on scale: choose ``bin_edges_km`` to straddle the artifact scale of the *target* stream;
 on a ~1° stream (IMERG_ANEMOI) the sub-cell scales are unresolved -- prefer a fine stream.
+
+Note on ``num_pairs`` (IMPORTANT): pairs are sampled uniformly over points, so their distance
+distribution follows the domain's pair-distance density -- short separations are RARE. On a
+continental domain (CERRA Europe), 8192 pairs put only ~1 pair into the 10-25 km bin, i.e.
+below ``min_pairs_per_bin`` and the fine-scale bins (exactly where decoder blur lives) are
+silently skipped. Empirically, ~1e6 pairs give ~150/500/1900/7200 pairs for the default bins;
+the default here (262144) is a safe floor. The cost is a few gathers + elementwise ops --
+negligible next to the model forward.
+
+Validation-only usage: since the loss calculator skips terms with ``weight: 0`` and the
+validation config is merged ON TOP of the training config, adding this block under
+``validation_config.losses`` (with any weight > 0) computes it as a validation metric without
+affecting training gradients -- the clean way to score a pure-MSE A/B for sharpness.
 """
 
 import logging
@@ -169,7 +185,14 @@ class LossStructureFunction(LossModuleBase):
         cfg = loss_fcts[cfg_key]
 
         self.target_stream: str = cfg["target_stream"]
-        self.num_pairs: int = int(cfg.get("num_pairs", 8192))
+        # optional list of target-channel NAMES to restrict to (e.g. ['tp']); None = all
+        self.channels: list[str] | None = (
+            [str(c) for c in cfg["channels"]] if cfg.get("channels") else None
+        )
+        self._channel_idx: list[int] | None = None  # resolved lazily from stream channel names
+        # see module docstring: uniform pair sampling starves the short-distance bins on large
+        # domains, so the default is deliberately high (cost is negligible)
+        self.num_pairs: int = int(cfg.get("num_pairs", 262144))
         self.min_pairs_per_bin: int = int(cfg.get("min_pairs_per_bin", 8))
         default_bins = [10, 25, 50, 100, 200]
         self.bin_edges_km: list[float] = [float(x) for x in cfg.get("bin_edges_km", default_bins)]
@@ -179,13 +202,29 @@ class LossStructureFunction(LossModuleBase):
         self.reduce = red if red == "mean" else int(red)
 
         _logger.info(
-            "LossStructureFunction: stream=%s, bins(km)=%s, num_pairs=%d, power=%.1f, reduce=%s",
+            "LossStructureFunction: stream=%s, channels=%s, bins(km)=%s, num_pairs=%d, "
+            "power=%.1f, reduce=%s",
             self.target_stream,
+            self.channels if self.channels is not None else "all",
             self.bin_edges_km,
             self.num_pairs,
             self.increment_power,
             self.reduce,
         )
+
+    def _resolve_channel_idx(self) -> list[int] | None:
+        """Map configured channel names to column indices of the target stream (cached)."""
+        if self.channels is None:
+            return None
+        if self._channel_idx is None:
+            stream_info = self.cf.streams[self.target_stream]
+            names = list(
+                stream_info.val_target_channels
+                if self.stage == "val"
+                else stream_info.train_target_channels
+            )
+            self._channel_idx = [names.index(c) for c in self.channels]
+        return self._channel_idx
 
     def _reduce_ensemble(self, pred: torch.Tensor) -> torch.Tensor:
         """pred: (ens, N, C) -> (N, C). For ens_size=1 the mean equals the single member."""
@@ -240,14 +279,21 @@ class LossStructureFunction(LossModuleBase):
                 pred = pred.reshape([pred.shape[0], *target.shape])  # [ens, N, C]
                 pred_red = self._reduce_ensemble(pred)  # [N, C]
 
+                # target_coords_raw is produced on CPU by the dataloader; move it first
+                coords = coords.to(target.device, non_blocking=True)
                 valid = torch.isfinite(target).all(-1) & torch.isfinite(coords).all(-1)
                 if int(valid.sum()) < 2:
                     continue
 
+                target_sel, pred_sel = target[valid], pred_red[valid]
+                ch_idx = self._resolve_channel_idx()
+                if ch_idx is not None:
+                    target_sel, pred_sel = target_sel[:, ch_idx], pred_sel[:, ch_idx]
+
                 loss_ch = structure_function_loss(
-                    target[valid],
-                    pred_red[valid],
-                    coords[valid].to(self.device),
+                    target_sel,
+                    pred_sel,
+                    coords[valid],
                     bin_edges_km=self.bin_edges_km,
                     num_pairs=self.num_pairs,
                     increment_power=self.increment_power,

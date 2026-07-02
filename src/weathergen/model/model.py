@@ -837,12 +837,13 @@ class Model(torch.nn.Module):
                 else:
                     # optional decode-time latent capacity expansion: replace the per-cell
                     # 9-neighbour KV with K learned sub-latents (see LatentUpsamplingEngine).
+                    # tcs_lens restricts the expansion to cells with targets this step.
                     # No-op (byte-identical) for streams without an upsampler.
                     decode_latent = tokens_nbors
                     decode_latent_lens = tokens_nbors_lens
                     if stream_name in self.latent_upsamplers:
                         decode_latent, decode_latent_lens = self.latent_upsamplers[stream_name](
-                            tokens_nbors, tokens_nbors_lens
+                            tokens_nbors, tokens_nbors_lens, tcs_lens
                         )
 
                     tc_tokens = self.target_token_engines[stream_name](

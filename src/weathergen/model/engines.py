@@ -389,9 +389,12 @@ class LatentUpsamplingEngine(torch.nn.Module):
     is needed. This is the working, decode-side analogue of ``ae_local_num_queries`` (which is
     unfinished/broken in the encoder; see docs/raina_knowledge_base.md sections 12-13).
 
-    Note: it runs over every cell, including cells with no target points (cheap empties in the
-    downstream varlen attention). Restricting it to active cells (``tcs_lens > 0``) is a future
-    memory optimisation and does not change the result.
+    When ``target_lens`` is given, the expansion runs only over *active* cells (those with at
+    least one target point this step). Inactive cells get zero-length latent, exactly matching
+    their zero-length target set in the downstream varlen decoder attention, so the decoder
+    output is identical to expanding every cell — but for a regional stream (e.g. CERRA over
+    Europe) this cuts the upsampler's work from batch x 12,288 cells to the few hundred that
+    matter.
     """
 
     name: "LatentUpsamplingEngine"
@@ -438,33 +441,61 @@ class LatentUpsamplingEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, latent, latent_lens):
+    def forward(self, latent, latent_lens, target_lens=None):
         """Expand per-cell neighbourhood latent into K sub-latents.
 
         Args:
             latent: ``(sum(latent_lens), dim)`` KV tokens, grouped per cell by ``latent_lens``
-                (the ``tokens_nbors`` built in ``predict_decoders``, 9 neighbours per cell).
+                (the ``tokens_nbors`` built in ``predict_decoders``, 9 neighbours per cell —
+                the same fixed count for every cell).
             latent_lens: ``(num_cells + 1,)`` int32, ``latent_lens[0] == 0`` and the rest the
                 per-cell KV counts (9).
+            target_lens: optional ``(num_cells + 1,)`` int32 per-cell target counts (the
+                decoder's ``tcs_lens``). When given, only cells with ``target_lens > 0`` are
+                expanded; the rest get zero-length latent (identical decode, far cheaper).
 
         Returns:
-            sub_latent: ``(num_cells * K, dim)`` -- the K sub-latents per cell, flattened to
-                match the layout the decoder expects for ``latent``.
-            sub_lens: ``(num_cells + 1,)`` int32, ``[0] == 0`` and the rest ``== K``.
+            sub_latent: ``(num_active * K, dim)`` -- the K sub-latents per active cell,
+                flattened to match the layout the decoder expects for ``latent``.
+            sub_lens: ``(num_cells + 1,)`` int32, ``[0] == 0``, ``K`` at active cells and
+                ``0`` elsewhere (all ``K`` when ``target_lens`` is None).
         """
         num_cells = latent_lens.shape[0] - 1
         k = self.num_sub_latents
         dim = latent.shape[-1]
 
-        sub = self.q_sub.unsqueeze(0).expand(num_cells, k, dim).reshape(num_cells * k, dim)
-        sub_lens = torch.full((num_cells + 1,), k, dtype=torch.int32, device=latent.device)
-        sub_lens[0] = 0
+        if target_lens is not None:
+            idx_active = (target_lens[1:] > 0).nonzero(as_tuple=True)[0]
+            num_active = idx_active.shape[0]
+            # per-cell KV count is uniform (9-neighbour gather), so a view-gather suffices
+            kv = latent.reshape(num_cells, -1, dim)[idx_active].flatten(0, 1)
+            kv_lens = torch.full(
+                (num_active + 1,),
+                latent.shape[0] // num_cells,
+                dtype=torch.int32,
+                device=latent.device,
+            )
+            kv_lens[0] = 0
+        else:
+            idx_active = None
+            num_active = num_cells
+            kv, kv_lens = latent, latent_lens
+
+        sub = self.q_sub.unsqueeze(0).expand(num_active, k, dim).reshape(num_active * k, dim)
+        sub_q_lens = torch.full((num_active + 1,), k, dtype=torch.int32, device=latent.device)
+        sub_q_lens[0] = 0
 
         for block in self.blocks:
             if isinstance(block, MLP):
-                sub = block(sub)
+                sub = checkpoint(block, sub, use_reentrant=False)
             else:
-                sub = block(sub, latent, sub_lens, latent_lens)
+                sub = checkpoint(block, sub, kv, sub_q_lens, kv_lens, use_reentrant=False)
+
+        if idx_active is None:
+            sub_lens = sub_q_lens
+        else:
+            sub_lens = torch.zeros((num_cells + 1,), dtype=torch.int32, device=latent.device)
+            sub_lens[1:][idx_active] = k
 
         return sub, sub_lens
 
