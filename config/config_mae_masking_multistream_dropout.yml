@@ -127,7 +127,11 @@ train_logging:
   checkpoint: 250
 
 data_loading:
-  num_workers: 6
+  # Profiled 2026-07-02: at 6 workers the loop is ~72% dataloader-bound (GPU idle waiting on the
+  # ~57 s/sample obs pipeline). 12 roughly halves the data wait. Single-GPU/interactive dev can push
+  # to 16-24 (0% data wait at 16, ~3.4x throughput). If a MULTI-NODE run host-OOMs, drop back to 8
+  # (host RAM is shared across the ranks on a node; memory_pinning is off, which helps).
+  num_workers: 12
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 

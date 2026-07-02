@@ -31,7 +31,10 @@ general:
 # parameters for data loading
 data_loading:
 
-  num_workers: 6
+  # Profiled 2026-07-02: 6 workers leaves the loop ~72% dataloader-bound. 12 roughly halves the data
+  # wait. Finetuning uses forecast rollout (more compute/step), so data is easier to hide — 12 is
+  # ample. Single-GPU dev can go 16; if a MULTI-NODE run host-OOMs, drop to 8. (memory_pinning off.)
+  num_workers: 12
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 
