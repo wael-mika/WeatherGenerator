@@ -83,7 +83,11 @@ rope_2D: False
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
-with_fsdp: True
+# Plain DDP path (matches groups/all_years). find_unused_parameters=True collides with the model's
+# activation checkpointing ("marked ready twice"); find_unused=False is valid because the trainer's
+# touch-all-params term gives every param a grad even when a stream is absent from a batch.
+with_fsdp: False
+ddp_find_unused_parameters: False
 attention_dtype: bf16
 mixed_precision_dtype: bf16
 mlp_norm_eps: 1e-5
@@ -111,7 +115,8 @@ general:
   istep: 0
   rank: ???
   world_size: ???
-  multiprocessing_method: "fork"
+  multiprocessing_method: "spawn"   # fork deadlocks dataloader workers when they open the async
+                                    # (zarr) obs stores; spawn avoids the inherited event-loop state.
   desc: "mae_multistream_dropout_uniform"
   run_id: ???
   run_history: []

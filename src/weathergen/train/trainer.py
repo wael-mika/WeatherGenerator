@@ -498,9 +498,48 @@ class Trainer(TrainerBase):
                     for _, target_aux in self.target_and_aux_calculators_val.items()
                 ]
 
+                # Plain-DDP correctness: make every trainable parameter participate in the autograd
+                # graph so DDP can run with find_unused_parameters=False. The model conditionally
+                # skips absent streams (predict_decoders, model.py) and never uses latent_pre_norm
+                # in masking-only mode, so some params get no gradient on some ranks/batches. The
+                # only alternative, find_unused_parameters=True, collides with the model's
+                # activation checkpointing and raises "marked ready twice" (Parameter ... marked
+                # ready twice). This add-zero term forces a (zero) grad for every param -> no
+                # unused params, so find_unused_parameters=False stays valid and no double-mark.
+                # The term is exactly 0, so loss/grads are unchanged. No-op under FSDP/single-GPU.
+                if self.cf.with_ddp and not self.cf.with_fsdp:
+                    loss = loss + 0.0 * sum(
+                        p.sum() for p in self.model.parameters() if p.requires_grad
+                    )
+
                 # backward pass
                 self.optimizer.zero_grad()
                 self.grad_scaler.scale(loss).backward()
+
+                # [grad-dbg] DDP unused-parameter diagnostic — DISABLED by default; uncomment below.
+                # On the first iterations it lists trainable params that received no gradient. These
+                # are the params DDP needs find_unused_parameters=True for; a consistently-unused
+                # param points at a stream/head that never contributes to the loss (e.g. a
+                # conditionally-absent stream, or latent_pre_norm in masking-only mode). The unused
+                # set can differ per rank, so check non-zero ranks too. Re-enable when debugging a
+                # multi-node DDP hang.
+                # if bidx < 2:
+                #     unused = [
+                #         name
+                #         for name, param in self.model.named_parameters()
+                #         if param.requires_grad and param.grad is None
+                #     ]
+                #     if unused:
+                #         logger.info(
+                #             f"[grad-dbg] rank={self.cf.rank} bidx={bidx}: "
+                #             f"{len(unused)} trainable params with NO grad:\n  "
+                #             + "\n  ".join(unused)
+                #         )
+                #     else:
+                #         logger.info(
+                #             f"[grad-dbg] rank={self.cf.rank} bidx={bidx}: "
+                #             "all trainable params received gradients."
+                #         )
 
                 # gradient clipping
                 self.grad_scaler.unscale_(self.optimizer)

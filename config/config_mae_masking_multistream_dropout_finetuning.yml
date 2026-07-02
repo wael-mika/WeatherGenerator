@@ -16,10 +16,17 @@
 
 freeze_modules: ""
 
+# Multi-node DDP path (set explicitly so it holds regardless of the --run_id pretrain config).
+# find_unused_parameters=True collides with activation checkpointing ("marked ready twice");
+# find_unused=False is valid because the trainer's touch-all-params term gives every param a grad.
+with_fsdp: False
+ddp_find_unused_parameters: False
+
 general:
 
   # mutable parameters
   istep: 0
+  multiprocessing_method: "spawn"   # fork deadlocks dataloader workers opening the async obs stores
 
 # parameters for data loading
 data_loading:

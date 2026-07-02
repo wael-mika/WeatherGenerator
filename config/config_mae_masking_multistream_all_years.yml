@@ -137,7 +137,9 @@ general:
   istep: 0
   rank: ???
   world_size: ???
-  multiprocessing_method: "fork"
+  multiprocessing_method: "spawn"   # fork deadlocks dataloader workers when they open the async
+                                    # (zarr) obs stores. Survives early (1980) batches that are
+                                    # ERA5+SYNOP-only, but hangs once shuffle hits a 2014+ obs batch.
   desc: "mtm_multistream_all_years_jepa_arch"
   run_id: ???
   run_history: []

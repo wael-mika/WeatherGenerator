@@ -85,6 +85,10 @@ with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
 with_fsdp: False
+# find_unused_parameters=True collides with the model's activation checkpointing and raises
+# "marked ready twice" on multi-node. Set False; the trainer's touch-all-params term guarantees
+# every param gets a grad so this is valid even when a stream is absent from a batch.
+ddp_find_unused_parameters: False
 attention_dtype: bf16
 mixed_precision_dtype: bf16
 mlp_norm_eps: 1e-5
@@ -96,7 +100,11 @@ latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
 
-freeze_modules: ""
+# latent_pre_norm feeds the latent/SSL loss (predict_latent, model.py:872) which is inactive in
+# masking-only training, so it never receives a gradient. Left trainable, DDP's all-reduce waits
+# forever on its grad -> multi-node hang. Freezing it (requires_grad=False) removes it from the
+# reducer entirely. No effect on the learned model — these weights never updated anyway.
+freeze_modules: ".*latent_pre_norm.*"
 load_chkpt: {}
 
 norm_type: "LayerNorm"
@@ -112,7 +120,9 @@ general:
   istep: 0
   rank: ???
   world_size: ???
-  multiprocessing_method: "fork"
+  multiprocessing_method: "fork"   # fork deadlocks the dataloader workers when they open the
+                                    # async (asyncio/zarr) obs stores; spawn avoids inheriting a
+                                    # broken event-loop state across fork.
   desc: "mae_multistream_groups_profileA"
   run_id: ???
   run_history: []
