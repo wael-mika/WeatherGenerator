@@ -79,6 +79,10 @@ class Trainer(TrainerBase):
         self.model_params = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.t_start: float = 0
+        # Per-window phase timers (dataloader wait vs GPU compute), summed over the last
+        # `terminal` steps and printed in _log_terminal to expose the data/compute bottleneck.
+        self._t_data_accum: float = 0.0
+        self._t_compute_accum: float = 0.0
         self.target_and_aux_calculators = None
         self.target_and_aux_calculators_val = None
         self.validate_with_ema_cfg = None
@@ -447,7 +451,13 @@ class Trainer(TrainerBase):
 
         # training loop
         self.t_start = time.time()
+        self._t_data_accum = 0.0
+        self._t_compute_accum = 0.0
+        t_prev_iter_end = time.time()
         for bidx, batch in enumerate(dataset_iter):
+            # Time spent waiting on the dataloader to produce this batch (GPU idle if > 0).
+            self._t_data_accum += time.time() - t_prev_iter_end
+            t_compute_start = time.time()
             with self.training_loop_annotation_context(f"batch_{bidx}"):
                 if cf.data_loading.get("memory_pinning", False):
                     # pin memory for faster CPU-GPU transfer
@@ -594,12 +604,17 @@ class Trainer(TrainerBase):
                     targets_and_auxs,
                 )
 
+            # Time spent in GPU compute (H2D + forward + loss + backward + opt) for this batch.
+            self._t_compute_accum += time.time() - t_compute_start
+
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_logging.metrics == 0:
                 self._log(TRAIN)
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)
+
+            t_prev_iter_end = time.time()
 
             # save model checkpoint (with designation _latest)
             if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
@@ -861,7 +876,18 @@ class Trainer(TrainerBase):
                     )
                     if self.log_grad_norms:
                         pstr += f"gradient norm={self.last_grad_norm:.3f}, "
-                    pstr += f"s/sec={(print_freq * self.batch_size_per_gpu) / dt:.3f})"
+                    pstr += f"s/sec={(print_freq * self.batch_size_per_gpu) / dt:.3f}"
+                    # Phase split over this window: how much wall-clock was dataloader wait
+                    # (GPU idle) vs GPU compute. High dataload % => data pipeline is the bottleneck.
+                    phase = self._t_data_accum + self._t_compute_accum
+                    if phase > 0:
+                        t_data = self._t_data_accum
+                        t_comp = self._t_compute_accum
+                        pstr += (
+                            f", data={t_data:.1f}s compute={t_comp:.1f}s "
+                            f"({100 * t_data / phase:.0f}% dataload)"
+                        )
+                    pstr += ")"
                     logger.info(pstr)
                     logger.info("\t")
 
@@ -874,6 +900,9 @@ class Trainer(TrainerBase):
                 logger.info("\n")
 
             self.t_start = time.time()
+            # reset per-window phase accumulators so each printed window is independent
+            self._t_data_accum = 0.0
+            self._t_compute_accum = 0.0
 
     def _log_collapse_metrics(self, stage: Stage) -> None:
         """
