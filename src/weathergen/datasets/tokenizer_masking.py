@@ -8,6 +8,8 @@
 # nor does it submit to any jurisdiction.
 
 
+import re
+
 import numpy as np
 import torch
 
@@ -45,6 +47,10 @@ class TokenizerMasking(Tokenizer):
         self.masker = masker
         self.rng = None
         self.token_size = None
+        # Cache of the static channel->group mapping per stream (keyed by stream name).
+        # variable_groups and source_channels are fixed for a stream's lifetime, so the
+        # regex compilation + matching only needs to happen once, not per sample.
+        self._group_channel_cache: dict = {}
 
     def reset_rng(self, rng) -> None:
         """
@@ -177,62 +183,85 @@ class TokenizerMasking(Tokenizer):
             2-D bool tensor of shape (num_visible_tokens, num_channels), or None if
             variable_groups is not configured on the stream.
         """
-        import re
-
         vgroups = stream_info.get("variable_groups")
         channel_names = getattr(rdata, "source_channels", None)
         if vgroups is None or channel_names is None or not group_spatial_masks:
             return None
 
-        num_channels = len(channel_names)
+        # Static per-stream mapping (regex matching) — computed once and cached.
+        group_order, channel_group_id = self._get_channel_group_id(stream_info, channel_names)
 
-        # Map channel index → group name (unassigned channels stay in no group → always kept)
-        channel_to_group: dict[int, str] = {}
-        assigned: set[int] = set()
+        # Which cell does each token belong to, and which tokens are visible.
+        num_tokens_per_cell = np.fromiter(
+            (len(lens) for lens in idxs_cells_lens), dtype=np.int64, count=len(idxs_cells_lens)
+        )
+        num_cells = num_tokens_per_cell.shape[0]
+        token_to_cell = np.repeat(np.arange(num_cells, dtype=np.int64), num_tokens_per_cell)
+
+        if isinstance(mask_tokens, torch.Tensor):
+            mask_bool = mask_tokens.detach().cpu().numpy().astype(bool)
+        else:
+            mask_bool = np.asarray(mask_tokens, dtype=bool)
+        visible_cells = token_to_cell[mask_bool]  # (num_visible,) cell index per visible token
+
+        num_visible = visible_cells.shape[0]
+        if num_visible == 0:
+            return None
+
+        # Stack the per-group spatial masks (num_groups, num_cells) in the cached group order;
+        # a group without a spatial mask this sample keeps all cells visible (all True).
+        group_stack = np.ones((len(group_order), num_cells), dtype=bool)
+        for i, gname in enumerate(group_order):
+            gmask = group_spatial_masks.get(gname)
+            if gmask is not None:
+                arr = gmask.numpy() if isinstance(gmask, torch.Tensor) else np.asarray(gmask)
+                group_stack[i] = arr.astype(bool)
+
+        # Vectorised (num_visible, num_channels) build. Channel c takes the visibility of its
+        # owning group at each visible token's cell; channels with no group (id == -1) stay True.
+        safe_id = np.where(channel_group_id < 0, 0, channel_group_id)
+        # group_stack[safe_id] -> (num_channels, num_cells); then index the visible cells
+        per_channel = group_stack[safe_id][:, visible_cells]
+        mask_2d = per_channel.T.copy()  # (num_visible, num_channels)
+        mask_2d[:, channel_group_id < 0] = True
+
+        return torch.from_numpy(mask_2d)
+
+    def _get_channel_group_id(
+        self, stream_info: dict, channel_names: list[str]
+    ) -> tuple[list[str], np.typing.NDArray]:
+        """Return (group_order, channel_group_id) for a stream, cached per stream name.
+
+        ``channel_group_id[c]`` is the row index into ``group_order`` of the variable_group that
+        owns channel ``c`` (via fullmatch on the group's ``variables`` regexes), the ``_default``
+        group's row for unmatched channels when ``_default`` exists, or ``-1`` (always kept)
+        otherwise. The mapping is static for a stream, so it is computed once and reused.
+        """
+        cache = self._group_channel_cache.get(stream_info["name"])
+        if cache is not None and cache["channel_names"] == channel_names:
+            return cache["group_order"], cache["channel_group_id"]
+
+        vgroups = stream_info["variable_groups"]
+        group_order = list(vgroups.keys())
+        row_of = {gname: i for i, gname in enumerate(group_order)}
+
+        channel_group_id = np.full(len(channel_names), -1, dtype=np.int64)
         for gname, gcfg in vgroups.items():
             if gname == "_default":
                 continue
             patterns = [re.compile(p) for p in gcfg.get("variables", [])]
             for i, ch in enumerate(channel_names):
                 if any(pat.fullmatch(ch) for pat in patterns):
-                    channel_to_group[i] = gname
-                    assigned.add(i)
-        # Assign unmatched channels to _default group if it exists
+                    channel_group_id[i] = row_of[gname]
         if "_default" in vgroups:
-            for i in range(num_channels):
-                if i not in assigned:
-                    channel_to_group[i] = "_default"
+            channel_group_id[channel_group_id < 0] = row_of["_default"]
 
-        # Build per-cell visibility: cell_idx → set of groups covering this cell
-        # idxs_cells is a list over cells; each element is a list of token index tensors
-        group_spatial_np: dict[str, np.typing.NDArray] = {}
-        for gname, gmask in group_spatial_masks.items():
-            arr = gmask.numpy() if isinstance(gmask, torch.Tensor) else np.asarray(gmask)
-            group_spatial_np[gname] = arr
-
-        # Enumerate visible tokens (those with mask_tokens[t] == True)
-        # and determine which cell each visible token belongs to.
-        num_tokens_per_cell = [len(lens) for lens in idxs_cells_lens]
-        token_to_cell: list[int] = []
-        for cell_idx, n in enumerate(num_tokens_per_cell):
-            token_to_cell.extend([cell_idx] * n)
-
-        visible_token_cells = [
-            token_to_cell[t] for t, keep in enumerate(mask_tokens) if keep
-        ]
-
-        num_visible = len(visible_token_cells)
-        if num_visible == 0:
-            return None
-
-        # Build 2-D mask: (num_visible_tokens, num_channels)
-        mask_2d = torch.ones(num_visible, num_channels, dtype=torch.bool)
-        for tok_i, cell_idx in enumerate(visible_token_cells):
-            for ch_i, gname in channel_to_group.items():
-                if gname in group_spatial_np:
-                    mask_2d[tok_i, ch_i] = bool(group_spatial_np[gname][cell_idx])
-
-        return mask_2d
+        self._group_channel_cache[stream_info["name"]] = {
+            "channel_names": list(channel_names),
+            "group_order": group_order,
+            "channel_group_id": channel_group_id,
+        }
+        return group_order, channel_group_id
 
     def get_source(
         self,
