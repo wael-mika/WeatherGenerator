@@ -1,0 +1,21 @@
+# Plot config for sweep_jepa_pretrain_finetune_ema_crop.csv (auto-generated)
+train:
+  plot:
+    riynlkt9-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.39e-05 mr=0.69 hl=1 cfg=student_cropping"
+    4rz9frrk-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.37e-06 mr=0.39 hl=1 cfg=student_cropping"
+    ljom53de-stage1:
+      slurm_id: 0
+      description: "s1 lr=4.66e-06 mr=0.25 hl=0 cfg=student_cropping"
+    a8x0c38j-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.82e-06 mr=0.85 hl=0 cfg=student_cropping"
+    b3uugenp-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.35e-05 mr=0.50 hl=0 cfg=student_cropping"
+    t0qpicjn-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.10e-05 mr=0.65 hl=2 cfg=student_cropping"

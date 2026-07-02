@@ -1,0 +1,39 @@
+# Plot config for sweep_jepa_pretrain_finetune_ema_hl.csv (auto-generated)
+train:
+  plot:
+    k8qnirqj-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.51e-05 mr=0.39 hl=4 cfg=student_healpix"
+    4nvjpu5r-stage1:
+      slurm_id: 0
+      description: "s1 lr=4.51e-06 mr=0.13 hl=2 cfg=student_healpix"
+    9mlqgl63-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.28e-05 mr=0.51 hl=1 cfg=student_healpix"
+    erihtnyc-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.38e-05 mr=0.78 hl=2 cfg=student_healpix"
+    uys3nmw2-stage1:
+      slurm_id: 0
+      description: "s1 lr=4.00e-06 mr=0.78 hl=3 cfg=student_healpix"
+    n17dtqzm-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.42e-06 mr=0.86 hl=2 cfg=student_healpix"
+    9d03v15z-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.64e-06 mr=0.73 hl=3 cfg=student_healpix"
+    ov9pan2u-stage1:
+      slurm_id: 0
+      description: "s1 lr=2.12e-05 mr=0.35 hl=1 cfg=student_healpix"
+    pod5bb91-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.00e-05 mr=0.21 hl=4 cfg=student_healpix"
+    2nr70g1p-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.22e-05 mr=0.78 hl=4 cfg=student_healpix"
+    ggmv2nrd-stage1:
+      slurm_id: 0
+      description: "s1 lr=3.32e-05 mr=0.59 hl=1 cfg=student_healpix"
+    fxdugq1n-stage1:
+      slurm_id: 0
+      description: "s1 lr=1.92e-06 mr=0.13 hl=3 cfg=student_healpix"

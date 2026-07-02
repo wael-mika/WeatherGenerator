@@ -26,7 +26,6 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
 )
-from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_icon_dream import DataReaderIconDream
 from weathergen.datasets.data_reader_imerg import DataReaderImerg
 from weathergen.datasets.data_reader_obs import DataReaderObs
@@ -248,9 +247,6 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 case "anemoi_transform":
                     dataset = DataReaderAnemoiTransform
                     datapath_cfg = cf.get("data_path_anemoi", None)
-                case "fesom":
-                    dataset = DataReaderFesom
-                    datapath_cfg = cf.get("data_path_fesom", None)
                 case "imerg":
                     dataset = DataReaderImerg
                     datapath_cfg = cf.get("data_path_imerg", None)
