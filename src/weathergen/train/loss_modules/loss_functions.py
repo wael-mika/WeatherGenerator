@@ -113,8 +113,8 @@ def student_t_nll(
     t = torch.where(mask_nan, target, torch.zeros_like(target))
     p = torch.where(mask_nan.unsqueeze(0), pred, torch.zeros_like(pred))
 
-    mu = p.mean(0)                      # [num_data_points, num_channels]
-    sigma = p.std(0).clamp(min=eps)     # [num_data_points, num_channels]
+    mu = p.mean(0)  # [num_data_points, num_channels]
+    sigma = p.std(0).clamp(min=eps)  # [num_data_points, num_channels]
 
     z = (t - mu) / sigma
     nll = (nu + 1) / 2 * torch.log(1 + z.pow(2) / nu) + torch.log(sigma)

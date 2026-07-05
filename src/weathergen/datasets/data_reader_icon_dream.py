@@ -195,9 +195,7 @@ class DataReaderIconDream(DataReaderTimestep):
         # Bail out if requested training window has no overlap.
         if tw_handler.t_start >= data_end_time or tw_handler.t_end <= data_start_time:
             name = stream_info["name"]
-            _logger.warning(
-                f"{name} is not supported over data loader window. Stream is skipped."
-            )
+            _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             self.init_empty()
             return
 
@@ -223,12 +221,8 @@ class DataReaderIconDream(DataReaderTimestep):
         )
 
         # Normalisation arrays cover ALL channels so source_idx/target_idx index in.
-        norm_means = np.array(
-            [_channel_default_norm(ch)[0] for ch in available], dtype=np.float32
-        )
-        norm_stdevs = np.array(
-            [_channel_default_norm(ch)[1] for ch in available], dtype=np.float32
-        )
+        norm_means = np.array([_channel_default_norm(ch)[0] for ch in available], dtype=np.float32)
+        norm_stdevs = np.array([_channel_default_norm(ch)[1] for ch in available], dtype=np.float32)
         for ch, ms in (stream_info.get("normalization") or {}).items():
             if ch in available:
                 i = available.index(ch)
@@ -283,9 +277,7 @@ class DataReaderIconDream(DataReaderTimestep):
         _logger.info(
             f"{ds_name}: data period: {data_start_time} to {data_end_time}, period={period}"
         )
-        _logger.info(
-            f"{ds_name}: {len(self.file_index)} files, {self.n_grid_points:,} grid cells"
-        )
+        _logger.info(f"{ds_name}: {len(self.file_index)} files, {self.n_grid_points:,} grid cells")
 
     # ------------------------------------------------------------------
     # File-index, coordinates, spatial filtering
@@ -294,9 +286,7 @@ class DataReaderIconDream(DataReaderTimestep):
     def _build_file_index(self) -> list[dict]:
         """Scan year directories for daily GRIB files; uses filename dates only."""
         index: list[dict] = []
-        year_dirs = sorted(
-            d for d in self.base_path.iterdir() if d.is_dir() and d.name.isdigit()
-        )
+        year_dirs = sorted(d for d in self.base_path.iterdir() if d.is_dir() and d.name.isdigit())
         for year_dir in year_dirs:
             for fpath in sorted(year_dir.glob("fc_R03B07_rea_ml.*")):
                 date_str = fpath.name.rsplit(".", 1)[-1]
@@ -350,9 +340,9 @@ class DataReaderIconDream(DataReaderTimestep):
 
         self.latitudes = self.latitudes_full[self.cell_indices]
         self.longitudes = self.longitudes_full[self.cell_indices]
-        self.coords_template = np.stack(
-            [self.latitudes, self.longitudes], axis=1
-        ).astype(np.float32)
+        self.coords_template = np.stack([self.latitudes, self.longitudes], axis=1).astype(
+            np.float32
+        )
         self.n_grid_points = len(self.coords_template)
 
         if bbox or stride > 1:
@@ -451,10 +441,7 @@ class DataReaderIconDream(DataReaderTimestep):
                 return None
             with idx_file.open("r") as f:
                 raw = json.load(f)
-            return {
-                (int(dt), sn, int(lev), str(es)): int(off)
-                for dt, sn, lev, es, off in raw
-            }
+            return {(int(dt), sn, int(lev), str(es)): int(off) for dt, sn, lev, es, off in raw}
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
             _logger.debug(f"Discarding unreadable offset cache {idx_file}: {e}")
             return None
@@ -537,15 +524,11 @@ class DataReaderIconDream(DataReaderTimestep):
                     # Direct assignment auto-casts float64 -> float32 (data_buf is f32).
                     data_buf[ti, :, ci] = values[self.cell_indices]
                 except Exception as e:
-                    _logger.warning(
-                        f"Failed to read at offset {offset} in {file_path}: {e}"
-                    )
+                    _logger.warning(f"Failed to read at offset {offset} in {file_path}: {e}")
                 finally:
                     eccodes.codes_release(msg)
 
-    def _locate_message(
-        self, valid_time: NPDT64, ch_name: str
-    ) -> tuple[Path, int] | None:
+    def _locate_message(self, valid_time: NPDT64, ch_name: str) -> tuple[Path, int] | None:
         """Resolve (valid_time, channel) -> (file_path, byte_offset), or None if missing."""
         short_name, level, end_step = ICON_DREAM_CHANNEL_SPEC[ch_name]
         # The file holding valid_time T is named after T's calendar date, even for tp
@@ -612,20 +595,14 @@ class DataReaderIconDream(DataReaderTimestep):
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
-        if (
-            self.len == 0
-            or len(t_idxs) == 0
-            or len(channels_idx) == 0
-            or self.n_grid_points == 0
-        ):
+        if self.len == 0 or len(t_idxs) == 0 or len(channels_idx) == 0 or self.n_grid_points == 0:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
         # Valid times = absolute datetimes for the dataset indices in this window.
-        valid_times = (
-            self.data_start_time.astype("datetime64[ns]")
-            + t_idxs * self.period.astype("timedelta64[ns]")
+        valid_times = self.data_start_time.astype("datetime64[ns]") + t_idxs * self.period.astype(
+            "timedelta64[ns]"
         )
 
         ch_names = [ICON_DREAM_CHANNELS[i] for i in channels_idx]
@@ -688,9 +665,7 @@ class DataReaderIconDream(DataReaderTimestep):
         else:
             geoinfos = np.zeros((len(data), 0), dtype=np.float32)
 
-        rd = ReaderData(
-            coords=coords, geoinfos=geoinfos, data=data, datetimes=datetimes
-        )
+        rd = ReaderData(coords=coords, geoinfos=geoinfos, data=data, datetimes=datetimes)
         check_reader_data(rd, dtr)
         return rd
 

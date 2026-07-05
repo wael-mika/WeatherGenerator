@@ -591,8 +591,8 @@ class Model(torch.nn.Module):
                 self.latent_perturbation_log_sigma = nn.Parameter(torch.zeros(1))
             else:
                 self.register_buffer(
-                    "latent_perturbation_log_sigma", 
-                    torch.zeros(1), 
+                    "latent_perturbation_log_sigma",
+                    torch.zeros(1),
                     persistent=False,
                 )
         else:
@@ -613,8 +613,6 @@ class Model(torch.nn.Module):
             sigma_init = self.decoder_ens_latent_perturbation.get("sigma_init", 0.01)
             with torch.no_grad():
                 self.latent_perturbation_log_sigma.fill_(math.log(sigma_init))
-
-
 
     def print_num_parameters(self) -> None:
         """Print number of parameters for entire model and each module used to build the model"""
@@ -789,22 +787,19 @@ class Model(torch.nn.Module):
             return output
 
         # remove register and class tokens
-        tokens = tokens[:, self.num_aux_tokens:]
+        tokens = tokens[:, self.num_aux_tokens :]
 
         batch_size = len(batch)
         token_dim = tokens.shape[-1]
-        num_neighbors = model_params.hp_nbours.shape[-1] # neighbors + cell itself
+        num_neighbors = model_params.hp_nbours.shape[-1]  # neighbors + cell itself
 
         assert tokens.shape == (
-            batch_size, 
-            self.num_healpix_cells * self.cf.ae_local_num_queries, 
-            tokens.shape[-1], 
+            batch_size,
+            self.num_healpix_cells * self.cf.ae_local_num_queries,
+            tokens.shape[-1],
         ), f"unexpected token shape {tokens.shape}"
-        assert (
-            self.cf.ae_local_num_queries == 1
-        ), (
-            "predict_decoders assumes ae_local_num_queries==1; "
-            "revisit tokens_nbors_lens if Q>1"
+        assert self.cf.ae_local_num_queries == 1, (
+            "predict_decoders assumes ae_local_num_queries==1; revisit tokens_nbors_lens if Q>1"
         )
 
         # ---- CRPS latent perturbation: build M ensemble members ----------
@@ -822,49 +817,47 @@ class Model(torch.nn.Module):
             # add independent Gaussian noise per ensemble member
             sigma = torch.exp(self.latent_perturbation_log_sigma).to(tokens.dtype)
             eps = torch.randn(
-                num_members, batch_size,
-                self.num_healpix_cells * self.cf.ae_local_num_queries, token_dim,
-                device=tokens.device, dtype=tokens.dtype,
+                num_members,
+                batch_size,
+                self.num_healpix_cells * self.cf.ae_local_num_queries,
+                token_dim,
+                device=tokens.device,
+                dtype=tokens.dtype,
             )
             tokens_tiled = (tokens.unsqueeze(0) + sigma * eps).reshape(
-                num_members * batch_size, 
-                self.num_healpix_cells * self.cf.ae_local_num_queries, 
+                num_members * batch_size,
+                self.num_healpix_cells * self.cf.ae_local_num_queries,
                 token_dim,
             )
 
-
         assert tokens_tiled.shape == (
-            num_members * batch_size, 
-            self.num_healpix_cells * self.cf.ae_local_num_queries, 
+            num_members * batch_size,
+            self.num_healpix_cells * self.cf.ae_local_num_queries,
             token_dim,
         )
 
         # flatten to cell level
-        tokens_flat = (
-            tokens_tiled.reshape(
-                num_members * batch_size, 
-                self.num_healpix_cells, 
-                self.cf.ae_local_num_queries, 
-                token_dim,
-            )
-            .flatten(0, 1) 
-        )
-    
+        tokens_flat = tokens_tiled.reshape(
+            num_members * batch_size,
+            self.num_healpix_cells,
+            self.cf.ae_local_num_queries,
+            token_dim,
+        ).flatten(0, 1)
 
         # neighbour gather
         cell_offsets = (
             torch.arange(
-                num_members * batch_size, 
+                num_members * batch_size,
                 device=tokens.device,
-            ).view(num_members * batch_size, 1, 1) 
+            ).view(num_members * batch_size, 1, 1)
             * self.num_healpix_cells
         )
 
-        idxs = (model_params.hp_nbours.unsqueeze(0) + cell_offsets).flatten(0, 1) 
-        tokens_nbors = tokens_flat[idxs.flatten()].flatten(0, 1)  
+        idxs = (model_params.hp_nbours.unsqueeze(0) + cell_offsets).flatten(0, 1)
+        tokens_nbors = tokens_flat[idxs.flatten()].flatten(0, 1)
 
         tokens_nbors_lens = tokens_flat.new_zeros(
-            num_members * batch_size * self.num_healpix_cells + 1, 
+            num_members * batch_size * self.num_healpix_cells + 1,
             dtype=torch.int32,
         )
         tokens_nbors_lens[1:] = num_neighbors * self.cf.ae_local_num_queries
@@ -902,12 +895,11 @@ class Model(torch.nn.Module):
                 tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
                 num_groups = tcs_lens.shape[0] - 1
                 assert batch_size * self.num_healpix_cells == num_groups, (
-                    f"expected {batch_size * self.num_healpix_cells} query groups, "
-                    f"got {num_groups}"
+                    f"expected {batch_size * self.num_healpix_cells} query groups, got {num_groups}"
                 )
 
                 if self.cf.decoder_type == "Linear":
-                    # repeat target-coord tokens once per ensemble member, 
+                    # repeat target-coord tokens once per ensemble member,
                     # matching tokens_tiled's ordering
                     tc_tokens_in = tc_tokens.repeat(num_members, 1)
                     tcs_lens_in = torch.cat(
@@ -921,15 +913,15 @@ class Model(torch.nn.Module):
                         tokens_tiled.reshape(-1, token_dim),
                         tcs_lens_in,
                     )
-                    pred = pred.reshape(num_members, t_coords.shape[0], pred.shape[-1]) 
+                    pred = pred.reshape(num_members, t_coords.shape[0], pred.shape[-1])
 
                 else:
-                    # Run members sequentially to stay under CUDA's max grid size 
+                    # Run members sequentially to stay under CUDA's max grid size
                     # for large ensembles or large hpl
                     kv_per_member = (
-                        batch_size 
-                        * self.num_healpix_cells 
-                        * num_neighbors 
+                        batch_size
+                        * self.num_healpix_cells
+                        * num_neighbors
                         * self.cf.ae_local_num_queries
                     )
                     tokens_nbors_lens_single = tokens_nbors_lens[
@@ -938,41 +930,38 @@ class Model(torch.nn.Module):
                     tc_tokens_outs = []
                     for m in range(num_members):
                         tc_tokens_out_m = self.target_token_engines[stream_name](
-                            latent=tokens_nbors[m * kv_per_member: (m + 1) * kv_per_member],
+                            latent=tokens_nbors[m * kv_per_member : (m + 1) * kv_per_member],
                             output=tc_tokens,
                             latent_lens=tokens_nbors_lens_single,
                             output_lens=tcs_lens,
                             coordinates=t_coords,
                         )
                         tc_tokens_outs.append(tc_tokens_out_m)
-                    tc_tokens_out = torch.cat(tc_tokens_outs, dim=0)  
+                    tc_tokens_out = torch.cat(tc_tokens_outs, dim=0)
 
-                    pred = self.pred_heads[stream_name](tc_tokens_out)  
+                    pred = self.pred_heads[stream_name](tc_tokens_out)
                     ens_head_size, total_target_points, output_channels = pred.shape
-                    assert (
-                        total_target_points == num_members * t_coords.shape[0]
-                    ), (
+                    assert total_target_points == num_members * t_coords.shape[0], (
                         f"expected {num_members * t_coords.shape[0]} pts in pred, "
                         f"got {total_target_points}"
                     )
                     pred = (
                         pred.reshape(
-                            ens_head_size, 
-                            num_members, 
-                            t_coords.shape[0], 
+                            ens_head_size,
+                            num_members,
+                            t_coords.shape[0],
                             output_channels,
                         )
                         .permute(1, 0, 2, 3)
                         .reshape(
-                            num_members * ens_head_size, 
-                            t_coords.shape[0], 
+                            num_members * ens_head_size,
+                            t_coords.shape[0],
                             output_channels,
                         )
                     )
 
                 assert pred.shape[1] == t_coords.shape[0], (
-                    f"expected {t_coords.shape[0]} points in dim=1, "
-                    f"got {pred.shape[1]}"
+                    f"expected {t_coords.shape[0]} points in dim=1, got {pred.shape[1]}"
                 )
 
             # recover batch dimension

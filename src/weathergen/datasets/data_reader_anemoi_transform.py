@@ -46,6 +46,7 @@ DType: TypeAlias = np.float32
 
 # ---------- Type-agnostic helper functions ----------
 
+
 def _to_float64(x):
     """Convert to float64 for numerical precision."""
     if isinstance(x, np.ndarray):
@@ -141,11 +142,11 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
     DEFAULTS = {
         "transform_type": "arcsinh",
         "transform_scale": 1000.0,  # m -> mm conversion
-        "transform_alpha": 0.15,    # arcsinh scale parameter
-        "transform_eps": 2.39e-7,   # log_eps epsilon
-        "transform_offset": 1.0,    # log10 offset
-        "transform_mu": None,       # z-score mean (None = no z-score)
-        "transform_sigma": None,    # z-score std (None = no z-score)
+        "transform_alpha": 0.15,  # arcsinh scale parameter
+        "transform_eps": 2.39e-7,  # log_eps epsilon
+        "transform_offset": 1.0,  # log10 offset
+        "transform_mu": None,  # z-score mean (None = no z-score)
+        "transform_sigma": None,  # z-score std (None = no z-score)
     }
 
     def __init__(
@@ -157,7 +158,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
         super().__init__(tw_handler, filename, stream_info)
 
         # Parse configuration from stream_info with defaults
-        self.transform_type = str(stream_info.get("transform_type", self.DEFAULTS["transform_type"]))
+        self.transform_type = str(
+            stream_info.get("transform_type", self.DEFAULTS["transform_type"])
+        )
         self.scale = float(stream_info.get("transform_scale", self.DEFAULTS["transform_scale"]))
         self.alpha = float(stream_info.get("transform_alpha", self.DEFAULTS["transform_alpha"]))
         self.eps = float(stream_info.get("transform_eps", self.DEFAULTS["transform_eps"]))
@@ -174,7 +177,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
         # Validation
         valid_types = ("arcsinh", "log10", "log_eps", "none")
         if self.transform_type not in valid_types:
-            raise ValueError(f"transform_type must be one of {valid_types}, got '{self.transform_type}'")
+            raise ValueError(
+                f"transform_type must be one of {valid_types}, got '{self.transform_type}'"
+            )
 
         if self.transform_type == "arcsinh" and self.alpha <= 0:
             raise ValueError(f"transform_alpha must be > 0 for arcsinh, got {self.alpha}")
@@ -183,7 +188,11 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
             raise ValueError(f"transform_eps must be > 0 for log_eps, got {self.eps}")
 
         # Log configuration
-        zscore_info = f"z-score(mu={self.mu:.6g}, sigma={self.sigma:.6g})" if self.apply_zscore else "no z-score"
+        zscore_info = (
+            f"z-score(mu={self.mu:.6g}, sigma={self.sigma:.6g})"
+            if self.apply_zscore
+            else "no z-score"
+        )
         _logger.info(
             f"DataReaderAnemoiTransform: type={self.transform_type}, scale={self.scale}, "
             f"alpha={self.alpha}, eps={self.eps}, offset={self.offset}, {zscore_info}"
@@ -282,8 +291,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
     @override
     def normalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """Apply forward transformation to source channels."""
-        assert source.shape[-1] == len(self.source_idx), \
+        assert source.shape[-1] == len(self.source_idx), (
             f"incorrect number of source channels: {source.shape[-1]} vs {len(self.source_idx)}"
+        )
 
         for i in range(len(self.source_idx)):
             source[..., i] = self._forward_transform(source[..., i])
@@ -293,8 +303,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
     @override
     def normalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
         """Apply forward transformation to target channels."""
-        assert target.shape[-1] == len(self.target_idx), \
+        assert target.shape[-1] == len(self.target_idx), (
             f"incorrect number of target channels: {target.shape[-1]} vs {len(self.target_idx)}"
+        )
 
         for i in range(len(self.target_idx)):
             target[..., i] = self._forward_transform(target[..., i])
@@ -304,8 +315,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
     @override
     def denormalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """Apply inverse transformation to source channels."""
-        assert source.shape[-1] == len(self.source_idx), \
+        assert source.shape[-1] == len(self.source_idx), (
             f"incorrect number of source channels: {source.shape[-1]} vs {len(self.source_idx)}"
+        )
 
         for i in range(len(self.source_idx)):
             source[..., i] = self._inverse_transform(source[..., i])
@@ -315,8 +327,9 @@ class DataReaderAnemoiTransform(DataReaderAnemoi):
     @override
     def denormalize_target_channels(self, data: NDArray[DType]) -> NDArray[DType]:
         """Apply inverse transformation to target channels."""
-        assert data.shape[-1] == len(self.target_idx), \
+        assert data.shape[-1] == len(self.target_idx), (
             f"incorrect number of target channels: {data.shape[-1]} vs {len(self.target_idx)}"
+        )
 
         for i in range(len(self.target_idx)):
             data[..., i] = self._inverse_transform(data[..., i])
