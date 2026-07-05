@@ -11,6 +11,7 @@
 
 import itertools
 import logging
+import math
 
 import torch
 from torch.distributed.fsdp import (
@@ -213,6 +214,32 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
             )
             # maybe_sharded_sd[param_name.replace("module.", "")] = nn.Parameter(sharded_tensor)
             maybe_sharded_sd[param_name] = torch.nn.Parameter(sharded_tensor)
+
+        # latent_perturbation_log_sigma is a bare parameter on the model root, so the
+        # module-init loop below cannot materialize it. When it is absent from the
+        # checkpoint (finetuning a pre-CRPS model), synthesize it into the state dict
+        # with its configured init, exactly like a checkpoint parameter would load.
+        # (reset_parameters(), which normally applies sigma_init, is not called when
+        # continuing from a checkpoint.)
+        sigma_name = "latent_perturbation_log_sigma"
+        if (
+            sigma_name not in maybe_sharded_sd
+            and isinstance(meta_sharded_sd.get(sigma_name), torch.Tensor)
+            and isinstance(getattr(model, sigma_name, None), torch.nn.Parameter)
+        ):
+            sigma_init = cf.decoder_ens_latent_perturbation.get("sigma_init", 0.01)
+            sharded_meta_param = meta_sharded_sd[sigma_name]
+            sigma_full = torch.full((1,), math.log(sigma_init))
+            maybe_sharded_sd[sigma_name] = torch.nn.Parameter(
+                distribute_tensor(
+                    sigma_full,
+                    sharded_meta_param.device_mesh,
+                    sharded_meta_param.placements,
+                )
+            )
+            if is_root():
+                logger.info(f"Initializing {sigma_name}=log({sigma_init}) (not in checkpoint).")
+
         # choose `assign=True` for sharded model since we cannot call `copy_` on meta tensor
         mkeys, ukeys = model.load_state_dict(maybe_sharded_sd, strict=False, assign=True)
 
@@ -230,6 +257,14 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
             # Get all modules for quick lookup and initialize the new ones
             all_modules = dict(model.named_modules())
             for path in root_new_modules:
+                if path not in all_modules:
+                    # missing key without a parent module, e.g. a bare parameter on the
+                    # model root; it cannot be initialized here
+                    logger.warning(
+                        f"Missing checkpoint key '{path}' has no parent module; "
+                        "leaving it as constructed."
+                    )
+                    continue
                 if is_root():
                     logger.info(f"Initializing new module not found in checkpoint: {path}")
                 module_to_init = all_modules[path]
@@ -255,6 +290,17 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
         # load checkpoint
         mkeys, ukeys = model.load_state_dict(params, strict=False)
         model = model.to(device)
+
+        # apply sigma_init to the CRPS latent-perturbation scale when it is absent from
+        # the checkpoint; reset_parameters(), which normally applies it, is not called
+        # when continuing from a checkpoint (see the sharded branch above for details)
+        sigma_name = "latent_perturbation_log_sigma"
+        if sigma_name in mkeys and isinstance(getattr(model, sigma_name, None), torch.nn.Parameter):
+            sigma_init = cf.decoder_ens_latent_perturbation.get("sigma_init", 0.01)
+            with torch.no_grad():
+                model.latent_perturbation_log_sigma.fill_(math.log(sigma_init))
+            if is_root():
+                logger.info(f"Initializing {sigma_name}=log({sigma_init}) (not in checkpoint).")
 
     # warn about difference in checkpoint and model
     if len(mkeys) == 0 and len(ukeys) == 0:
