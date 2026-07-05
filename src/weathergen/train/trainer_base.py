@@ -9,6 +9,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import datetime
 import os
 
 import torch
@@ -102,12 +103,18 @@ class TrainerBase:
                 print(f"Running on device {device}")
 
             backend = torch.distributed.get_default_backend_for_device(device)
+            # Budget for all ranks to reach the rendezvous (and for collectives thereafter).
+            # The default of 600s is too tight when cold python imports from a Lustre-hosted
+            # venv take several minutes on some nodes -- the slowest node then misses the
+            # rendezvous and the whole multi-node job dies at startup.
+            init_timeout = datetime.timedelta(seconds=int(cf.get("ddp_init_timeout_seconds", 1800)))
             torch.distributed.init_process_group(
                 backend=backend,
                 world_size=world_size,
                 device_id=device,
                 rank=rank,
                 init_method=f"tcp://{master_addr}:{master_port}",
+                timeout=init_timeout,
             )
             print(f"Process group initialized ({backend}).")
 

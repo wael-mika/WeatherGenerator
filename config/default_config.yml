@@ -89,6 +89,11 @@ latent_noise_deterministic_latents: True
 freeze_modules: ""
 load_chkpt: {}
 
+# Budget (seconds) for all ranks to reach the DDP rendezvous at startup; also the default
+# collective timeout of the process group. PyTorch's 600s default is too tight when cold
+# python imports from a Lustre-hosted venv take minutes on some nodes of a multi-node job.
+ddp_init_timeout_seconds: 1800
+
 norm_type: "LayerNorm"
 qk_norm_type: null  # if null, defaults to norm_type
 
