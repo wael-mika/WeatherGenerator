@@ -1,0 +1,148 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run atmofs03-rebased (ERA5 -> ERA5 forecast
+# release model) -- CRPS variant.
+#
+# Stream set: the pretraining input stream (ERA5, aifs-ea v8 zarr) reproduced verbatim from
+# the saved checkpoint config but flagged `forcing: true` (in pretraining ERA5 was also the
+# output; here it is input-only), plus IMERG as the ONLY diagnostic/output stream. The model
+# is trained exclusively on predicting IMERG from the frozen pretrained representation.
+#
+# COMPARABILITY: the training setup below matches the ipnpqow8/rck9wgm7 finetune
+# configs (budget 64x4096, lr schedule, dates 2016-2022, freeze regex, forecast steps,
+# num_members, logging) so the experiments stay comparable; the one accepted deviation is
+# the 6h time_window_step inherited from this checkpoint (ERA5 v8 is 6-hourly),
+# vs the 1h step of the other two finetunes. Compare against the MSE variant
+# (config_finetune_imerg_diag_mse_atmofs03_rebased.yml), which differs only in the loss and
+# the absence of the decoder latent-perturbation ensemble.
+#
+# CRPS recipe follows PR #2578 (crps-decoder branch): a model-wide Gaussian latent
+# perturbation at decode time builds the ensemble (decoder_ens_latent_perturbation), trained
+# with kernel_crps; pred_head.ens_size stays 1. Since IMERG is the only output stream, the
+# model-wide perturbation affects only the IMERG decode. The learnable sigma
+# (latent_perturbation_log_sigma) is a bare top-level parameter and is NOT caught by
+# freeze_modules, so it trains in both freeze options below -- as intended. The atmofs03
+# checkpoint predates the CRPS decoder, so sigma is initialized fresh from sigma_init at
+# load (handled by the missing-key path in model_interface.py).
+#
+# Run:
+#   uv run train_continue --from-run-id atmofs03-rebased_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_crps_atmofs03_rebased.yml
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_atmofs03_rebased/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# Latent Gaussian perturbation for probabilistic decoding (PR #2578).
+decoder_ens_latent_perturbation :
+  num_members: 4
+  sigma_init: 0.2
+  sigma_learnable: True
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_crps_from_atmofs03_rebased"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # time_window_step/len are NOT overridden: they stay at this checkpoint's native 6h/6h
+  # (ERA5 v8 is 6-hourly, unlike the 1-hourly-stepped operan/obs setup of the other two
+  # finetunes, which sample with a 1h window step). Accepted difference.
+
+  # Kept identical to the ipnpqow8/rck9wgm7 finetunes for comparability (the aifs-ea v8
+  # zarr would allow earlier dates, but the finetuning data window must match).
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Match the ipnpqow8/rck9wgm7 finetunes (their checkpoints carry grad_clip 0.8; this
+  # checkpoint carries 1.0).
+  optimizer:
+    grad_clip: 0.8
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # kernel_crps on the only output stream (IMERG). "mse": null overrides the checkpoint's
+  # inherited {"mse": {}} and disables it (skipped by _parse_loss_fcts), matching the
+  # loss layout of config_forecasting_crps.yml.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": null, "kernel_crps": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Match the ipnpqow8/rck9wgm7 finetunes (their checkpoints carry 256 val samples and EMA
+# halflife 600; this checkpoint carries 512 and 1e-3) so validation metrics are comparable.
+validation_config:
+  samples_per_mini_epoch: 256
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Match the ipnpqow8/rck9wgm7 finetunes (this checkpoint carries 8).
+data_loading:
+  num_workers: 10
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_crps
+  grid: null

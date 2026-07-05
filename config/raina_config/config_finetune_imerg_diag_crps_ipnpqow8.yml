@@ -1,0 +1,110 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run ipnpqow8 (ERA5+operan, no obs) -- CRPS variant.
+#
+# Stream set: the pretraining INPUT (forcing) streams reproduced verbatim from the saved
+# checkpoint config, plus IMERG as the ONLY diagnostic/output stream. The pretraining output
+# stream (ERA5) is intentionally dropped: the model is trained exclusively on predicting IMERG
+# from the frozen pretrained representation. Compare against the MSE variant
+# (config_finetune_imerg_diag_mse_ipnpqow8.yml), which differs only in the loss and the
+# absence of the decoder latent-perturbation ensemble.
+#
+# CRPS recipe follows PR #2578 (crps-decoder branch): a model-wide Gaussian latent
+# perturbation at decode time builds the ensemble (decoder_ens_latent_perturbation), trained
+# with kernel_crps; pred_head.ens_size stays 1. Since IMERG is the only output stream, the
+# model-wide perturbation affects only the IMERG decode. The learnable sigma
+# (latent_perturbation_log_sigma) is a bare top-level parameter and is NOT caught by
+# freeze_modules, so it trains in both freeze options below -- as intended.
+#
+# Run:
+#   uv run train_continue --from-run-id ipnpqow8_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_crps_ipnpqow8.yml
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_ipnpqow8/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# Latent Gaussian perturbation for probabilistic decoding (PR #2578).
+decoder_ens_latent_perturbation :
+  num_members: 4
+  sigma_init: 0.2
+  sigma_learnable: True
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_crps_from_ipnpqow8"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5_in v6 zarr covers 2016-2023 and the checkpoint was pretrained on 2016-2022;
+  # earlier start dates would sample windows with no input data at all.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # kernel_crps on the only output stream (IMERG). "mse": null overrides the checkpoint's
+  # inherited {"mse": {}} and disables it (skipped by _parse_loss_fcts), matching the
+  # loss layout of config_forecasting_crps.yml.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": null, "kernel_crps": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_crps
+  grid: null
