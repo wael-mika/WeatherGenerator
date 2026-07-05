@@ -39,6 +39,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
+from weathergen.utils.utils import is_stream_forcing
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -629,10 +630,16 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         for timestep_idx in range(self.output_offset, num_output_steps):
             step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
 
-            # Skip target collection for forcing-only streams (target_idx is empty
-            # by design); collecting would always return empty and trigger a
-            # misleading warning.
-            stream_has_targets = stream_ds[0].get_target_num_channels() > 0
+            # Skip target collection for forcing streams (they never produce
+            # predictions) and for streams with no target channels. Collecting the
+            # target is pointless in both cases, and for the empty case it would
+            # emit a misleading "target data is EMPTY, spoofing" warning -- which
+            # happens e.g. when a forcing stream (ERA5_in) declares `target:`
+            # channels in its config but its zarr does not cover the full run time
+            # range (imerg spans 1998-2024 while the ERA5_in v6 zarr is 2016-2023).
+            stream_has_targets = stream_ds[0].get_target_num_channels() > 0 and (
+                not is_stream_forcing(stream_ds[0].stream_info)
+            )
 
             if stream_has_targets:
                 rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
