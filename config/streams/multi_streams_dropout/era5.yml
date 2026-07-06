@@ -54,6 +54,11 @@ ERA5_in:
   # which corresponds to ~90% kept — too lenient).
   masking_override:
     model_input:
+      # Explicit random strategy: without it the override inherits the training
+      # config's top-level healpix (hl_mask 2) and only replaces the rate —
+      # masks were contiguous healpix blocks, not the uniform random cells this
+      # experiment is documented to use.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.2
         rate_sampling: false

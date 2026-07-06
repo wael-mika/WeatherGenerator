@@ -20,6 +20,8 @@ METOP_ABC_AVHRR_IASI:
   loss_weight: 1.0
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.7
         rate_sampling: false
