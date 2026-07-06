@@ -25,9 +25,9 @@ streams_directory: "./config/streams/imerg_diag_ipnpqow8/"
 
 # Freeze options -- keep exactly ONE active:
 # (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
-freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
 # (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
-# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
 
 # No decoder latent-perturbation ensemble in the MSE variant.
 decoder_ens_latent_perturbation: null
