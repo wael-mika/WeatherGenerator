@@ -755,6 +755,25 @@ class Masker:
                             "Group names must be spelled identically in both configs."
                         )
 
+        # Optional base-mask intersection (stream config: group_masking_apply_base).
+        # Independent per-group masks union towards full coverage (union = 1 - prod(1-k),
+        # e.g. 5 ERA5 groups at keeps 0.12-0.7 -> encoder sees ~89% of cells; the per-group
+        # target complements union towards ~100%), destroying the sparsity MAE relies on.
+        # When enabled, every group mask is intersected with ONE stream-level base mask
+        # drawn from the model_input strategy (e.g. the healpix source_masking that is
+        # otherwise bypassed for grouped streams). Source and per-group targets then both
+        # live inside the base region: per group, source_g and target_g partition base.
+        group_base_mask = None
+        if stream_group_masks is not None and stream_info.get("group_masking_apply_base", False):
+            if len(source_cfgs) > 0:
+                base_cfg = next(iter(source_cfgs.values()))
+                group_base_mask, _ = self._generate_cell_mask(
+                    num_cells,
+                    base_cfg.get("masking_strategy"),
+                    base_cfg.get("masking_strategy_config", {}),
+                )
+                stream_group_masks = {g: m & group_base_mask for g, m in stream_group_masks.items()}
+
         # ── Phase 7: Generate target masks ────────────────────────────────────
         target_masks = MaskData()
         i_target = 0
@@ -827,7 +846,10 @@ class Masker:
                     # apply different spatial visibility to each variable group.
                     source_sample_group_masks = stream_group_masks
                     source_mask = torch.stack(list(stream_group_masks.values())).any(dim=0)
-                    mask_params = {"group_masking": True}
+                    mask_params = {
+                        "group_masking": True,
+                        "group_base_intersected": group_base_mask is not None,
+                    }
                 else:
                     source_sample_group_masks = None
                     source_mask, mask_params = self._get_mask(
@@ -849,7 +871,18 @@ class Masker:
                         # Per-group complement: each group's target is the cells NOT seen
                         # by the encoder for that group.  Target union is the union of
                         # all per-group complements (a superset of the source complement).
-                        target_group_masks = {g: ~m for g, m in source_sample_group_masks.items()}
+                        # With a base mask, complements stay inside the base region so
+                        # decoder cost is bounded by the base rate: per group, source_g
+                        # and target_g partition the base mask.
+                        if group_base_mask is not None:
+                            target_group_masks = {
+                                g: group_base_mask & ~m
+                                for g, m in source_sample_group_masks.items()
+                            }
+                        else:
+                            target_group_masks = {
+                                g: ~m for g, m in source_sample_group_masks.items()
+                            }
                         union_complement = torch.stack(list(target_group_masks.values())).any(dim=0)
                         target_masks.masks[target_idx] = union_complement
                         target_masks.metadata[target_idx].mask = union_complement
