@@ -354,6 +354,8 @@ def tokenize_apply_mask_target(
     hpy_verts_local,
     hpy_nctrs,
     enc_time,
+    need_data: bool = True,
+    need_coords_local: bool = True,
 ):
     """
     Apply masking to the data.
@@ -362,6 +364,11 @@ def tokenize_apply_mask_target(
     the cols the channels. Thereby mask_tokens acts on the rows, grouped according to the tokens as
     specified in idxs_cells and mask_channels acts on the columns.
 
+    This runs twice per target (once for the coords pass, once for the values pass), so the
+    caller can skip the parts it does not consume: ``need_data=False`` skips the data gather
+    and channel masking (coords pass), ``need_coords_local=False`` skips the geoinfo/time
+    gathers and the expensive ``get_target_coords_local`` build (values pass). Skipped
+    outputs are returned as None.
     """
 
     def return_empty(rdata, idxs_cells_lens):
@@ -396,43 +403,48 @@ def tokenize_apply_mask_target(
 
     # apply mask
     datetimes = np.atleast_1d(rdata.datetimes[idxs_data])
-    datetimes_enc = enc_time(datetimes, time_win)
-    geoinfos = rdata.geoinfos[idxs_data]
     coords = rdata.coords[idxs_data]
-    data = rdata.data[idxs_data]
 
-    # Masked-out target entries are NaN-filled (not zeroed): the loss functions mask NaN
-    # targets, so these (cell, channel) pairs are excluded from the loss. Zeroing would
-    # silently train the model towards the (normalized) channel mean instead.
-    if mask_channels is not None:
-        if mask_channels.ndim == 1:
-            data = data.clone()
-            data[:, ~mask_channels] = torch.nan
-        else:
-            # 2-D per-group spatial masking: expand from token to data-point level.
-            pts = torch.from_numpy(idxs_lens_np[mask_tokens_np])
-            channel_mask_per_point = torch.repeat_interleave(mask_channels, pts, dim=0)
-            data = data.clone()
-            data[~channel_mask_per_point] = torch.nan
+    data = None
+    if need_data:
+        data = rdata.data[idxs_data]
+
+        # Masked-out target entries are NaN-filled (not zeroed): the loss functions mask NaN
+        # targets, so these (cell, channel) pairs are excluded from the loss. Zeroing would
+        # silently train the model towards the (normalized) channel mean instead.
+        if mask_channels is not None:
+            if mask_channels.ndim == 1:
+                data = data.clone()
+                data[:, ~mask_channels] = torch.nan
+            else:
+                # 2-D per-group spatial masking: expand from token to data-point level.
+                pts = torch.from_numpy(idxs_lens_np[mask_tokens_np])
+                channel_mask_per_point = torch.repeat_interleave(mask_channels, pts, dim=0)
+                data = data.clone()
+                data[~channel_mask_per_point] = torch.nan
 
     _, masked_points_per_cell = per_cell_counts(idxs_cells_lens, mask_tokens_np, idxs_lens_np)
 
     # compute encoding of target coordinates used in prediction network
-    if idxs_lens_np.sum() > 0:
-        coords_local = get_target_coords_local(
-            stream_id,
-            hl,
-            masked_points_per_cell,
-            coords,
-            geoinfos,
-            datetimes_enc,
-            hpy_verts_rots,
-            hpy_verts_local,
-            hpy_nctrs,
-        )
-        coords_local.requires_grad = False
-    else:
-        coords_local = torch.tensor([])
+    coords_local = None
+    if need_coords_local:
+        datetimes_enc = enc_time(datetimes, time_win)
+        geoinfos = rdata.geoinfos[idxs_data]
+        if idxs_lens_np.sum() > 0:
+            coords_local = get_target_coords_local(
+                stream_id,
+                hl,
+                masked_points_per_cell,
+                coords,
+                geoinfos,
+                datetimes_enc,
+                hpy_verts_rots,
+                hpy_verts_local,
+                hpy_nctrs,
+            )
+            coords_local.requires_grad = False
+        else:
+            coords_local = torch.tensor([])
 
     return data, datetimes, coords, coords_local, masked_points_per_cell
 
