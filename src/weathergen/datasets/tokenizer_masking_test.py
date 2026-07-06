@@ -141,6 +141,55 @@ def test_group_masking_without_channel_names_raises():
         _get_source_tokens(tokenizer, rdata, group_spatial_masks, cell_mask)
 
 
+def test_target_values_nan_masked_per_group():
+    """Target values of a group's channels must be NaN outside the group's target mask so
+    the NaN-aware loss only supervises what that group's encoder did not see."""
+    tokenizer = _make_tokenizer()
+    rdata = _make_rdata()
+
+    grp_a_tgt = torch.zeros(NUM_CELLS, dtype=torch.bool)
+    grp_a_tgt[: NUM_CELLS // 2] = True  # grp_a reconstructs the first half
+    grp_b_tgt = ~grp_a_tgt  # grp_b reconstructs the second half
+    target_group_masks = {"grp_a": grp_a_tgt, "grp_b": grp_b_tgt}
+    target_mask = grp_a_tgt | grp_b_tgt  # union, as built by the masker
+
+    token_data = tokenizer.get_tokens_windows(STREAM_INFO, [rdata], False)[0]
+    data, _, _, _ = tokenizer.get_target_values(
+        STREAM_INFO,
+        rdata,
+        token_data,
+        TIME_WIN,
+        target_mask,
+        group_spatial_masks=target_group_masks,
+    )
+
+    assert data.shape == (NUM_CELLS, len(CHANNEL_NAMES))
+    for i_cell in range(NUM_CELLS):
+        in_a = bool(grp_a_tgt[i_cell])
+        row = data[i_cell]
+        # grp_a channels supervised only inside grp_a's mask, grp_b likewise; ch_x always
+        assert row[0].isnan().item() != in_a, f"cell {i_cell} ch_a1"
+        assert row[1].isnan().item() != in_a, f"cell {i_cell} ch_a2"
+        assert row[2].isnan().item() == in_a, f"cell {i_cell} ch_b1"
+        assert row[3] == 1.0, f"cell {i_cell} ch_x must stay supervised"
+
+
+def test_target_values_unchanged_without_group_masks():
+    """Without per-group masks the target values must be returned untouched."""
+    tokenizer = _make_tokenizer()
+    rdata = _make_rdata()
+
+    target_mask = torch.ones(NUM_CELLS, dtype=torch.bool)
+    token_data = tokenizer.get_tokens_windows(STREAM_INFO, [rdata], False)[0]
+    data, _, _, _ = tokenizer.get_target_values(
+        STREAM_INFO, rdata, token_data, TIME_WIN, target_mask
+    )
+
+    assert data.shape == (NUM_CELLS, len(CHANNEL_NAMES))
+    assert not data.isnan().any()
+    assert (data == 1.0).all()
+
+
 def test_channel_group_id_default_group():
     """Unmatched channels fall to _default when present, else stay always-kept (-1)."""
     tokenizer = _make_tokenizer()

@@ -458,6 +458,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_data: list,
         output_tokens: list,
         target_mask,
+        target_group_spatial_masks=None,
     ) -> StreamData:
         """
         Generate stream data for output
@@ -494,6 +495,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     token_data,
                     (time_win_target.start, time_win_target.end),
                     target_mask,
+                    group_spatial_masks=target_group_spatial_masks,
                 )
 
                 stream_data.add_target_values(
@@ -517,6 +519,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         input_mask,
         input_channel_drop_mask=None,
         input_group_spatial_masks=None,
+        output_group_spatial_masks=None,
     ) -> StreamData:
         """
         Return one batch of data
@@ -533,6 +536,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             output_mask : mask for output/prediction/target
             input_mask : mask for network input (can be source or target)
             input_channel_drop_mask : optional (num_channels,) bool — True = keep channel.
+            output_group_spatial_masks : optional {group: (num_cells,) bool} per-group target
+                masks; target values outside a group's mask are NaN-filled so the loss
+                only covers what the group's encoder did not see.
 
 
         Returns:
@@ -569,6 +575,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             output_data,
             output_tokens,
             output_mask,
+            target_group_spatial_masks=output_group_spatial_masks,
         )
 
         return stream_data
@@ -770,6 +777,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     output_tokens,
                     output_mask=target_mask,
                     input_mask=target_mask,
+                    output_group_spatial_masks=target_masks.get_group_spatial_masks(tidx),
                 )
                 target_metadata = target_masks.metadata[tidx]
                 # also want to add the mask to the metadata
