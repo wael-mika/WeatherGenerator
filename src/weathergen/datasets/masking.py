@@ -334,14 +334,22 @@ class Masker:
 
         for section_key in ("model_input", "target_input"):
             section = stream_cfg.get(section_key, {})
-            # target and source are identical when target is not specified
+            override_values = override.get(section_key)
+
+            # Materialize target_input from model_input ONLY when the stream explicitly
+            # overrides the target section (e.g. era5_out forcing target rate to 1.0).
+            # An absent target_input is meaningful: it selects Mode A/B in
+            # build_samples_for_stream (target auto-generated as the source complement).
+            # Unconditionally copying here would make every stream look like Mode C
+            # (explicit target) and silently disable the MAE complement correspondence.
             if section == {} and section_key == "target_input":
+                if override_values is None:
+                    continue
                 # by the processing order of "model_input" and "target_input", the target_input
                 # here will have stream specific model_input overrides
                 stream_cfg["target_input"] = copy.deepcopy(stream_cfg.get("model_input", {}))
                 section = stream_cfg["target_input"]
 
-            override_values = override.get(section_key)
             if override_values is None:
                 continue
 
@@ -530,9 +538,7 @@ class Masker:
         vgroups = stream_info.get("variable_groups", {})
         if not vgroups:
             return None
-        has_masking = any(
-            "masking" in gcfg or "masking_rate" in gcfg for gcfg in vgroups.values()
-        )
+        has_masking = any("masking" in gcfg or "masking_rate" in gcfg for gcfg in vgroups.values())
         if not has_masking:
             return None
 
@@ -794,9 +800,7 @@ class Masker:
                     # The per-group masks are stored separately so the tokenizer can
                     # apply different spatial visibility to each variable group.
                     source_sample_group_masks = stream_group_masks
-                    source_mask = torch.stack(
-                        list(stream_group_masks.values())
-                    ).any(dim=0)
+                    source_mask = torch.stack(list(stream_group_masks.values())).any(dim=0)
                     mask_params = {"group_masking": True}
                 else:
                     source_sample_group_masks = None
@@ -809,17 +813,18 @@ class Masker:
 
                 # Mode A complement override: decoder reconstructs exactly what the
                 # encoder did not see.  Skipped for diagnostic/dropped streams (source
-                # mask is all-False, complement would be all-True which is wrong) and
+                # mask is all-False, complement would be all-True which is wrong),
+                # for forcing streams (target must stay all-False from Phase 7; the
+                # model builds no decoder for them, so any target here is dead weight
+                # the dataloader would tokenize and ship every sample) and
                 # for Modes B/C (different timesteps or explicit target configured).
-                if is_mode_a and not is_skipped:
+                if is_mode_a and not is_skipped and not is_stream_forcing(stream_info, self.stage):
                     if source_sample_group_masks is not None:
                         # Per-group complement: each group's target is the cells NOT seen
                         # by the encoder for that group.  Target union is the union of
                         # all per-group complements (a superset of the source complement).
                         target_group_masks = {g: ~m for g, m in source_sample_group_masks.items()}
-                        union_complement = torch.stack(
-                            list(target_group_masks.values())
-                        ).any(dim=0)
+                        union_complement = torch.stack(list(target_group_masks.values())).any(dim=0)
                         target_masks.masks[target_idx] = union_complement
                         target_masks.metadata[target_idx].mask = union_complement
                         target_masks.group_spatial_masks[target_idx] = target_group_masks
@@ -1065,7 +1070,7 @@ class Masker:
 
         elif strategy == "mixed":
             strategies = list(masking_strategy_config.get("strategies", ["random", "healpix"]))
-            raw_weights = masking_strategy_config.get("strategy_weights", None)
+            raw_weights = masking_strategy_config.get("strategy_weights")
             if raw_weights is not None:
                 w = np.array([raw_weights.get(s, 1.0) for s in strategies], dtype=float)
                 w /= w.sum()
