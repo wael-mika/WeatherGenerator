@@ -355,6 +355,7 @@ class TokenizerMasking(Tokenizer):
         token_data,
         time_win: tuple,
         cell_mask,
+        group_spatial_masks=None,
     ):
         # create tokenization index
         (idxs_cells, idxs_cells_lens) = token_data
@@ -362,6 +363,19 @@ class TokenizerMasking(Tokenizer):
         (mask_tokens, mask_channels) = self.cell_to_token_mask(
             idxs_cells, idxs_cells_lens, cell_mask
         )
+
+        # Per-group target masks: channels of a group are only supervised at cells inside
+        # the group's (complement) mask; everything else is NaN-filled downstream so the
+        # NaN-aware loss skips (cell, channel) pairs the group's encoder already saw.
+        if group_spatial_masks is not None and mask_tokens is not None:
+            mask_channels = self._build_group_channel_mask_2d(
+                stream_info,
+                rdata.target_channels,
+                idxs_cells,
+                idxs_cells_lens,
+                mask_tokens,
+                group_spatial_masks,
+            )
 
         data, datetimes, coords, _, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],

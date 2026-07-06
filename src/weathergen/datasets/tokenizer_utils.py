@@ -376,16 +376,19 @@ def tokenize_apply_mask_target(
     coords = rdata.coords[idxs_data]
     data = rdata.data[idxs_data]
 
+    # Masked-out target entries are NaN-filled (not zeroed): the loss functions mask NaN
+    # targets, so these (cell, channel) pairs are excluded from the loss. Zeroing would
+    # silently train the model towards the (normalized) channel mean instead.
     if mask_channels is not None:
         if mask_channels.ndim == 1:
             data = data.clone()
-            data[:, ~mask_channels] = 0.0
+            data[:, ~mask_channels] = torch.nan
         else:
             # 2-D per-group spatial masking: expand from token to data-point level.
             pts = torch.tensor([t for t, m in zip(idxs_lens, mask_tokens, strict=True) if m])
             channel_mask_per_point = torch.repeat_interleave(mask_channels, pts, dim=0)
             data = data.clone()
-            data[~channel_mask_per_point] = 0.0
+            data[~channel_mask_per_point] = torch.nan
 
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
     mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
