@@ -183,6 +183,38 @@ def test_mixed_strategy_redraws_per_sample():
     assert eff["masking_strategy"] == "mixed"
 
 
+def test_group_masking_apply_base_bounds_source_and_target():
+    """With group_masking_apply_base, every group's source and target masks partition one
+    shared stream-level base mask: encoder and decoder work stays bounded by the base rate
+    instead of the union of independent group masks growing towards full coverage."""
+    stream_info = dict(GROUPED_STREAM)
+    stream_info["name"] = "S_BASE"
+    stream_info["group_masking_apply_base"] = True
+    masker = _make_masker({"S_BASE": stream_info})
+
+    for _ in range(5):
+        target_masks, source_masks, _ = masker.build_samples_for_stream(
+            "masking", NUM_CELLS, stream_info
+        )
+        src_groups = source_masks.get_group_spatial_masks(0)
+        tgt_groups = target_masks.get_group_spatial_masks(0)
+
+        bases = []
+        for g in src_groups:
+            src_g, tgt_g = src_groups[g], tgt_groups[g]
+            assert not (src_g & tgt_g).any(), f"group {g}: source/target overlap"
+            bases.append(src_g | tgt_g)
+        # all groups partition the SAME base mask
+        for b in bases[1:]:
+            assert (b == bases[0]).all(), "groups must share one base mask"
+        base = bases[0]
+        # base is a proper subset (rate 0.5 in MODE_CFG, so not the full sphere)
+        assert 0 < base.sum() < NUM_CELLS
+        # stream-level source/target unions stay inside the base
+        assert not (source_masks.get_mask(0) & ~base).any()
+        assert not (target_masks.get_mask(0) & ~base).any()
+
+
 def test_channel_drop_keeps_at_least_one_channel():
     """Even at drop rate ~1.0 the channel-drop mask must keep one channel."""
     stream_info = {

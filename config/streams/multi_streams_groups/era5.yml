@@ -55,6 +55,13 @@ ERA5_in:
   # small fraction of samples). Stacks with per-group spatial masking below.
   channel_drop_rate: 0.1
 
+  # Optional: intersect every per-group mask with one stream-level base mask drawn
+  # from the training config's model_input strategy (healpix rate 0.7 here). Bounds
+  # encoder+decoder cost by the base rate — without it, independent group masks
+  # union towards full coverage (~89% of cells visible for these 5 groups).
+  # Changes masking semantics vs earlier grouped runs; enable deliberately.
+  # group_masking_apply_base: True
+
   # Stream-level masking_rate is kept for backward compat; with Mode A active
   # per-group masks override it. Required only for loss correspondence mapping.
   masking_rate: 0.6
