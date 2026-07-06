@@ -20,13 +20,22 @@
 #   streams; only the target mask is zeroed (masking.py:731-733). So ERA5_in
 #   stays a forcing stream while still being heavily masked.
 #
-# Group keep rates (fraction kept; the rest is masked):
-#   synoptic_mass  0.12 (88% masked) — strong proxy from IASI CO₂ + IR134
-#   dynamics       0.20 (80% masked) — winds radiometrically unobserved; mass
-#                                      coupling still gives the model a chance
-#   boundary       0.25 (75% masked) — window-IR can fill skt / 2t
-#   moisture       0.30 (70% masked) — WV channels cover q_300–700
-#   _default       0.70 (30% masked) — strat q noise + statics; keep as context
+# Group keep rates (fraction kept; the rest is masked) — SOFTENED ladder.
+# The original Profile A rates were validated under the pre-2026-07-06 buggy
+# semantics, where the per-group channel mask never applied and every channel
+# stayed visible on the ~89% union of group masks. With the fixes a group's
+# channels are truly gone outside its own mask, so Profile A (0.12 keep on
+# synoptic_mass) is far harder than anything validated. First fixed-semantics
+# run uses the ladder shifted up; Profile A is kept commented per group below
+# to retry once this run establishes the new baseline.
+#   synoptic_mass  0.25 (was 0.12) — strong proxy from IASI CO₂ + IR134
+#   dynamics       0.30 (was 0.20) — winds radiometrically unobserved; mass
+#                                    coupling still gives the model a chance
+#   boundary       0.35 (was 0.25) — window-IR can fill skt / 2t
+#   moisture       0.40 (was 0.30) — WV channels cover q_300–700
+#   _default       0.70 (unchanged) — strat q noise + statics; keep as context
+# With group_masking_apply_base below, effective per-channel visibility is
+# rate × 0.7 base (synoptic_mass ≈ 17.5% of cells, _default ≈ 49%).
 # ─────────────────────────────────────────────────────────────────────────────
 
 ERA5_in:
@@ -55,12 +64,14 @@ ERA5_in:
   # small fraction of samples). Stacks with per-group spatial masking below.
   channel_drop_rate: 0.1
 
-  # Optional: intersect every per-group mask with one stream-level base mask drawn
-  # from the training config's model_input strategy (healpix rate 0.7 here). Bounds
-  # encoder+decoder cost by the base rate — without it, independent group masks
-  # union towards full coverage (~89% of cells visible for these 5 groups).
-  # Changes masking semantics vs earlier grouped runs; enable deliberately.
-  # group_masking_apply_base: True
+  # Intersect every per-group mask with one stream-level base mask drawn from the
+  # training config's model_input strategy (healpix rate 0.7 here). ~30% of cells
+  # become fully invisible across ALL channels and encoder cost is bounded by the
+  # base rate — without it, independent group masks union towards full coverage
+  # (~89% of cells visible for these 5 groups). Enabled 2026-07-06 together with
+  # the masking fixes: serves the goal of making ERA5_in structurally unreliable.
+  # Deliberately NOT set on the obs streams — their visibility is the point.
+  group_masking_apply_base: True
 
   # Stream-level masking_rate is kept for backward compat; with Mode A active
   # per-group masks override it. Required only for loss correspondence mapping.
@@ -107,7 +118,8 @@ ERA5_in:
       masking:
         strategy: random
         config:
-          rate: 0.12        # Profile A: 88% masked
+          # rate: 0.12     # Profile A — retry once the softened run is validated
+          rate: 0.25        # softened: 75% masked
           rate_sampling: false
       pred_head:
         ens_size: 1
@@ -125,7 +137,8 @@ ERA5_in:
       masking:
         strategy: random
         config:
-          rate: 0.20        # Profile A: 80% masked
+          # rate: 0.20     # Profile A — retry once the softened run is validated
+          rate: 0.30        # softened: 70% masked
           rate_sampling: false
       pred_head:
         ens_size: 1
@@ -147,7 +160,8 @@ ERA5_in:
       masking:
         strategy: random
         config:
-          rate: 0.25        
+          # rate: 0.25     # Profile A — retry once the softened run is validated
+          rate: 0.35        # softened: 65% masked
           rate_sampling: false
       pred_head:
         ens_size: 1
@@ -164,7 +178,8 @@ ERA5_in:
       masking:
         strategy: random
         config:
-          rate: 0.30        
+          # rate: 0.30     # Profile A — retry once the softened run is validated
+          rate: 0.40        # softened: 60% masked
           rate_sampling: false
       pred_head:
         ens_size: 1
