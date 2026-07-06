@@ -204,6 +204,9 @@ class Masker:
         else:
             self._effective_masking_cfgs = {}
 
+        # source->target correspondence parsed from static config; cached per stream
+        self._corr_cache: dict = {}
+
     def reset_rng(self, rng) -> None:
         """
         Reset rng after mini_epoch to ensure proper randomization
@@ -659,7 +662,8 @@ class Masker:
                 for k, v in active_source_cfgs.items()
                 if _is_forecast_like(v.get("masking_strategy", ""))
             }
-            target_cfgs = copy.deepcopy(source_cfgs)
+            # read-only downstream; no need to deep-copy per sample
+            target_cfgs = source_cfgs
         else:
             # Modes A and C start from the full active sets; Mode A will also
             # run mixed-strategy resolution in Phase 5.
@@ -669,13 +673,30 @@ class Masker:
         # ── Phase 5: Resolve "mixed" strategy (Mode A only) ──────────────────
         # Resolve once per sample so source and target share the same
         # sub-strategy draw (same spatial structure, no double-draw for "mixed").
+        # The deep copy is only needed when a "mixed" entry is actually resolved
+        # (it mutates the entry); everything else only reads the configs, and
+        # per-sample deepcopies of OmegaConf nodes are expensive.
         if is_mode_a:
-            source_cfgs = self._resolve_mixed_strategies(copy.deepcopy(source_cfgs))
-            target_cfgs = copy.deepcopy(source_cfgs)
+            has_mixed = any(cfg.get("masking_strategy") == "mixed" for cfg in source_cfgs.values())
+            if has_mixed:
+                source_cfgs = self._resolve_mixed_strategies(copy.deepcopy(source_cfgs))
+            target_cfgs = source_cfgs
 
         # ── Phase 6: Build source→target correspondence mapping ───────────────
-        losses = stream_masking_cfg.losses
-        corr_dict = self.parse_src_target_correspondence(losses, target_cfgs, source_cfgs)
+        # The correspondence only depends on static config (losses + cfg keys),
+        # so parse once per (stream, mode signature) instead of per sample.
+        corr_cache_key = (
+            stream_info["name"],
+            is_mode_a,
+            is_mode_b,
+            len(source_cfgs),
+            len(target_cfgs),
+        )
+        corr_dict = self._corr_cache.get(corr_cache_key)
+        if corr_dict is None:
+            losses = stream_masking_cfg.losses
+            corr_dict = self.parse_src_target_correspondence(losses, target_cfgs, source_cfgs)
+            self._corr_cache[corr_cache_key] = corr_dict
 
         # randomly_drop_as_source_rate from consolidated masking config (training only)
         randomly_drop_rate = (

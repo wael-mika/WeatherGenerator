@@ -112,6 +112,77 @@ def test_forcing_stream_target_stays_empty():
         assert source_masks.get_mask(0).sum() > 0
 
 
+def test_repeated_calls_fresh_masks_stable_mapping():
+    """The correspondence cache must not freeze anything sample-dependent: repeated calls
+    give fresh random masks but an identical source->target mapping, and targets stay
+    exact complements every time."""
+    stream_info = {
+        "name": "S_REPEAT",
+        "train_source_channels": ["c1"],
+        "train_target_channels": ["c1"],
+    }
+    masker = _make_masker({"S_REPEAT": stream_info})
+
+    seen_masks = []
+    for _ in range(5):
+        target_masks, source_masks, mapping = masker.build_samples_for_stream(
+            "masking", NUM_CELLS, stream_info
+        )
+        assert mapping.tolist() == [0]
+        src, tgt = source_masks.get_mask(0), target_masks.get_mask(0)
+        assert (src ^ tgt).all(), "complement must hold on every call"
+        seen_masks.append(tuple(src.tolist()))
+
+    assert len(set(seen_masks)) > 1, "source masks must differ across samples (RNG not frozen)"
+
+
+def test_mixed_strategy_redraws_per_sample():
+    """Skipping the per-sample deepcopy must not leak the resolved 'mixed' sub-strategy
+    back into the effective config: each call must re-draw the sub-strategy."""
+    mode_cfg = OmegaConf.create(
+        {
+            "training_mode": "masking",
+            "model_input": {
+                "input_physical": {
+                    "masking_strategy": "mixed",
+                    "masking_strategy_config": {
+                        "rate": 0.5,
+                        "strategies": ["random", "healpix"],
+                        "hl_mask_levels": [0],
+                    },
+                }
+            },
+            "losses": {"masking": {"loss_fcts": {"mse": {"weight": 1.0}}}},
+        }
+    )
+    stream_info = {
+        "name": "S_MIXED",
+        "train_source_channels": ["c1"],
+        "train_target_channels": ["c1"],
+    }
+    masker = Masker(HEALPIX_LEVEL, TRAIN, OmegaConf.create({"S_MIXED": stream_info}), mode_cfg)
+    masker.reset_rng(np.random.default_rng(3))
+
+    chosen = set()
+    for _ in range(20):
+        target_masks, source_masks, _ = masker.build_samples_for_stream(
+            "masking", NUM_CELLS, stream_info
+        )
+        strategy = source_masks.metadata[0].params["masking_strategy"]
+        assert strategy in ("random", "healpix"), "mixed must be resolved to a sub-strategy"
+        chosen.add(strategy)
+        # complement correspondence must hold for the resolved strategy too
+        assert (source_masks.get_mask(0) ^ target_masks.get_mask(0)).all()
+
+    assert chosen == {"random", "healpix"}, (
+        f"sub-strategy frozen to {chosen}: resolved 'mixed' leaked into the shared config"
+    )
+
+    # the effective config itself must still say 'mixed' (no mutation leaked)
+    eff = masker._effective_masking_cfgs["S_MIXED"]["model_input"]["input_physical"]
+    assert eff["masking_strategy"] == "mixed"
+
+
 def test_channel_drop_keeps_at_least_one_channel():
     """Even at drop rate ~1.0 the channel-drop mask must keep one channel."""
     stream_info = {
