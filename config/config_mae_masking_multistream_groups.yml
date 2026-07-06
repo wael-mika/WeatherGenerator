@@ -123,7 +123,10 @@ general:
   multiprocessing_method: "fork"   # fork deadlocks the dataloader workers when they open the
                                     # async (asyncio/zarr) obs stores; spawn avoids inheriting a
                                     # broken event-loop state across fork.
-  desc: "mae_multistream_groups_profileA"
+  # v2 = post-2026-07-06 masking fixes (per-group channel masks actually apply,
+  # channel_drop live, group_masking_apply_base on ERA5_in, softened rate ladder).
+  # NOT comparable to pre-fix "mae_multistream_groups_profileA" runs.
+  desc: "mae_multistream_groups_v2_softA"
   run_id: ???
   run_history: []
 
@@ -134,10 +137,11 @@ train_logging:
   log_grad_norms: False
 
 data_loading:
-  # Profiled 2026-07-02: at 6 workers the loop is ~72% dataloader-bound (GPU idle waiting on the
-  # ~57 s/sample obs pipeline). 12 roughly halves the data wait. Single-GPU/interactive dev can push
-  # to 16-24 (0% data wait at 16, ~3.4x throughput). If a MULTI-NODE run host-OOMs, drop back to 8
-  # (host RAM is shared across the ranks on a node; memory_pinning is off, which helps).
+  # Profiled 2026-07-02 (PRE-perf-fixes): 6 workers left the loop ~72% dataloader-bound on a
+  # ~57 s/sample obs pipeline; 12 roughly halved the data wait; single-GPU dev hit 0% wait at 16.
+  # The 2026-07-06 datasets perf commits cut per-sample mask/tokenize CPU substantially, so
+  # 57 s/sample is stale (upper bound) — 12 is safe; re-profile with the profile config to see if
+  # multi-node can drop to 8-10 and free host RAM (shared across ranks; memory_pinning off).
   num_workers: 12
   rng_seed: ???
   repeat_data_in_mini_epoch: False
@@ -226,5 +230,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: "mae_multistream_groups_profileA"
+  exp: "mae_multistream_groups_v2_softA"
   grid: null
