@@ -695,6 +695,11 @@ class Masker:
         if channel_drop_rate > 0.0 and num_channels is not None and num_channels > 0:
             # True = keep channel, False = drop (zero out) channel
             source_channel_drop_mask = self.rng.random(num_channels) >= channel_drop_rate
+            # always keep at least one channel: an all-dropped source degenerates to
+            # all-zero (mean-value) tokens (relevant for few-channel streams, e.g.
+            # 2-channel VIS streams at drop rate 0.15 lose both ~2% of samples)
+            if not source_channel_drop_mask.any():
+                source_channel_drop_mask[self.rng.integers(num_channels)] = True
 
         # ── Phase 5.5: Per-group spatial masks ────────────────────────────────
         # Mode A (stream config) takes priority over Mode B (model_input tags).

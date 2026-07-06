@@ -97,6 +97,38 @@ def test_group_channel_mask_applied_in_get_source():
         assert torch.equal(data_cols, expected), f"cell {i_cell}: {data_cols} != {expected}"
 
 
+def test_channel_drop_composes_with_group_masks():
+    """channel_drop_rate must keep working when per-group masks are active: a dropped
+    channel is zeroed everywhere, including cells its group covers."""
+    tokenizer = _make_tokenizer()
+    rdata = _make_rdata()
+
+    group_spatial_masks = {
+        "grp_a": torch.ones(NUM_CELLS, dtype=torch.bool),
+        "grp_b": torch.ones(NUM_CELLS, dtype=torch.bool),
+    }
+    cell_mask = torch.ones(NUM_CELLS, dtype=torch.bool)
+    # drop ch_a2 (grp_a) and ch_x (ungrouped)
+    channel_drop_mask = np.array([True, False, True, False])
+
+    token_data = tokenizer.get_tokens_windows(STREAM_INFO, [rdata], True)[0]
+    tokens_cells, _ = tokenizer.get_source(
+        STREAM_INFO,
+        rdata,
+        token_data,
+        TIME_WIN,
+        cell_mask,
+        channel_drop_mask=channel_drop_mask,
+        group_spatial_masks=group_spatial_masks,
+    )
+
+    num_ch = len(CHANNEL_NAMES)
+    for i_cell, token in enumerate(tokens_cells):
+        data_cols = token[0, -num_ch:]
+        expected = torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=token.dtype)
+        assert torch.equal(data_cols, expected), f"cell {i_cell}: {data_cols} != {expected}"
+
+
 def test_group_masking_without_channel_names_raises():
     """Missing channel names must fail loudly, not silently skip group channel masking."""
     tokenizer = _make_tokenizer()
