@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 import pandas as pd
 import torch
@@ -220,6 +222,31 @@ def tokenize_spacetime(
     return idxs_cells, idxs_cells_lens
 
 
+def per_cell_counts(
+    idxs_cells_lens, mask_tokens_np: np.typing.NDArray, idxs_lens_np: np.typing.NDArray
+) -> tuple[Tensor, Tensor]:
+    """Per-cell counts of visible tokens and visible data points.
+
+    Vectorized via segment sums (np.bincount) over a token->cell index; the previous
+    per-cell Python loops created a torch.tensor per healpix cell (~30 ms per call at
+    healpix level 5, on the per-sample dataloader critical path).
+    """
+    num_cells = len(idxs_cells_lens)
+    num_tokens_per_cell = np.fromiter(
+        (len(x) for x in idxs_cells_lens), dtype=np.int64, count=num_cells
+    )
+    token_to_cell = np.repeat(np.arange(num_cells), num_tokens_per_cell)
+    mask_int = mask_tokens_np.astype(np.int64)
+    tokens_per_cell = np.bincount(token_to_cell, weights=mask_int, minlength=num_cells)
+    masked_points_per_cell = np.bincount(
+        token_to_cell, weights=idxs_lens_np * mask_int, minlength=num_cells
+    )
+    return (
+        torch.from_numpy(tokens_per_cell.astype(np.int64)),
+        torch.from_numpy(masked_points_per_cell.astype(np.int32)),
+    )
+
+
 def tokenize_apply_mask_source(
     idxs_cells,
     idxs_cells_lens,
@@ -253,15 +280,18 @@ def tokenize_apply_mask_source(
     if mask_tokens is None:
         return return_empty(rdata, idxs_cells_lens)
 
+    mask_tokens_np = np.asarray(mask_tokens, dtype=bool)
+
     # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    idxs_data = list(itertools.compress(idxs_tokens, mask_tokens_np))
 
     if len(idxs_data) == 0:
         return return_empty(rdata, idxs_cells_lens)
 
     idxs_data = torch.cat(idxs_data)
     # filter list of token lens using mask and obtain flat list for splitting
-    idxs_data_lens = torch.tensor([t for t, m in zip(idxs_lens, mask_tokens, strict=True) if m])
+    idxs_lens_np = np.asarray(idxs_lens, dtype=np.int64)
+    idxs_data_lens = torch.from_numpy(idxs_lens_np[mask_tokens_np])
 
     # pad with zero at the begining of the conceptual 2D data tensor:
     # idxs_cells -> idxs_tokens -> idxs_data has been prepared so
@@ -288,23 +318,15 @@ def tokenize_apply_mask_source(
         else:
             # 2-D: (num_visible_tokens, num_channels) — per-group spatial masking.
             # Expand from token level to data-point level using idxs_data_lens, then zero.
-            points_per_token = idxs_data_lens.tolist()
-            channel_mask_per_point = torch.repeat_interleave(
-                mask_channels, torch.tensor(points_per_token), dim=0
-            )
+            channel_mask_per_point = torch.repeat_interleave(mask_channels, idxs_data_lens, dim=0)
             data = data.clone()
             data[~channel_mask_per_point] = 0.0
 
     # local coords
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    tokens_per_cell = torch.tensor([t.sum() for t in mask_tokens_per_cell])
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
+    # per-cell visible-token and visible-point counts via segment sums over cells
+    tokens_per_cell, masked_points_per_cell = per_cell_counts(
+        idxs_cells_lens, mask_tokens_np, idxs_lens_np
+    )
     coords_local = get_source_coords_local(coords, hpy_verts_rots, masked_points_per_cell)
 
     # create tensor that contains all data
@@ -361,8 +383,11 @@ def tokenize_apply_mask_target(
     if mask_tokens is None:
         return return_empty(rdata, idxs_cells_lens)
 
+    mask_tokens_np = np.asarray(mask_tokens, dtype=bool)
+    idxs_lens_np = np.asarray(idxs_lens, dtype=np.int64)
+
     # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    idxs_data = list(itertools.compress(idxs_tokens, mask_tokens_np))
 
     if len(idxs_data) == 0:
         return return_empty(rdata, idxs_cells_lens)
@@ -385,22 +410,15 @@ def tokenize_apply_mask_target(
             data[:, ~mask_channels] = torch.nan
         else:
             # 2-D per-group spatial masking: expand from token to data-point level.
-            pts = torch.tensor([t for t, m in zip(idxs_lens, mask_tokens, strict=True) if m])
+            pts = torch.from_numpy(idxs_lens_np[mask_tokens_np])
             channel_mask_per_point = torch.repeat_interleave(mask_channels, pts, dim=0)
             data = data.clone()
             data[~channel_mask_per_point] = torch.nan
 
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
+    _, masked_points_per_cell = per_cell_counts(idxs_cells_lens, mask_tokens_np, idxs_lens_np)
 
     # compute encoding of target coordinates used in prediction network
-    if torch.tensor(idxs_lens).sum() > 0:
+    if idxs_lens_np.sum() > 0:
         coords_local = get_target_coords_local(
             stream_id,
             hl,
