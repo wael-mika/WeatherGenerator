@@ -319,7 +319,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        # TODO: split up
+        # coords pass: skip the data gather + channel masking (need_data=False)
         _, _, _, coords_local, coords_per_cell = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
@@ -333,6 +333,7 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            need_data=False,
         )
 
         return (coords_local, coords_per_cell)
@@ -366,6 +367,7 @@ class TokenizerMasking(Tokenizer):
                 group_spatial_masks,
             )
 
+        # values pass: skip the expensive per-point coords_local build (need_coords_local=False)
         data, datetimes, coords, _, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
@@ -379,6 +381,7 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            need_coords_local=False,
         )
 
         idxs_ord_inv = None
