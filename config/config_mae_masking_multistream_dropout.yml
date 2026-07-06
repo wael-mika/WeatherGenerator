@@ -122,7 +122,12 @@ train_logging:
   checkpoint: 250
 
 data_loading:
-  num_workers: 10
+  # Profiled 2026-07-02 (PRE-perf-fixes): 6 workers left the loop ~72% dataloader-bound on a
+  # ~57 s/sample obs pipeline; 12 roughly halved the data wait; single-GPU dev hit 0% wait at 16.
+  # The 2026-07-06 datasets perf commits cut per-sample mask/tokenize CPU substantially, so
+  # 57 s/sample is stale (upper bound) — 12 is safe; re-profile with the profile config to see if
+  # multi-node can drop to 8-10 and free host RAM (shared across ranks; memory_pinning off).
+  num_workers: 12
   rng_seed: ???
   repeat_data_in_mini_epoch: False
 

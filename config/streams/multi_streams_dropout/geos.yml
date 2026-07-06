@@ -21,6 +21,8 @@ METEOSAT_SEVIRI_IR:
   location_weight: cosine_latitude
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.5
         rate_sampling: false
@@ -54,6 +56,8 @@ GOES_ABI_IR:
   location_weight: cosine_latitude
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.5
         rate_sampling: false
@@ -89,6 +93,8 @@ HIMAWARI_AHI_IR:
   location_weight: cosine_latitude
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.5
         rate_sampling: false
@@ -123,6 +129,8 @@ GOES_ABI_VIS:
   channel_drop_rate: 0.15
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.6
         rate_sampling: false
@@ -159,6 +167,8 @@ HIMAWARI_AHI_VIS:
   channel_drop_rate: 0.15
   masking_override:
     model_input:
+      # Random (not inherited top-level healpix) — see era5.yml note.
+      masking_strategy: random
       masking_strategy_config:
         rate: 0.6
         rate_sampling: false
