@@ -104,7 +104,6 @@ class TokenizerMasking(Tokenizer):
         idxs_cells_lens,
         mask,
         channel_drop_mask=None,
-        group_spatial_masks=None,
     ):
         """Convert a cell-level spatial mask to a token-level mask.
 
@@ -113,10 +112,6 @@ class TokenizerMasking(Tokenizer):
             channel_drop_mask: optional (num_channels,) bool — True = keep channel.
                 When set, returned as mask_channels for the source tokenizer so that
                 dropped channels are zeroed out in the token data.
-            group_spatial_masks: optional dict {group_name: (num_cells,) bool} — per-group
-                spatial masks.  When set, a 2-D (num_visible_tokens × num_channels) mask is
-                computed so that each token only carries channels from groups that cover its cell.
-                (Requires num_channels_per_group mapping; handled in Feature 1 extension.)
         """
 
         mask_tokens, mask_channels = None, None
@@ -144,15 +139,10 @@ class TokenizerMasking(Tokenizer):
         else:
             mask_tokens = np.array([], dtype=bool)
 
-        # Channel-level masks (independent of spatial masking).
-        # group_spatial_masks produces a 2D token×channel mask (Feature 1); the
-        # simpler 1D channel_drop_mask is used when only Feature 3 is active.
-        if group_spatial_masks is not None:
-            # 2D case: built below once we know which cells are visible (mask_tokens).
-            # Resolved in get_source / get_target_values with channel name info.
-            mask_channels = None  # set by caller after resolving group→channel mapping
-        elif channel_drop_mask is not None:
-            # 1D case: same channel mask applied to every visible token.
+        # Channel dropout: same 1-D channel mask applied to every visible token.
+        # When per-group masks are active, get_source upgrades this to a 2-D
+        # token×channel mask and combines the dropout mask into it.
+        if channel_drop_mask is not None:
             mask_channels = torch.from_numpy(np.asarray(channel_drop_mask))
 
         return (mask_tokens, mask_channels)
@@ -290,13 +280,12 @@ class TokenizerMasking(Tokenizer):
             idxs_cells_lens,
             cell_mask,
             channel_drop_mask=channel_drop_mask,
-            group_spatial_masks=group_spatial_masks,
         )
 
         # If group_spatial_masks present, build 2-D channel mask now that we
         # have both token-level cell indices and channel names from rdata.
         if group_spatial_masks is not None and mask_tokens is not None:
-            mask_channels = self._build_group_channel_mask_2d(
+            mask_channels_2d = self._build_group_channel_mask_2d(
                 stream_info,
                 rdata.source_channels,
                 idxs_cells,
@@ -304,6 +293,13 @@ class TokenizerMasking(Tokenizer):
                 mask_tokens,
                 group_spatial_masks,
             )
+            if mask_channels_2d is not None:
+                # Channel dropout composes with group masking: a dropped channel is
+                # removed everywhere, on top of the per-group spatial visibility.
+                if channel_drop_mask is not None:
+                    mask_channels_2d &= torch.from_numpy(np.asarray(channel_drop_mask))
+                mask_channels = mask_channels_2d
+            # else: keep the 1-D channel_drop_mask from cell_to_token_mask
 
         source_tokens_cells, source_tokens_lens = tokenize_apply_mask_source(
             idxs_cells,

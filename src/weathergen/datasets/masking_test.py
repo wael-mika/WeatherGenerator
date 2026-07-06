@@ -112,6 +112,25 @@ def test_forcing_stream_target_stays_empty():
         assert source_masks.get_mask(0).sum() > 0
 
 
+def test_channel_drop_keeps_at_least_one_channel():
+    """Even at drop rate ~1.0 the channel-drop mask must keep one channel."""
+    stream_info = {
+        "name": "S_DROP",
+        "train_source_channels": ["c1", "c2"],
+        "train_target_channels": ["c1", "c2"],
+        "channel_drop_rate": 1.0,
+    }
+    masker = _make_masker({"S_DROP": stream_info})
+
+    _, source_masks, _ = masker.build_samples_for_stream(
+        "masking", NUM_CELLS, stream_info, num_channels=2
+    )
+
+    drop_mask = source_masks.get_channel_drop_mask(0)
+    assert drop_mask is not None
+    assert drop_mask.sum() == 1, "exactly one channel must survive an all-drop draw"
+
+
 def test_diagnostic_stream_with_target_override():
     """A stream whose masking_override defines target_input (era5_out pattern) must get an
     explicit target (Mode C) honouring the override, with an all-False source (diagnostic)."""
