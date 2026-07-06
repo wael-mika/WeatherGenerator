@@ -160,7 +160,7 @@ class TokenizerMasking(Tokenizer):
     def _build_group_channel_mask_2d(
         self,
         stream_info: dict,
-        rdata: IOReaderData,
+        channel_names: list[str] | None,
         idxs_cells,
         idxs_cells_lens,
         mask_tokens: np.typing.NDArray,
@@ -173,7 +173,7 @@ class TokenizerMasking(Tokenizer):
 
         Args:
             stream_info: stream config containing ``variable_groups``.
-            rdata: reader data providing ``source_channels`` (list of channel names).
+            channel_names: names of the data columns (source or target channels).
             idxs_cells: list of per-cell token index lists (from tokenize_space/spacetime).
             idxs_cells_lens: per-cell token-size lists.
             mask_tokens: (num_all_tokens,) bool — which tokens are visible.
@@ -184,9 +184,16 @@ class TokenizerMasking(Tokenizer):
             variable_groups is not configured on the stream.
         """
         vgroups = stream_info.get("variable_groups")
-        channel_names = getattr(rdata, "source_channels", None)
-        if vgroups is None or channel_names is None or not group_spatial_masks:
+        if vgroups is None or not group_spatial_masks:
             return None
+        if channel_names is None:
+            # Without channel names the group -> channel resolution is impossible and the
+            # per-group masks would silently degenerate to union-only spatial masking.
+            raise ValueError(
+                f"Stream '{stream_info.get('name', '?')}' has variable_groups with per-group "
+                "masks but no channel names were attached to the reader data. "
+                "(IOReaderData.source_channels/target_channels must be set by the sampler.)"
+            )
 
         # Static per-stream mapping (regex matching) — computed once and cached.
         group_order, channel_group_id = self._get_channel_group_id(stream_info, channel_names)
@@ -230,15 +237,18 @@ class TokenizerMasking(Tokenizer):
     def _get_channel_group_id(
         self, stream_info: dict, channel_names: list[str]
     ) -> tuple[list[str], np.typing.NDArray]:
-        """Return (group_order, channel_group_id) for a stream, cached per stream name.
+        """Return (group_order, channel_group_id), cached per (stream name, channel names).
 
         ``channel_group_id[c]`` is the row index into ``group_order`` of the variable_group that
         owns channel ``c`` (via fullmatch on the group's ``variables`` regexes), the ``_default``
         group's row for unmatched channels when ``_default`` exists, or ``-1`` (always kept)
         otherwise. The mapping is static for a stream, so it is computed once and reused.
+        The cache is keyed on the channel names too since source and target channels of the
+        same stream can differ.
         """
-        cache = self._group_channel_cache.get(stream_info["name"])
-        if cache is not None and cache["channel_names"] == channel_names:
+        cache_key = (stream_info["name"], tuple(channel_names))
+        cache = self._group_channel_cache.get(cache_key)
+        if cache is not None:
             return cache["group_order"], cache["channel_group_id"]
 
         vgroups = stream_info["variable_groups"]
@@ -256,8 +266,7 @@ class TokenizerMasking(Tokenizer):
         if "_default" in vgroups:
             channel_group_id[channel_group_id < 0] = row_of["_default"]
 
-        self._group_channel_cache[stream_info["name"]] = {
-            "channel_names": list(channel_names),
+        self._group_channel_cache[cache_key] = {
             "group_order": group_order,
             "channel_group_id": channel_group_id,
         }
@@ -289,7 +298,7 @@ class TokenizerMasking(Tokenizer):
         if group_spatial_masks is not None and mask_tokens is not None:
             mask_channels = self._build_group_channel_mask_2d(
                 stream_info,
-                rdata,
+                rdata.source_channels,
                 idxs_cells,
                 idxs_cells_lens,
                 mask_tokens,

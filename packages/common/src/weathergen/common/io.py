@@ -133,6 +133,10 @@ class IOReaderData:
     data: NDArray[DType]
     datetimes: NDArray[NPDT64]
     is_spoof: bool = False
+    # Channel names for the data columns; populated by the data sampler from the stream's
+    # readers. Required for per-variable-group masking (channel -> group resolution).
+    source_channels: list[str] | None = None
+    target_channels: list[str] | None = None
 
     def is_empty(self):
         """

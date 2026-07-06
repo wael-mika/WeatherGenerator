@@ -596,6 +596,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 )
                 rdata.is_spoof = True
 
+            # attach channel names for per-variable-group masking (channel -> group resolution)
+            rdata.source_channels = stream_ds[0].source_channels
+
             input_data += [rdata]
 
         # target data: collect for all forecast steps
@@ -618,6 +621,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 )
                 rdata.is_spoof = True
 
+            # attach channel names for per-variable-group masking (channel -> group resolution)
+            rdata.target_channels = stream_ds[0].target_channels
+
             output_data += [rdata]
 
         return (input_data, output_data)
@@ -633,7 +639,6 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             num_channels = None
             if stream_data.readers:
                 num_channels = stream_data.readers[0].get_source_num_channels() or None
-
 
             # Build source and target sample masks
             masks[stream_name] = self.tokenizer.build_samples_for_stream(
