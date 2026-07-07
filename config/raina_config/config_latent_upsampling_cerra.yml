@@ -199,6 +199,27 @@ validation_config:
   shuffle: False
   start_date: 2023-01-01T00:00
   end_date: 2023-12-31T00:00
+  # Validation-ONLY sharpness metric (merged on top of training losses at validation time;
+  # training gradients stay pure MSE — verified run vedt5qan, see doc §8). MSE alone cannot
+  # detect blob sharpening (it rewards blur); read LossStructureFunction.CERRA.structure.avg:
+  # 0 = spectrum matched, lower is sharper. Compare arms on the full-validation average.
+  losses: {
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          channels: ['tp'],           # tp only: keeps circular 10wdir out of the metric
+          num_pairs: 262144,          # uniform pairs starve the 10-25 km bin at lower counts
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,
+        },
+      },
+    },
+  }
   validate_with_ema:
     enabled: True
     ema_ramp_up_ratio: 0.09
