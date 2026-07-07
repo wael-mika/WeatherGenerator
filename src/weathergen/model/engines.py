@@ -81,6 +81,9 @@ class MoEBlockConfig:
     position_embed_dim: int
     router_hidden_dim: int
     router_z_loss_weight: float
+    num_shared_experts: int
+    balance_mode: str
+    bias_update_rate: float
     debug_enabled: bool
     debug_interval: int
     debug_top_experts: int
@@ -131,6 +134,9 @@ def _get_moe_block_config(
         position_embed_dim=cf.get(f"{prefix}_position_embed_dim", 128),
         router_hidden_dim=cf.get(f"{prefix}_router_hidden_dim", 0),
         router_z_loss_weight=cf.get(f"{prefix}_router_z_loss_weight", 0.0),
+        num_shared_experts=cf.get(f"{prefix}_num_shared_experts", 0),
+        balance_mode=cf.get(f"{prefix}_balance_mode", "aux"),
+        bias_update_rate=cf.get(f"{prefix}_bias_update_rate", 0.001),
         debug_enabled=cf.get(f"{prefix}_debug", False),
         debug_interval=cf.get(f"{prefix}_debug_interval", 100),
         debug_top_experts=cf.get(f"{prefix}_debug_top_experts", 3),
@@ -165,7 +171,9 @@ def _build_global_position_ids(
         ``[T]`` long tensor of position IDs.
     """
     special = (num_register_tokens + num_class_tokens) * num_queries
-    cell_ids = torch.arange(num_cells, device=device, dtype=torch.long).repeat_interleave(num_queries)
+    cell_ids = torch.arange(num_cells, device=device, dtype=torch.long).repeat_interleave(
+        num_queries
+    )
     if special == 0:
         return cell_ids
     special_ids = torch.full((special,), -1, device=device, dtype=torch.long)
@@ -858,6 +866,9 @@ class ForecastingEngine(torch.nn.Module):
                             position_embed_dim=moe_cfg.position_embed_dim,
                             router_hidden_dim=moe_cfg.router_hidden_dim,
                             router_z_loss_weight=moe_cfg.router_z_loss_weight,
+                            num_shared_experts=moe_cfg.num_shared_experts,
+                            balance_mode=moe_cfg.balance_mode,
+                            bias_update_rate=moe_cfg.bias_update_rate,
                             debug_enabled=moe_cfg.debug_enabled,
                             debug_interval=moe_cfg.debug_interval,
                             debug_top_experts=moe_cfg.debug_top_experts,
@@ -889,7 +900,21 @@ class ForecastingEngine(torch.nn.Module):
                     torch.nn.init.normal_(m.bias, mean=0, std=0.001)
 
         for block in self.fe_blocks:
-            block.apply(init_weights_final)
+            if isinstance(block, MoEBlock):
+                # Do NOT apply the near-zero (std=0.001) init to the MoE router:
+                # a ~0 router yields a near-uniform softmax, so every token is
+                # routed essentially at random with near-zero gradient, all
+                # experts see the full token distribution, and they collapse to
+                # the same function — making the block behave like a dense FFN.
+                # Keep the near-identity start only on the experts (and the
+                # shared expert), so the block still starts ~identity while the
+                # router retains its default, discriminative init.
+                for expert in block.experts:
+                    expert.apply(init_weights_final)
+                if getattr(block, "shared_expert", None) is not None:
+                    block.shared_expert.apply(init_weights_final)
+            else:
+                block.apply(init_weights_final)
 
         self.initialize_moe_position_ids()
 

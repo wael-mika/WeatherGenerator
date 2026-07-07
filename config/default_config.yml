@@ -87,6 +87,12 @@ fe_moe_renormalize_gates: True
 fe_moe_expert_hidden_factor: 2.0
 fe_moe_use_spatial_routing: False
 fe_moe_position_embed_dim: 128
+fe_moe_router_hidden_dim: 0        # 0 = linear router; >0 = 2-layer MLP router
+fe_moe_router_z_loss_weight: 0.0   # 0 = disabled
+fe_moe_num_shared_experts: 0       # DeepSeek-style always-on dense expert(s); >=1 guarantees >= dense
+fe_moe_balance_mode: "aux"         # "aux" (LoadBalancingLoss) or "bias" (aux-loss-free balancing)
+fe_moe_bias_update_rate: 0.001     # per-step nudge for the selection bias when balance_mode=="bias"
+fe_moe_diag: True                  # log routing diagnostics (entropy, load CV, dead experts, gate)
 fe_moe_debug: False
 fe_moe_debug_interval: 100
 fe_moe_debug_top_experts: 3

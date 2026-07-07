@@ -30,6 +30,7 @@ from weathergen.model.layers import MoEBlock
 from weathergen.model.model_interface import (
     init_model_and_shard,
 )
+from weathergen.model.moe_diagnostics import collect_moe_diagnostics
 from weathergen.model.utils import apply_fct_to_blocks, set_to_eval
 from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
@@ -154,6 +155,11 @@ class Trainer(TrainerBase):
         cf.world_size_original = self.world_size_original
 
         self.log_grad_norms = cf.train_logging.get("log_grad_norms", False)
+        # MoE routing diagnostics: on when any engine enables MoE with its diag
+        # flag set.  Cheap (reads detached per-block state) so default-on for MoE.
+        self.log_moe_diagnostics = (
+            cf.get("fe_use_moe", False) and cf.get("fe_moe_diag", True)
+        ) or (cf.get("ae_global_use_moe", False) and cf.get("ae_global_moe_diag", True))
 
         # create output directory
         if is_root():
@@ -515,6 +521,13 @@ class Trainer(TrainerBase):
                 self.optimizer.zero_grad()
                 self.grad_scaler.scale(loss).backward()
 
+                # Auxiliary-loss-free MoE balancing: nudge each block's
+                # per-expert selection bias after backward completes.  Must run
+                # after backward — the block forward is re-executed during the
+                # non-reentrant checkpoint recompute, so mutating the bias
+                # earlier would make the recomputed routing diverge.
+                self._update_moe_expert_bias()
+
                 # gradient clipping
                 self.grad_scaler.unscale_(self.optimizer)
                 total_norm = torch.nn.utils.clip_grad_norm_(
@@ -574,6 +587,8 @@ class Trainer(TrainerBase):
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)
+                if self.log_moe_diagnostics:
+                    self._log_moe_diagnostics(TRAIN)
 
             # save model checkpoint (with designation _latest)
             if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
@@ -837,6 +852,28 @@ class Trainer(TrainerBase):
             return None
 
         return torch.stack(moe_losses).sum()
+
+    def _update_moe_expert_bias(self) -> None:
+        """Apply the per-step auxiliary-loss-free balancing update to every
+        :class:`MoEBlock`.  No-op for blocks not in ``balance_mode == "bias"``.
+        Safe to call unconditionally (returns immediately when no MoE blocks).
+        """
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        for module in model_ref.modules():
+            if isinstance(module, MoEBlock):
+                module.update_expert_bias()
+
+    def _log_moe_diagnostics(self, stage: Stage) -> None:
+        """Log per-block MoE routing diagnostics (entropy, load balance, dead
+        experts, gate confidence) so routing health is trackable over training.
+        Rank-0 only; no-op when the model has no MoE routing state.
+        """
+        if not is_root():
+            return
+        model_ref = self.model.module if hasattr(self.model, "module") else self.model
+        metrics = collect_moe_diagnostics(model_ref)
+        if metrics:
+            self.train_logger.log_metrics(stage, metrics, step=self.cf.general.istep)
 
     def _record_moe_aux_loss(
         self, loss_calculator: LossCalculator, moe_aux_loss: torch.Tensor

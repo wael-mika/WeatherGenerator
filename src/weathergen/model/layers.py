@@ -8,9 +8,9 @@
 # nor does it submit to any jurisdiction.
 
 
-from collections.abc import Callable
 import logging
 import math
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -254,10 +254,44 @@ class RouterZLoss(torch.nn.Module):
         if token_mask is not None:
             mask_f = token_mask.to(log_z.dtype)
             denom = mask_f.sum().clamp_min(1.0)
-            loss = (log_z ** 2 * mask_f).sum() / denom
+            loss = (log_z**2 * mask_f).sum() / denom
         else:
-            loss = (log_z ** 2).mean()
+            loss = (log_z**2).mean()
         return self.weight * loss
+
+
+def _select_top_k(
+    router_probs: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    expert_bias: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select the top-k experts per token and return their gate weights.
+
+    When *expert_bias* is ``None`` this is a plain top-k over the softmax
+    probabilities.  When provided, selection is done on ``router_logits +
+    expert_bias`` (auxiliary-loss-free balancing) while the gate weights are
+    gathered from the *unbiased* ``router_probs`` — so the bias steers *which*
+    experts are used without distorting the combination weights.
+
+    Args:
+        router_probs: ``[N, E]`` softmax probabilities.
+        router_logits: ``[N, E]`` pre-softmax logits.
+        top_k: Number of experts to select per token.
+        expert_bias: Optional ``[E]`` per-expert selection bias.
+
+    Returns:
+        expert_indices: ``[N, top_k]`` selected expert indices.
+        expert_weights: ``[N, top_k]`` gate weights normalised to sum to 1.
+    """
+    if expert_bias is not None:
+        selection_scores = router_logits + expert_bias.to(router_logits.dtype)
+        expert_indices = torch.topk(selection_scores, top_k, dim=-1).indices
+        expert_weights = torch.gather(router_probs, -1, expert_indices)
+    else:
+        expert_weights, expert_indices = torch.topk(router_probs, top_k, dim=-1)
+    expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+    return expert_indices, expert_weights
 
 
 class MoERouter(torch.nn.Module):
@@ -310,6 +344,7 @@ class MoERouter(torch.nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
+        expert_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route each token to its top-k experts.
 
@@ -320,6 +355,9 @@ class MoERouter(torch.nn.Module):
             token_mask: Optional ``[N]`` boolean mask.  Masked tokens receive
                 zero router probabilities and will not influence expert
                 selection.
+            expert_bias: Optional ``[E]`` per-expert bias added to the logits
+                for top-k *selection only* (auxiliary-loss-free balancing).
+                Gate weights are still taken from the unbiased softmax.
 
         Returns:
             router_probs: ``[N, E]`` softmax probabilities over all experts.
@@ -348,8 +386,9 @@ class MoERouter(torch.nn.Module):
         else:
             router_probs = F.softmax(router_logits, dim=-1)
 
-        expert_weights, expert_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+        expert_indices, expert_weights = _select_top_k(
+            router_probs, router_logits, self.top_k, expert_bias
+        )
         return router_probs, expert_indices, expert_weights, router_logits
 
 
@@ -473,15 +512,13 @@ class SpatialMoERouter(torch.nn.Module):
             phi_cpu = phi.cpu().float()
 
             freqs_theta = torch.exp(
-                torch.arange(0, half_dim, 2).float()
-                * -(np.log(10000.0) / max(half_dim, 1))
+                torch.arange(0, half_dim, 2).float() * -(np.log(10000.0) / max(half_dim, 1))
             )
             embeddings[:, 0:half_dim:2] = torch.sin(theta_cpu.unsqueeze(1) * freqs_theta)
             embeddings[:, 1:half_dim:2] = torch.cos(theta_cpu.unsqueeze(1) * freqs_theta)
 
             freqs_phi = torch.exp(
-                torch.arange(0, half_dim, 2).float()
-                * -(np.log(10000.0) / max(half_dim, 1))
+                torch.arange(0, half_dim, 2).float() * -(np.log(10000.0) / max(half_dim, 1))
             )
             embeddings[:, half_dim + 0 :: 2] = torch.sin(phi_cpu.unsqueeze(1) * freqs_phi)
             embeddings[:, half_dim + 1 :: 2] = torch.cos(phi_cpu.unsqueeze(1) * freqs_phi)
@@ -500,6 +537,7 @@ class SpatialMoERouter(torch.nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
+        expert_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route tokens using dual-head gated content + spatial scoring.
 
@@ -511,6 +549,9 @@ class SpatialMoERouter(torch.nn.Module):
                 ``arange(N) % num_positions`` is used.
             token_mask: Optional ``[N]`` boolean mask.  Masked tokens get
                 zero router probabilities.
+            expert_bias: Optional ``[E]`` per-expert bias added to the combined
+                logits for top-k *selection only* (auxiliary-loss-free
+                balancing).  Gate weights come from the unbiased softmax.
 
         Returns:
             router_probs: ``[N, E]`` softmax probabilities over all experts.
@@ -521,9 +562,7 @@ class SpatialMoERouter(torch.nn.Module):
         if x.ndim == 3:
             x = x.reshape(-1, x.shape[-1])
         elif x.ndim != 2:
-            raise ValueError(
-                f"SpatialMoERouter expects [N, D] or [B, T, D], got {tuple(x.shape)}"
-            )
+            raise ValueError(f"SpatialMoERouter expects [N, D] or [B, T, D], got {tuple(x.shape)}")
 
         num_tokens = x.shape[0]
         if position_ids is None:
@@ -570,8 +609,9 @@ class SpatialMoERouter(torch.nn.Module):
         else:
             router_probs = F.softmax(router_logits, dim=-1)
 
-        expert_weights, expert_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+        expert_indices, expert_weights = _select_top_k(
+            router_probs, router_logits, self.top_k, expert_bias
+        )
 
         return router_probs, expert_indices, expert_weights, router_logits
 
@@ -617,6 +657,9 @@ class MoEBlock(torch.nn.Module):
         position_embed_dim: int = 128,
         router_hidden_dim: int = 0,
         router_z_loss_weight: float = 0.0,
+        num_shared_experts: int = 0,
+        balance_mode: str = "aux",
+        bias_update_rate: float = 0.001,
         debug_enabled: bool = False,
         debug_interval: int = 100,
         debug_top_experts: int = 3,
@@ -650,6 +693,16 @@ class MoEBlock(torch.nn.Module):
                 hidden size instead of a single linear projection.
             router_z_loss_weight: Scalar multiplier for the
                 :class:`RouterZLoss`.  Set to ``0`` to disable.
+            num_shared_experts: Number of always-on shared experts applied
+                densely to every token (DeepSeek-style).  Their output is added
+                to the routed combination before the residual.  ``0`` disables
+                the shared path, recovering routed-only behaviour.
+            balance_mode: ``"aux"`` (default) uses the auxiliary
+                :class:`LoadBalancingLoss` for balancing; ``"bias"`` uses
+                auxiliary-loss-free bias-based balancing (DeepSeek-V3 style),
+                nudging a per-expert selection bias after each forward.
+            bias_update_rate: Step size for the per-expert bias update when
+                ``balance_mode == "bias"``.
             debug_enabled: Emit periodic diagnostic log lines during training.
             debug_interval: Log every *N*-th forward pass (rank 0 only).
             debug_top_experts: Number of top experts shown in the log line.
@@ -673,6 +726,18 @@ class MoEBlock(torch.nn.Module):
         self._debug_forward_counter = 0
 
         self.experts = nn.ModuleList([expert_fn() for _ in range(num_experts)])
+
+        # Shared always-on expert(s): applied densely to every token so the
+        # block has a guaranteed dense path (output >= dense FFN by
+        # construction).  Reuses the same factory as the routed experts.
+        self.num_shared_experts = max(int(num_shared_experts), 0)
+        if self.num_shared_experts > 0:
+            self.shared_expert = nn.ModuleList(
+                [expert_fn() for _ in range(self.num_shared_experts)]
+            )
+        else:
+            self.shared_expert = None
+
         if use_spatial_router:
             if num_positions is None:
                 raise ValueError("num_positions is required when use_spatial_router=True")
@@ -703,9 +768,24 @@ class MoEBlock(torch.nn.Module):
         self.router_z_loss: RouterZLoss | None = None
         if router_z_loss_weight and router_z_loss_weight > 0:
             self.router_z_loss = RouterZLoss(weight=router_z_loss_weight)
+
+        # Auxiliary-loss-free balancing (DeepSeek-V3 style): a per-expert bias
+        # added to the router logits for top-k *selection only* (not for the
+        # gate weights), nudged after each forward toward uniform load.  The
+        # bias is a persistent buffer so balancing state resumes on
+        # train_continue.
+        if balance_mode not in ("aux", "bias"):
+            raise ValueError(f"balance_mode must be 'aux' or 'bias', got {balance_mode!r}")
+        self.balance_mode = balance_mode
+        self.bias_update_rate = float(bias_update_rate)
+        self.register_buffer(
+            "expert_bias", torch.zeros(num_experts, dtype=torch.float32), persistent=True
+        )
+
         self.last_aux_loss: torch.Tensor | None = None
         self.last_expert_indices: torch.Tensor | None = None
         self.last_expert_weights: torch.Tensor | None = None
+        self.last_expert_load: torch.Tensor | None = None
         self.register_buffer("position_ids", torch.empty(0, dtype=torch.long), persistent=False)
 
     def _should_log_debug(self) -> bool:
@@ -730,7 +810,8 @@ class MoEBlock(torch.nn.Module):
         top_n = min(self.debug_top_experts, self.num_experts)
         values, indices = torch.topk(fractions, k=top_n, sorted=True)
         return ", ".join(
-            f"{int(idx)}:{float(val):.3f}" for idx, val in zip(indices.tolist(), values.tolist(), strict=True)
+            f"{int(idx)}:{float(val):.3f}"
+            for idx, val in zip(indices.tolist(), values.tolist(), strict=True)
         )
 
     def _log_debug_stats(
@@ -860,7 +941,12 @@ class MoEBlock(torch.nn.Module):
                 aux = aux.to(x.device)
             if (not is_batched) and aux.ndim == 2 and aux.shape[0] == x.shape[0]:
                 aux_flat = aux
-            elif is_batched and aux.ndim == 3 and aux.shape[0] == batch_size and aux.shape[1] == seq_len:
+            elif (
+                is_batched
+                and aux.ndim == 3
+                and aux.shape[0] == batch_size
+                and aux.shape[1] == seq_len
+            ):
                 aux_flat = aux.reshape(-1, aux.shape[-1])
             else:
                 raise ValueError(
@@ -973,7 +1059,9 @@ class MoEBlock(torch.nn.Module):
                         **extra_kwargs,
                     )
 
-                weighted = expert_output * weight_sorted[start:end].unsqueeze(-1).to(expert_output.dtype)
+                weighted = expert_output * weight_sorted[start:end].unsqueeze(-1).to(
+                    expert_output.dtype
+                )
                 output.index_add_(0, tok_idx, weighted.to(output.dtype))
                 start = end
         else:
@@ -1040,8 +1128,12 @@ class MoEBlock(torch.nn.Module):
         )
         should_log_debug = self._should_log_debug()
 
+        selection_bias = self.expert_bias if self.balance_mode == "bias" else None
         router_probs, expert_indices, expert_weights, router_logits = self.router(
-            x_flat, position_ids=pos_ids_flat, token_mask=token_mask_flat
+            x_flat,
+            position_ids=pos_ids_flat,
+            token_mask=token_mask_flat,
+            expert_bias=selection_bias,
         )
 
         n_tokens, dim = x_flat.shape
@@ -1067,7 +1159,12 @@ class MoEBlock(torch.nn.Module):
             if token_mask_flat is not None:
                 num_tokens_for_capacity = int(token_mask_flat.sum().item())
             capacity = int(
-                math.ceil(self.capacity_factor * self.top_k * max(num_tokens_for_capacity, 1) / self.num_experts)
+                math.ceil(
+                    self.capacity_factor
+                    * self.top_k
+                    * max(num_tokens_for_capacity, 1)
+                    / self.num_experts
+                )
             )
             capacity = max(capacity, 1)
             # capacity = max number of assignment edges retained *per expert*.
@@ -1095,9 +1192,13 @@ class MoEBlock(torch.nn.Module):
 
             if self.renormalize_gates and token_indices.numel() > 0:
                 # Re-normalize the remaining gate mass per token after dropping edges.
-                token_weight_sum = torch.zeros(n_tokens, dtype=expert_weights_flat.dtype, device=expert_weights_flat.device)
+                token_weight_sum = torch.zeros(
+                    n_tokens, dtype=expert_weights_flat.dtype, device=expert_weights_flat.device
+                )
                 token_weight_sum.index_add_(0, token_indices, expert_weights_flat)
-                expert_weights_flat = expert_weights_flat / token_weight_sum[token_indices].clamp_min(1e-9)
+                expert_weights_flat = expert_weights_flat / token_weight_sum[
+                    token_indices
+                ].clamp_min(1e-9)
 
         self._dispatch_to_experts(
             x_flat,
@@ -1110,13 +1211,27 @@ class MoEBlock(torch.nn.Module):
             extra_kwargs,
         )
 
+        # Shared always-on expert(s): dense path applied to every token,
+        # guaranteeing the block is >= a dense FFN by construction.
+        if self.shared_expert is not None:
+            for expert in self.shared_expert:
+                if aux_flat is not None:
+                    shared_out = expert(x_flat, aux_flat, *extra_args, **extra_kwargs)
+                else:
+                    shared_out = expert(x_flat, *extra_args, **extra_kwargs)
+                output = output + shared_out.to(output.dtype)
+
         if shape_info is not None:
             batch_size, seq_len, _ = shape_info
             output = output.reshape(batch_size, seq_len, dim)
             if self.with_residual:
                 output = output + x_in
-            self.last_expert_indices = expert_indices.reshape(batch_size, seq_len, self.top_k).detach()
-            self.last_expert_weights = expert_weights.reshape(batch_size, seq_len, self.top_k).detach()
+            self.last_expert_indices = expert_indices.reshape(
+                batch_size, seq_len, self.top_k
+            ).detach()
+            self.last_expert_weights = expert_weights.reshape(
+                batch_size, seq_len, self.top_k
+            ).detach()
         else:
             if self.with_residual:
                 output = output + x_in
@@ -1134,7 +1249,9 @@ class MoEBlock(torch.nn.Module):
                 device=x_flat.device,
                 dtype=torch.float32,
             )
-            assignment_weights.scatter_add_(1, expert_indices, expert_weights.to(assignment_weights.dtype))
+            assignment_weights.scatter_add_(
+                1, expert_indices, expert_weights.to(assignment_weights.dtype)
+            )
             step_aux = self.load_balance_loss(
                 router_probs,
                 assignment_weights,
@@ -1146,6 +1263,18 @@ class MoEBlock(torch.nn.Module):
                 self.last_aux_loss = self.last_aux_loss + step_aux
             else:
                 self.last_aux_loss = step_aux
+
+            # Record the router's raw (pre-capacity) per-expert load for the
+            # bias update and diagnostics.  Stored detached — the actual bias
+            # mutation happens in :meth:`update_expert_bias`, called by the
+            # trainer once per step (NOT here: this forward is re-run during
+            # non-reentrant activation checkpointing, so mutating the bias here
+            # would apply it twice and make the recomputed routing diverge).
+            with torch.no_grad():
+                self.last_expert_load = torch.bincount(
+                    expert_indices_pre_capacity.reshape(-1),
+                    minlength=self.num_experts,
+                ).to(torch.float32)
 
         if should_log_debug:
             self._log_debug_stats(
@@ -1167,3 +1296,23 @@ class MoEBlock(torch.nn.Module):
     def reset_aux_loss(self) -> None:
         """Reset the accumulated auxiliary loss. Call before each training step."""
         self.last_aux_loss = None
+
+    def update_expert_bias(self) -> None:
+        """Apply one auxiliary-loss-free balancing step to ``expert_bias``.
+
+        Nudges underloaded experts up and overloaded experts down using the
+        per-expert load recorded in the most recent training forward. Call once
+        per training step from the trainer (never inside the activation-
+        checkpointed forward, which is re-run during backward). No-op unless
+        ``balance_mode == "bias"`` and a load signal is available.
+        """
+        if self.balance_mode != "bias" or self.bias_update_rate <= 0:
+            return
+        if self.last_expert_load is None:
+            return
+        with torch.no_grad():
+            load = self.last_expert_load.to(self.expert_bias.device)
+            mean_load = load.mean()
+            # Underloaded experts (load < mean) get a positive nudge so they are
+            # selected more often next step, and vice-versa.
+            self.expert_bias += self.bias_update_rate * torch.sign(mean_load - load)
