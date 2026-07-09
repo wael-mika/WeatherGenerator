@@ -15,8 +15,10 @@
 # `config/streams/multi_streams_groups/` — see in particular era5.yml for the
 # 5 ERA5 groups and avhrr.yml / geos.yml for the 4 obs physics classes.
 #
-# Architecture inherited from `config_era5_georing_avhrr_masking.yml` (the
-# previously-set-up multi-stream entry config).  Decoder is Option A (shared
+# Architecture matched to the rck9wgm7/ojpn5m0t reference lineage
+# (models/rck9wgm7/model_rck9wgm7_latest.json) so MTM-pretrain + forecast-FT
+# results are comparable to that forecast-trained baseline. Sole deliberate
+# deviation: mlp_type swiglu.  Decoder is Option A (shared
 # stream-level target_readout, per-group pred_head) — validated as best by
 # EVALUATION_SUMMARY.md (V4 separate decoders +8.65% on z_500).
 #
@@ -25,34 +27,35 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 embed_orientation: "channels"
-embed_unembed_mode: "full"
+embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-ae_local_dim_embed: 1024
-ae_local_num_blocks: 2
+ae_local_dim_embed: 2048
+ae_local_num_blocks: 4
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
+ae_local_max_tokens_per_cell: 128
 
 ae_local_num_queries: 1
 ae_local_queries_per_cell: False
-ae_adapter_num_heads: 20
+ae_adapter_num_heads: 16
 ae_adapter_embed: 128
 ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
 ae_global_dim_embed: 2048
-ae_global_num_blocks: 2
+ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
 ae_global_with_qk_lnorm: True
 ae_global_att_dense_rate: 1.0
 ae_global_block_factor: 64
-ae_global_mlp_hidden_factor: 4
+ae_global_mlp_hidden_factor: 2
 ae_global_trailing_layer_norm: False
 
-ae_aggregation_num_blocks: 4
+ae_aggregation_num_blocks: 0
 ae_aggregation_num_heads: 32
 ae_aggregation_dropout_rate: 0.1
 ae_aggregation_with_qk_lnorm: True
@@ -69,7 +72,7 @@ num_class_tokens: 0
 num_register_tokens: 0
 
 fe_num_blocks: 16
-fe_num_heads: 16
+fe_num_heads: 32
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 fe_layer_norm_after_blocks: [7]
@@ -78,8 +81,8 @@ forecast_att_dense_rate: 1.0
 
 healpix_level: 5
 rope_2D: False
-mlp_type: swiglu
-use_xsa: True
+mlp_type: swiglu   # deliberate deviation from rck9wgm7 (plain GELU MLP); params ≈ identical (LLaMA 2/3 rule)
+use_xsa: False     # keep off — rck9wgm7 predates xsa; swiglu stays the only arch deviation
 
 with_mixed_precision: True
 with_flash_attention: True
@@ -120,13 +123,13 @@ general:
   istep: 0
   rank: ???
   world_size: ???
-  multiprocessing_method: "fork"   # fork deadlocks the dataloader workers when they open the
+  multiprocessing_method: "spawn"  # fork deadlocks the dataloader workers when they open the
                                     # async (asyncio/zarr) obs stores; spawn avoids inheriting a
                                     # broken event-loop state across fork.
-  # v2 = post-2026-07-06 masking fixes (per-group channel masks actually apply,
-  # channel_drop live, group_masking_apply_base on ERA5_in, softened rate ladder).
-  # NOT comparable to pre-fix "mae_multistream_groups_profileA" runs.
-  desc: "mae_multistream_groups_v2_softA"
+  # v3 = v2 (post-2026-07-06 masking fixes, softened ladder) + rck9wgm7-aligned
+  # backbone/data (arch keys, 2016 start, synop stream, geo knobs, anemoi_operan,
+  # 128 mini-epochs = 524k samples). NOT comparable to v1/v2 runs.
+  desc: "mae_multistream_groups_v3_rckalign"
   run_id: ???
   run_history: []
 
@@ -149,11 +152,15 @@ data_loading:
 training_config:
   training_mode: ["masking"]
 
-  num_mini_epochs: 32
+  # 128 x 4096 = 524k samples (user-chosen budget vs rck9wgm7's pretrain stage
+  # ojpn5m0t: 672k samples of 2-step forecast; MTM is ~half the cost per sample).
+  num_mini_epochs: 128
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 2014-01-01T00:00
+  # 2016: the ERA5_in v6 operational zarr starts 2016 — earlier windows would
+  # train without the main atmospheric input. Matches rck9wgm7's operan stage.
+  start_date: 2016-01-01T00:00
   end_date: 2022-12-31T00:00
 
   time_window_step: 01:00:00
@@ -217,7 +224,7 @@ validation_config:
   validate_with_ema:
     enabled: True
     ema_ramp_up_ratio: 0.09
-    ema_halflife_in_thousands: 1e-3
+    ema_halflife_in_thousands: 600   # match rck9wgm7 lineage (1e-3 = effectively no EMA)
 
   output:
     num_samples: 0
@@ -230,5 +237,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: "mae_multistream_groups_v2_softA"
+  exp: "mae_multistream_groups_v3_rckalign"
   grid: null

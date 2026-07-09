@@ -43,9 +43,11 @@ training_config:
 
   training_mode: ["masking"]
 
+  # 16 x 4096 = 65,536 samples — exactly rck9wgm7's forecast stage (8 x 8192).
   num_mini_epochs: 16
 
-  start_date: 2014-01-01T00:00
+  # 2016: matches rck9wgm7's forecast stage; the ERA5_in v6 zarr starts 2016.
+  start_date: 2016-01-01T00:00
   end_date: 2022-12-31T00:00
 
   learning_rate_scheduling:
@@ -79,5 +81,5 @@ training_config:
   forecast:
       time_step: 06:00:00
       offset: 1
-      num_steps: 2
+      num_steps: 3   # match rck9wgm7's rollout so its val MSE (avg over +6/12/18h) is comparable
       policy: "fixed"

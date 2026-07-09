@@ -39,7 +39,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 ERA5_in:
-  type: anemoi
+  # anemoi_operan (readers_extra) is what the rck9wgm7 reference run used for this
+  # operational v6 zarr — plain anemoi lacks the nominal-time slot handling.
+  type: anemoi_operan
   # filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr']
   filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
   stream_id: 0
@@ -59,6 +61,13 @@ ERA5_in:
   location_weight: cosine_latitude
   forcing: True
   frequency: 06:00:00
+  # Values copied from the rck9wgm7 run config (model_rck9wgm7_latest.json), which
+  # differ from the repo's operan_georing_avhrr_synop_lowres/era5.yml (drifted).
+  nominal_time_mapping:
+    "0": 5
+    "6": 11
+    "12": 17
+    "18": 23
 
   # Stream-level channel dropout (drops individual variables entirely on a
   # small fraction of samples). Stacks with per-group spatial masking below.

@@ -20,13 +20,16 @@
 # Architecture identical to Experiment 1 (the grouped variant) so the only
 # difference between the two runs is the masking taxonomy — Exp 1 has
 # per-group spatial masks on every IR stream; Exp 2 has none.
+# Both arms are matched to the rck9wgm7/ojpn5m0t reference lineage
+# (models/rck9wgm7/model_rck9wgm7_latest.json); sole deliberate arch
+# deviation: mlp_type swiglu (params ≈ identical via the LLaMA 2/3 rule).
 #
 # Usage:
 #   uv run train --config config/config_mae_masking_multistream_dropout.yml
 # ─────────────────────────────────────────────────────────────────────────────
 
 embed_orientation: "channels"
-embed_unembed_mode: "full"
+embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
 ae_local_dim_embed: 2048
@@ -34,10 +37,11 @@ ae_local_num_blocks: 4
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
 ae_local_with_qk_lnorm: True
+ae_local_max_tokens_per_cell: 128
 
 ae_local_num_queries: 1
 ae_local_queries_per_cell: False
-ae_adapter_num_heads: 20
+ae_adapter_num_heads: 16
 ae_adapter_embed: 128
 ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
@@ -53,7 +57,7 @@ ae_global_block_factor: 64
 ae_global_mlp_hidden_factor: 2
 ae_global_trailing_layer_norm: False
 
-ae_aggregation_num_blocks: 4
+ae_aggregation_num_blocks: 0
 ae_aggregation_num_heads: 32
 ae_aggregation_dropout_rate: 0.1
 ae_aggregation_with_qk_lnorm: True
@@ -70,7 +74,7 @@ num_class_tokens: 0
 num_register_tokens: 0
 
 fe_num_blocks: 16
-fe_num_heads: 16
+fe_num_heads: 32
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
 fe_layer_norm_after_blocks: [7]
@@ -79,6 +83,8 @@ forecast_att_dense_rate: 1.0
 
 healpix_level: 5
 rope_2D: False
+mlp_type: swiglu   # deliberate deviation from rck9wgm7 (plain GELU MLP); params ≈ identical (LLaMA 2/3 rule)
+use_xsa: False     # keep off — rck9wgm7 predates xsa; swiglu stays the only arch deviation
 
 with_mixed_precision: True
 with_flash_attention: True
@@ -99,7 +105,9 @@ latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
 
-freeze_modules: ""
+# latent_pre_norm feeds the (inactive) latent/SSL loss and never gets a real gradient in
+# masking-only training; freeze it so both experiment arms are identical here.
+freeze_modules: ".*latent_pre_norm.*"
 load_chkpt: {}
 
 norm_type: "LayerNorm"
@@ -117,14 +125,18 @@ general:
   world_size: ???
   multiprocessing_method: "spawn"   # fork deadlocks dataloader workers when they open the async
                                     # (zarr) obs stores; spawn avoids the inherited event-loop state.
-  desc: "mae_multistream_dropout_uniform"
+  # v2 = rck9wgm7-aligned backbone/data (arch keys, 2016 start, synop stream,
+  # geo knobs, anemoi_operan, 128 mini-epochs = 524k samples) + swiglu.
+  # NOT comparable to earlier "mae_multistream_dropout_uniform" runs.
+  desc: "mae_multistream_dropout_uniform_v2_rckalign"
   run_id: ???
   run_history: []
 
 train_logging:
-  terminal: 10
+  terminal: 50
   metrics: 20
-  checkpoint: 250
+  checkpoint: 500
+  log_grad_norms: False
 
 data_loading:
   # Profiled 2026-07-02 (PRE-perf-fixes): 6 workers left the loop ~72% dataloader-bound on a
@@ -139,11 +151,15 @@ data_loading:
 training_config:
   training_mode: ["masking"]
 
-  num_mini_epochs: 48
+  # 128 x 4096 = 524k samples — identical budget to the grouped arm (Exp 1);
+  # vs rck9wgm7's pretrain stage ojpn5m0t (672k samples of 2-step forecast).
+  num_mini_epochs: 128
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 2014-01-01T00:00
+  # 2016: the ERA5_in v6 operational zarr starts 2016 — earlier windows would
+  # train without the main atmospheric input. Matches rck9wgm7's operan stage.
+  start_date: 2016-01-01T00:00
   end_date: 2022-12-31T00:00
 
   time_window_step: 01:00:00
@@ -206,7 +222,7 @@ validation_config:
   validate_with_ema:
     enabled: True
     ema_ramp_up_ratio: 0.09
-    ema_halflife_in_thousands: 1e-3
+    ema_halflife_in_thousands: 600   # match rck9wgm7 lineage (1e-3 = effectively no EMA)
 
   output:
     num_samples: 0
@@ -219,5 +235,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: "mae_multistream_dropout_uniform"
+  exp: "mae_multistream_dropout_uniform_v2_rckalign"
   grid: null

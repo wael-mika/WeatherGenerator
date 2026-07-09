@@ -27,8 +27,8 @@ METEOSAT_SEVIRI_IR:
         rate: 0.5
         rate_sampling: false
   token_size: 1024
-  tokenize_spacetime: True
-  max_num_targets: 262144
+  tokenize_spacetime: False   # match rck9wgm7 reference run
+  max_num_targets: 131072     # match rck9wgm7 reference run (halves decode cost)
   forcing: True
   embed:
     net: transformer
@@ -62,8 +62,8 @@ GOES_ABI_IR:
         rate: 0.5
         rate_sampling: false
   token_size: 1024
-  tokenize_spacetime: True
-  max_num_targets: 262144
+  tokenize_spacetime: False   # match rck9wgm7 reference run
+  max_num_targets: 131072     # match rck9wgm7 reference run (halves decode cost)
   forcing: True
   embed:
     net: transformer
@@ -99,8 +99,8 @@ HIMAWARI_AHI_IR:
         rate: 0.5
         rate_sampling: false
   token_size: 1024
-  tokenize_spacetime: True
-  max_num_targets: 262144
+  tokenize_spacetime: False   # match rck9wgm7 reference run
+  max_num_targets: 131072     # match rck9wgm7 reference run (halves decode cost)
   forcing: True
   embed:
     net: transformer
@@ -123,7 +123,7 @@ GOES_ABI_VIS:
   type: obs
   stream_id: 13
   filenames: ['observations-file-2017-2024-abi-goes16-VIS-o256-v2.zarr']
-  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  geoinfo_channels: ['zenith']   # match rck9wgm7 reference run (VIS carried zenith only)
   loss_weight: 1.0
   location_weight: cosine_latitude
   channel_drop_rate: 0.15
@@ -135,8 +135,8 @@ GOES_ABI_VIS:
         rate: 0.6
         rate_sampling: false
   token_size: 1024
-  tokenize_spacetime: True
-  max_num_targets: 262144
+  tokenize_spacetime: False   # match rck9wgm7 reference run
+  max_num_targets: 131072     # match rck9wgm7 reference run (halves decode cost)
   forcing: True
   embed:
     net: transformer
@@ -161,7 +161,7 @@ HIMAWARI_AHI_VIS:
   filenames:
     - 'observations-file-2015-2022-himawari8-VIS-o256-v1.zarr'
     - 'observations-file-2022-2024-himawari9-VIS-o256-v1.zarr'
-  geoinfo_channels: ['cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'zenith', 'cos_sza']
+  geoinfo_channels: ['zenith']   # match rck9wgm7 reference run (VIS carried zenith only)
   loss_weight: 1.0
   location_weight: cosine_latitude
   channel_drop_rate: 0.15
@@ -173,8 +173,8 @@ HIMAWARI_AHI_VIS:
         rate: 0.6
         rate_sampling: false
   token_size: 1024
-  tokenize_spacetime: True
-  max_num_targets: 262144
+  tokenize_spacetime: False   # match rck9wgm7 reference run
+  max_num_targets: 131072     # match rck9wgm7 reference run (halves decode cost)
   forcing: True
   embed:
     net: transformer
