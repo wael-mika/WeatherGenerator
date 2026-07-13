@@ -1,0 +1,92 @@
+# Evaluation config for the latent-upsampling A/B: ERA5 -> CERRA, K=16 arm.
+# Run p9yamxb2 = inference of vbm9r3om (latent_upsampling_K16, chkpt 32756 steps):
+#   32 samples, all written, full CERRA grid (max_num_targets=-1), ens_size 1,
+#   single 6h forecast step (window [t+6h,t+12h) = 2 CERRA 3h slices).
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_latent_upsampling_p9yamxb2.yml
+#
+# To compare against the K=1 baseline arm later, add its inference run_id under
+# run_ids: below — summary plots then overlay both runs.
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1          # 5.5 km grid — small markers or maps saturate
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3h; histogram tails matter more than maps
+    2t:
+      vmin: 250
+      vmax: 310             # K
+    10si:
+      vmin: 0.0
+      vmax: 25.0            # m/s
+    10wdir:
+      vmin: 0.0
+      vmax: 360.0           # deg; circular — see channel note below
+
+max_workers: 16
+
+evaluation:
+  # NOTE: grad_amplitude (sharpness ratio) does NOT work on this output — it requires
+  # gridded lat/lon dims, but WeatherGen zarr output is scattered points (ipoint dim);
+  # it crashes in calc_geo_spatial_diff. Sharpness must be judged from histograms/maps
+  # (or the training-side structure-function metric) instead.
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/p9yamxb2/"
+  plot_ensemble: false      # ens_size 1 — no ensemble axis
+  plot_score_maps: true     # spatial error structure is the point of the K16 arm
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    # The 4 trained target channels. Caveat: 10wdir is circular — rmse/mae mis-penalize
+    # the 0/360 wrap, so read its scores qualitatively only (branch memory, doc §caveats).
+    channels: ["tp", "2t", "10si", "10wdir"]
+    evaluation:
+      forecast_step: "all"  # only 1 step exists (+6h window)
+      sample: "all"         # all 32 written samples
+      ensemble: "all"
+    plotting:
+      sample: [0, 1, 2]     # 3 case studies
+      forecast_step: "all"
+      plot_maps: true
+      plot_bias: true       # systematic errors at 5.5 km
+      plot_target: true     # CERRA analysis next to prediction — visual sharpness check
+      plot_histograms: true # tp distribution tail = does K16 recover extremes vs blur
+      plot_animations: false  # single forecast step — nothing to animate
+
+  # ERA5 anchor stream is also in the output (8 target channels, 6h — no spoofed
+  # samples here since inference ran at the trained 6h window). Enable for a sanity
+  # check that the backbone did not regress:
+  # ERA5:
+  #   regions: ["europe"]
+  #   channels: ["msl", "z_500", "t_850", "q_850"]
+  #   evaluation:
+  #     forecast_step: "all"
+  #     sample: "all"
+  #   plotting:
+  #     sample: [0]
+  #     forecast_step: "all"
+  #     plot_maps: true
+  #     plot_histograms: false
+  #     plot_animations: false
+
+run_ids:
+  p9yamxb2:
+    label: "ERA5->CERRA latent upsampling K16 (vbm9r3om)"
+    color: "steelblue"
+    # results_base_dir omitted on purpose: the reader resolves the run directory
+    # (shared_work/results/p9yamxb2) from the private/HPC config automatically.

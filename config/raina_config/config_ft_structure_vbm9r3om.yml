@@ -1,0 +1,82 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# PHASE 1 — structure-function fine-tune of the K16 run vbm9r3om
+#           (see playground/docs/cerra_sharpness_plan.md)
+# ===========================================================================================
+# This is an OVERLAY config for train_continue: it merges ON TOP of the saved vbm9r3om run
+# config. Everything not listed here (model arch, streams incl. decode_latent_expand=16,
+# window/forecast settings, validation SF metric) is inherited unchanged, so all checkpoint
+# shapes match.
+#
+# What it changes and why:
+#   * training loss += LossStructureFunction on CERRA (tp, 10si). Under pure MSE the optimum
+#     is the conditional mean (= blur); the SF term penalizes the missing fine-scale
+#     (10-200 km) variance directly, so blur is no longer optimal. At the end of vbm9r3om the
+#     SF metric was 3.86 (pred fine-scale variance ~14% of target) and still falling.
+#   * 10wdir silenced via target_channel_weights. MSE on a circular variable mis-penalizes
+#     the 0/360 wrap; it was ~1/4 of the CERRA gradient. NOTE: must be the positional list
+#     (order = train_target_channels = ['10si','10wdir','2t','tp']) — the saved config already
+#     materializes target_channel_weights, which takes precedence over any channel_weights
+#     dict (data_reader_anemoi.py:140).
+#   * ~16 extra mini-epochs at a constant low LR. The saved run ended at istep 32756
+#     (~mini-epoch 64); the continuation loop resumes at the istep-derived epoch, so
+#     num_mini_epochs: 80 trains ~16 more. With policy_decay=constant and istep past warmup,
+#     LR = sqrt(world_size)*lr_max for the whole fine-tune (linear cooldown, last 512 steps):
+#     lr_max 7.1e-6 * sqrt(8) = 2.0e-5.
+#
+# RUN (same world_size 8 as vbm9r3om — the epoch-resume arithmetic assumes it):
+#   arm A (weight 0.05, as shipped):
+#     uv run train_continue --from-run-id vbm9r3om \
+#         --config config/raina_config/config_ft_structure_vbm9r3om.yml
+#   arm B (stronger sharpness pressure):
+#     ... same + --options training_config.losses.structure.weight=0.1 \
+#                          general.desc=ft_structure_sf010_vbm9r3om
+#
+# READ: validation LossStructureFunction.CERRA.structure.avg (target: < 2.0, from 3.86) and
+#       LossPhysical.CERRA.mse.avg (a rise < 10-15% is the expected double-penalty — fine).
+#       Judge with maps + tp histogram from a full-grid inference, never MSE alone.
+
+general:
+  desc: "ft_structure_sf005_vbm9r3om"
+  # do NOT set istep here — the saved value (32756) positions the LR scheduler and the
+  # mini-epoch resume counter.
+
+training_config:
+  num_mini_epochs: 80          # 64 done in vbm9r3om -> ~16 fine-tune epochs
+  learning_rate_scheduling:
+    lr_max: 7.1e-6             # -> effective constant LR 2.0e-5 at world_size 8 (sqrt policy)
+  losses:
+    # merged with (not replacing) the inherited 'physical' MSE block
+    structure:
+      type: LossStructureFunction
+      weight: 0.05             # arm B: 0.1 via --options (SF~4 x 0.05 = 0.2 vs mse total ~0.15)
+      target_and_aux_calc: Physical
+      loss_fcts:
+        struct:
+          target_stream: CERRA
+          channels: ['tp', '10si']   # the two high-frequency channels; 2t stays MSE-only
+          num_pairs: 262144
+          bin_edges_km: [10, 25, 50, 100, 200]
+          increment_power: 2.0
+          reduce: mean
+
+# Merges into the streams dict inherited from the saved run config (no streams_directory here
+# on purpose — setting one would WIPE the inherited streams, config.py:441).
+streams:
+  CERRA:
+    # order = train_target_channels = ['10si', '10wdir', '2t', 'tp'] -> zero out 10wdir
+    target_channel_weights: [1.0, 0.0, 1.0, 1.0]
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_ft_structure
+  grid: null

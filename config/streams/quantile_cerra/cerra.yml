@@ -1,0 +1,70 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# PHASE 2a — quantile-regression head on CERRA (see playground/docs/cerra_sharpness_plan.md).
+# The 16 prediction heads are trained as conditional quantiles tau_k=(k+0.5)/16 with the
+# pinball loss (monotone: sorted along the ensemble dim, so quantiles cannot cross). The
+# transient sub-cell detail is aleatoric given an L5 latent at t+6h -> predict the conditional
+# DISTRIBUTION, not its mean. High-tau members are sharp by construction; mean pinball is a
+# valid CRPS. This formalizes the dry->wet member spread found in the c2lonbt6 oracle audit.
+#
+# Deltas vs the latent_upsampling_cerra arm:
+#   * 10wdir DROPPED (circular; MSE/pinball mis-penalize the 0/360 wrap; no 10u/10v in the
+#     CERRA zarr — only 10si/10wdir/10fg — so dropping is the clean option).
+#   * decode_latent_expand removed (upsampler retired: post-mortem showed the 1-block K16
+#     instantiation was a compression of the 9-neighbour KV, and routing was not the
+#     binding constraint anyway).
+#   * pred_head.ens_size 1 -> 16 (one head per quantile), loss mse -> quantile_pinball.
+
+CERRA:
+  type: anemoi
+  filenames: ["cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"]
+  stream_id: 5
+
+  source: []
+  source_exclude: []
+  target: ['10si', 'tp', '2t']
+  target_exclude: ['tp_tp', 'sf_sf', 'ssrd_ssrd', 'strd_strd', 'mn2t', 'mx2t']
+
+  geoinfo_channels: ['lsm', 'orog']
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "03:00:00"
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 2048
+  tokenize_spacetime: True
+  max_num_targets: 50000    # target-point subsample; raise toward -1 for production
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    type: 'obs_value'
+    num_layers: 4
+    num_heads: 8
+  pred_head:
+    ens_size: 16            # 16 quantile heads: tau = 0.031, 0.094, ..., 0.969
+    num_layers: 2
+
+  # Pinball loss over the 16 heads-as-quantiles (loss_functions.quantile_pinball).
+  # monotone=True (default) sorts members so head k of the SORTED ensemble is quantile k;
+  # read the median as sorted-member 7/8 and the sharp-extremes map as sorted-member 15.
+  loss_fcts:
+    "quantile_pinball":
+      weight: 1.0
