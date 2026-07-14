@@ -258,7 +258,7 @@ def plot_sample(
         ]
     )
 
-    for ax, (title, grid, norm, cmap) in zip(axes, panels):
+    for ax, (title, grid, norm, cmap) in zip(axes, panels, strict=False):
         _add_map_features(ax, lon_min, lon_max, lat_min, lat_max)
         im = ax.pcolormesh(
             lon_mesh,

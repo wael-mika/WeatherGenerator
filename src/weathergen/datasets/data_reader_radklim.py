@@ -14,11 +14,9 @@ from typing import override
 
 import netCDF4 as nc
 import numpy as np
-from numpy.typing import NDArray
 
 from weathergen.datasets.data_reader_base import (
     NPDT64,
-    NPTDel64,
     DataReaderTimestep,
     ReaderData,
     TimeWindowHandler,
@@ -66,7 +64,7 @@ class DataReaderRadklim(DataReaderTimestep):
             raise FileNotFoundError(f"RADKLIM base path not found: {self.base_path}")
 
         # Load file index from pre-built config file or build from scratch
-        index_file = stream_info.get("index_file", None)
+        index_file = stream_info.get("index_file")
 
         if index_file:
             # Load from pre-built index file in config directory
@@ -412,7 +410,7 @@ class DataReaderRadklim(DataReaderTimestep):
 
         # Return empty if no valid data
         if self.len == 0:
-            _logger.debug(f"RADKLIM: Dataset is empty (len=0)")
+            _logger.debug("RADKLIM: Dataset is empty (len=0)")
             return ReaderData.empty(
                 num_data_fields=max(len(channels_idx), len(self.target_idx)),
                 num_geo_fields=len(self.geoinfo_idx),
@@ -428,7 +426,7 @@ class DataReaderRadklim(DataReaderTimestep):
             )
 
         if len(channels_idx) == 0:
-            _logger.debug(f"RADKLIM: No channels selected (channels_idx is empty)")
+            _logger.debug("RADKLIM: No channels selected (channels_idx is empty)")
             return ReaderData.empty(num_data_fields=0, num_geo_fields=len(self.geoinfo_idx))
 
         # Find files that contain data for this time range

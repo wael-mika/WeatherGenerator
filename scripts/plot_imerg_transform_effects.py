@@ -33,7 +33,6 @@ from omegaconf import OmegaConf
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
 DEFAULT_STREAM_CONFIG = Path("config/streams/raina_trans/imerg_transform.yml")
 DEFAULT_OUT_DIR = Path("plots/imerg_transform_effects")
 TAIL_PERCENTILES = np.array([50.0, 90.0, 95.0, 99.0, 99.5, 99.9, 99.99, 100.0], dtype=float)

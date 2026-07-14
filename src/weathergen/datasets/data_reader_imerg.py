@@ -19,7 +19,6 @@ from numpy.typing import NDArray
 
 from weathergen.datasets.data_reader_base import (
     NPDT64,
-    NPTDel64,
     DataReaderTimestep,
     ReaderData,
     TimeWindowHandler,
@@ -215,7 +214,7 @@ class DataReaderImerg(DataReaderTimestep):
         original_points = original_shape[0] * original_shape[1]
 
         # Get spatial bounding box (if specified)
-        bbox = stream_info.get("spatial_bbox", None)
+        bbox = stream_info.get("spatial_bbox")
         if bbox:
             lat_min, lat_max, lon_min, lon_max = bbox
 
