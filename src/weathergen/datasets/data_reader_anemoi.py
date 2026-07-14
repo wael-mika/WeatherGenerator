@@ -32,6 +32,18 @@ from weathergen.utils.distributed import is_root
 _logger = logging.getLogger(__name__)
 
 
+# Coordinate "computed forcings" (cos/sin of lat/lon) that anemoi normally bakes into a store at
+# build time. When a requested geoinfo channel is one of these but is NOT physically present in the
+# zarr, it is synthesized on the fly from the grid lat/lon (which the reader already caches).
+# lat/lon are in degrees (clipped to [-90, 90] / [-180, 180]); each returns one value per grid pt.
+_COMPUTED_GEOINFO_FUNCS = {
+    "cos_latitude": lambda lat, lon: np.cos(np.deg2rad(lat)),
+    "sin_latitude": lambda lat, lon: np.sin(np.deg2rad(lat)),
+    "cos_longitude": lambda lat, lon: np.cos(np.deg2rad(lon)),
+    "sin_longitude": lambda lat, lon: np.sin(np.deg2rad(lon)),
+}
+
+
 class DataReaderAnemoi(DataReaderTimestep):
     "Wrapper for Anemoi datasets"
 
@@ -142,21 +154,50 @@ class DataReaderAnemoi(DataReaderTimestep):
         else:
             self.target_channel_weights = stream_info.get("target_channel_weights")
 
-        # select/filter requested geoinfo channels (can be any variable, not just constant-in-time)
+        # select/filter requested geoinfo channels (can be any variable, not just constant-in-time,
+        # and can be coordinate forcings synthesized from lat/lon when absent from the store). For
+        # each channel, _geoinfo_computed holds the computed-forcing name (str) or None for a real
+        # store variable; geoinfo_idx holds the store column for real variables and -1 for computed.
         if stream_info.get("geoinfo_channels") is None:
-            self.geoinfo_idx = self.select_geoinfo_channels(ds)
+            self.geoinfo_idx = list(self.select_geoinfo_channels(ds))
             self.geoinfo_channels = [ds.variables[i] for i in self.geoinfo_idx]
+            self._geoinfo_computed = [None] * len(self.geoinfo_idx)
         else:
-            self.geoinfo_channels = stream_info.get("geoinfo_channels")
-            self.geoinfo_idx = [ds.variables.index(ch) for ch in self.geoinfo_channels]
+            self.geoinfo_channels = list(stream_info.get("geoinfo_channels"))
+            self.geoinfo_idx = []
+            self._geoinfo_computed = []
+            for ch in self.geoinfo_channels:
+                if ch in ds.variables:
+                    self.geoinfo_idx.append(ds.variables.index(ch))
+                    self._geoinfo_computed.append(None)
+                elif ch in _COMPUTED_GEOINFO_FUNCS:
+                    self.geoinfo_idx.append(-1)
+                    self._geoinfo_computed.append(ch)
+                else:
+                    raise ValueError(
+                        f"{stream_info['name']}: geoinfo channel '{ch}' is neither a variable in "
+                        f"the anemoi store {list(ds.variables)} nor a supported computed "
+                        f"coordinate forcing {sorted(_COMPUTED_GEOINFO_FUNCS)}."
+                    )
 
-        # set geoinfo normalization statistics
-        if len(self.geoinfo_idx) > 0:
-            self.mean_geoinfo = ds.statistics["mean"][self.geoinfo_idx]
-            self.stdev_geoinfo = ds.statistics["stdev"][self.geoinfo_idx]
-        else:
-            self.mean_geoinfo = np.zeros(0)
-            self.stdev_geoinfo = np.ones(0)
+        # set geoinfo normalization statistics (per channel, in requested order). Real variables
+        # use the store statistics; computed forcings use mean/stdev of their synthesized values.
+        n_geo = len(self.geoinfo_channels)
+        self.mean_geoinfo = np.zeros(n_geo, dtype=np.float64)
+        self.stdev_geoinfo = np.ones(n_geo, dtype=np.float64)
+        self._computed_geoinfo_grid: dict[str, NDArray[np.float32]] = {}
+        for i, ch in enumerate(self.geoinfo_channels):
+            if self._geoinfo_computed[i] is None:
+                self.mean_geoinfo[i] = ds.statistics["mean"][self.geoinfo_idx[i]]
+                self.stdev_geoinfo[i] = ds.statistics["stdev"][self.geoinfo_idx[i]]
+            else:
+                col = _COMPUTED_GEOINFO_FUNCS[ch](self.latitudes, self.longitudes).astype(
+                    np.float32
+                )
+                self._computed_geoinfo_grid[ch] = col
+                self.mean_geoinfo[i] = float(col.mean())
+                stdev = float(col.std())
+                self.stdev_geoinfo[i] = stdev if not np.isclose(stdev, 0.0) else 1.0
 
         ds_name = stream_info["name"]
         _logger.info(f"{ds_name}: source channels: {self.source_channels}")
@@ -223,8 +264,21 @@ class DataReaderAnemoi(DataReaderTimestep):
         # coords-first representation and collapse multiple steps
         data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
 
-        # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
+        # extract geoinfo channels in requested order: real store variables are read from the data
+        # (can be time-varying); computed coordinate forcings are synthesized per grid point and
+        # tiled over the time steps, matching the row order of `coords` below (row t*G+g -> grid g).
+        n_geo = len(self.geoinfo_channels)
+        if n_geo > 0:
+            n_grid = len(self.latitudes)
+            n_steps = data.shape[0] // n_grid
+            geoinfos = np.empty((data.shape[0], n_geo), dtype=np.float32)
+            for i, ch in enumerate(self.geoinfo_channels):
+                if self._geoinfo_computed[i] is None:
+                    geoinfos[:, i] = data[:, self.geoinfo_idx[i]]
+                else:
+                    geoinfos[:, i] = np.tile(self._computed_geoinfo_grid[ch], n_steps)
+        else:
+            geoinfos = np.zeros((data.shape[0], 0), dtype=np.float32)
         # extract channels
         data = data[:, list(channels_idx)]
 
