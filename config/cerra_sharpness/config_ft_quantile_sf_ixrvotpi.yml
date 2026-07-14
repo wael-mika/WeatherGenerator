@@ -1,0 +1,63 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# STEP 3 — fine-tune the quantile run (ixrvotpi) with a per-sorted-member SF term
+#          (see config/cerra_sharpness/README.md, playground/docs/cerra_sharpness_plan.md)
+# ===========================================================================================
+# ixrvotpi's 16 pinball heads recovered the extreme tail (wet head max 41.07 vs target 41.24)
+# but the central quantile fields are blur-level sharp (SF ratios ~ MSE baseline). This
+# fine-tune adds LossStructureFunction with reduce: "members" — the ensemble is SORTED per
+# point and the SF loss is computed for every sorted member and averaged — pushing realistic
+# spatial texture into each quantile field while pinball keeps them calibrated.
+#
+# OVERLAY for train_continue; merges ON TOP of the saved ixrvotpi config (streams, pinball
+# loss, 3 channels all inherited; nothing to silence — 10wdir was already dropped).
+#
+# RUN (2 nodes = world_size 8, required by the resume arithmetic; ixrvotpi ran 48 ep,
+# istep ~24564 ⇒ resumes at epoch ~47, so num_mini_epochs 64 trains ~17 more):
+#   launch-slurm.py --from-run-id ixrvotpi \
+#       --config config/cerra_sharpness/config_ft_quantile_sf_ixrvotpi.yml --nodes 2
+#
+# WATCHPOINTS (read every few epochs):
+#   * LossPhysical.CERRA.quantile_pinball.avg — must stay within ~5% of ixrvotpi's 0.065
+#     (calibration guardrail; also run playground/scripts/quantile_calibration.py on the
+#     inference output).
+#   * member-max on tp — the SF term pulls the wet head's 100-200 km overshoot (ratio 1.73)
+#     toward 1.0; if the recovered ~41 mm tail deflates, restrict members or lower weight.
+#   * LossStructureFunction.CERRA.structure.avg (val, reduce: mean — comparability metric).
+
+general:
+  desc: "ft_quantile_sf_members"
+  # do NOT set istep here — the saved value positions the LR scheduler and epoch resume.
+
+training_config:
+  num_mini_epochs: 64          # 48 done in ixrvotpi -> ~17 fine-tune epochs
+  learning_rate_scheduling:
+    lr_max: 7.1e-6             # -> effective constant LR 2.0e-5 at world_size 8 (sqrt policy)
+  losses:
+    # merged with (not replacing) the inherited 'physical' block (CERRA: pinball, ERA5: mse)
+    structure:
+      type: LossStructureFunction
+      weight: 0.01             # pinball total ~0.065, SF0 ~4 => term ~0.04 (0.5-1.5x rule)
+      target_and_aux_calc: Physical
+      loss_fcts:
+        struct:
+          target_stream: CERRA
+          channels: ['tp', '10si']
+          num_pairs: 262144
+          bin_edges_km: [10, 25, 50, 100, 200]
+          increment_power: 2.0
+          reduce: members      # per-point sorted, SF per sorted member, averaged (Step-0 mode)
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_quantile_sf_members
+  grid: null

@@ -8,27 +8,11 @@
 # nor does it submit to any jurisdiction.
 #
 # ===========================================================================================
-# PHASE 2a — ERA5 -> CERRA downscale with a QUANTILE-REGRESSION head (pinball loss)
-#            (see playground/docs/cerra_sharpness_plan.md)
+# EXP A (ablation stage 1): K1 pretrain -- NO upsampler, otherwise an exact replica of the
+# vbm9r3om protocol (64 ep MSE). Isolates the LatentUpsamplingEngine's contribution: compare
+# {this run, vbm9r3om, deep4} x {MSE, +SF-ft}. Stage 2 = config_ft_structure_generic.yml.
+# See config/cerra_sharpness/README.md and playground/docs/cerra_sharpness_plan.md.
 # ===========================================================================================
-# Rationale: the vbm9r3om post-mortem showed the CERRA blur is the MSE conditional-mean
-# optimum, not a routing/capacity failure (static orographic structure IS resolved; transient
-# fine-scale variance is at ~14% of target, SF metric 3.86). The fix is to predict the
-# conditional DISTRIBUTION: 16 heads trained as monotone quantiles via pinball loss
-# (config/streams/quantile_cerra/cerra.yml). High-tau members are sharp by construction and
-# mean pinball is a valid CRPS.
-#
-# Setup mirrors config_latent_upsampling_cerra.yml exactly (same backbone, window, forecast,
-# budget) EXCEPT: streams dir (10wdir dropped, ens_size 16, pinball), upsampler retired.
-#
-# RUN:  uv run train --config config/raina_config/config_quantile_cerra.yml
-#
-# READ: * validation LossPhysical.CERRA.quantile_pinball.avg (CRPS-like; lower = better).
-#       * validation LossStructureFunction.CERRA.structure.avg — computed on the quantile
-#         MEAN (reduce: mean), i.e. the conditional-mean product: directly comparable to
-#         vbm9r3om's 3.86 trajectory. The sharpness win lives in the high-tau members —
-#         judge those from full-grid inference maps (sorted member 15 ~ tau 0.97).
-#       * quantile calibration: empirical coverage per tau on validation output.
 
 embed_orientation: "channels"
 embed_unembed_mode: "block"
@@ -74,8 +58,8 @@ pred_mlp_adaln: True
 num_class_tokens: 0
 num_register_tokens: 0
 
-# Upsampler retired (post-mortem: 1-block K16 was a compression of the 9-neighbour KV, and
-# routing capacity was not the binding constraint).
+# Latent-upsampling knobs. The model-level default is OFF (1); the A/B treatment is set
+# per-stream on CERRA. decode_upsample_num_blocks is the upsampler depth (used only when > 1).
 decode_latent_expand: 1
 decode_upsample_num_blocks: 1
 
@@ -112,7 +96,7 @@ norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/quantile_cerra/"
+streams_directory: "./config/streams/cerra_mse_noup/"
 streams: ???
 
 zarr_store: "zip"
@@ -122,7 +106,7 @@ general:
   rank: ???
   world_size: ???
   multiprocessing_method: "fork"
-  desc: "cerra_quantile16_pinball"
+  desc: "cerra_mse_noup_K1"
   run_id: ???
   run_history: []
 
@@ -141,7 +125,7 @@ training_config:
 
   training_mode: ["masking"]
 
-  num_mini_epochs: 48
+  num_mini_epochs: 64
   samples_per_mini_epoch: 4096
   shuffle: True
 
@@ -174,8 +158,6 @@ training_config:
       beta2: 0.9875
       eps: 2e-08
 
-  # Module-level default (ERA5 falls back to it); CERRA overrides per-stream with
-  # quantile_pinball in its stream yml.
   losses: {
     "physical": {
         type: LossPhysical,
@@ -192,7 +174,7 @@ training_config:
   forecast:
       time_step: 06:00:00
       offset: 1
-      num_steps: 1           # predict CERRA at t+6h
+      num_steps: 1           # predict CERRA tp at t+6h
       policy: "fixed"
 
 
@@ -201,9 +183,10 @@ validation_config:
   shuffle: False
   start_date: 2023-01-01T00:00
   end_date: 2023-12-31T00:00
-  # Validation-ONLY sharpness metric. With ens_size 16, reduce: mean scores the quantile MEAN
-  # (the conditional-mean product) — directly comparable to vbm9r3om's trajectory (ended 3.86).
-  # The high-tau sharpness is judged from inference maps, not this number.
+  # Validation-ONLY sharpness metric (merged on top of training losses at validation time;
+  # training gradients stay pure MSE — verified run vedt5qan, see doc §8). MSE alone cannot
+  # detect blob sharpening (it rewards blur); read LossStructureFunction.CERRA.structure.avg:
+  # 0 = spectrum matched, lower is sharper. Compare arms on the full-validation average.
   losses: {
     "structure": {
       type: LossStructureFunction,
@@ -212,7 +195,7 @@ validation_config:
       loss_fcts: {
         "struct": {
           target_stream: CERRA,
-          channels: ['tp'],           # tp only, for comparability with vbm9r3om
+          channels: ['tp'],           # tp only: keeps circular 10wdir out of the metric
           num_pairs: 262144,          # uniform pairs starve the 10-25 km bin at lower counts
           bin_edges_km: [10, 25, 50, 100, 200],
           increment_power: 2.0,
@@ -235,5 +218,5 @@ validation_config:
 wgtags:
   org: null
   issue: null
-  exp: cerra_quantile_pinball
+  exp: cerra_sharpness_ablation
   grid: null

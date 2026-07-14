@@ -1,0 +1,85 @@
+# Evaluation A/B: original K16 upsampling run vs its structure-function fine-tune.
+#   p9yamxb2 = inference of vbm9r3om  (latent_upsampling_K16, pure MSE, 32 samples)
+#   lduzq3y8 = inference of qeyws5sj  (ft_structure_sf005_vbm9r3om: +SF loss on tp/10si,
+#              10wdir loss-silenced, ~16 extra epochs at LR 2e-5, 16 samples)
+# Both inferences: full CERRA grid (max_num_targets=-1), ens_size 1, single +6h forecast
+# window (= 2 CERRA 3h slices), validation 2023 with shuffle=False -> sample index i is the
+# SAME date/time in both runs; case-study maps are directly comparable.
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_ft_vs_base_cerra.yml
+#
+# Read:
+#   * summary plots (rmse/mae/bias overlays) in ./plots/ft_vs_base_cerra/ — expect the
+#     fine-tune to be slightly WORSE on rmse (double-penalty of sharper fields; its val MSE
+#     rose ~0.26 -> ~0.29) — that is priced in and not the success criterion.
+#   * maps + histograms per run in ./results/<run_id>/plots/ — the success criterion:
+#     finer tp/10si structure and a fatter tp histogram tail at matched placement.
+#     Training-side sharpness metric already says the SF term worked:
+#     LossStructureFunction.CERRA (tp) ended 3.86 (vbm9r3om) vs ~1.0 (qeyws5sj).
+#   * 10wdir: circular channel, loss-silenced in the fine-tune -> its scores may drift;
+#     read qualitatively only.
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1          # 5.5 km grid — small markers or maps saturate
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3h; histogram tails matter more than maps
+    2t:
+      vmin: 250
+      vmax: 310             # K
+    10si:
+      vmin: 0.0
+      vmax: 25.0            # m/s
+    10wdir:
+      vmin: 0.0
+      vmax: 360.0           # deg; circular
+
+max_workers: 16
+
+evaluation:
+  # grad_amplitude/psd do NOT work on scattered WeatherGen output (need gridded lat/lon);
+  # sharpness is judged from maps/histograms + the training-side structure-function metric.
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/ft_vs_base_cerra/"
+  plot_ensemble: false      # ens_size 1
+  plot_score_maps: true     # where does the SF term change the error structure
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    channels: ["tp", "2t", "10si", "10wdir"]
+    evaluation:
+      forecast_step: "all"  # only 1 step exists (+6h window)
+      sample: "0-15"        # matched subset: lduzq3y8 has 16 samples, p9yamxb2 has 32
+      ensemble: "all"
+    plotting:
+      sample: [0, 1, 2]     # same dates in both runs (shuffle=False from 2023-01-01)
+      forecast_step: "all"
+      plot_maps: true
+      plot_bias: true
+      plot_target: true     # CERRA analysis next to prediction — visual sharpness check
+      plot_histograms: true # tp tail: does the SF fine-tune recover extremes vs blur
+      plot_animations: false
+
+run_ids:
+  p9yamxb2:
+    label: "K16 baseline (vbm9r3om, pure MSE)"
+    color: "steelblue"
+    # results_base_dir omitted on purpose: resolved from the private/HPC config.
+  lduzq3y8:
+    label: "K16 + SF fine-tune (qeyws5sj, mse + 0.05*structure)"
+    color: "crimson"

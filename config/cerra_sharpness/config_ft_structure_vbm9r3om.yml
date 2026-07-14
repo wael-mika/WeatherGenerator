@@ -35,7 +35,7 @@
 # RUN (same world_size 8 as vbm9r3om — the epoch-resume arithmetic assumes it):
 #   arm A (weight 0.05, as shipped):
 #     uv run train_continue --from-run-id vbm9r3om \
-#         --config config/raina_config/config_ft_structure_vbm9r3om.yml
+#         --config config/cerra_sharpness/config_ft_structure_vbm9r3om.yml
 #   arm B (stronger sharpness pressure):
 #     ... same + --options training_config.losses.structure.weight=0.1 \
 #                          general.desc=ft_structure_sf010_vbm9r3om

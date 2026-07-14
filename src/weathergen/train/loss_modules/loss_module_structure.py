@@ -46,10 +46,21 @@ Expected config (under ``training_config.losses``):
             num_pairs: 262144,
             bin_edges_km: [10, 25, 50, 100, 200],
             increment_power: 2.0,        # 2 = standard structure function; 1 = robust (heavy tails)
-            reduce: mean,                # ensemble reduction: "mean" (== member when ens=1) or int
+            reduce: mean,                # ensemble handling, see below
           },
         },
       }
+
+``reduce`` (ensemble handling; all identical for ens_size=1):
+  - ``mean``    : ensemble mean field. For quantile heads this is the conditional-mean product
+                  (re-blurred) -- right for a comparability METRIC, wrong for ens>1 TRAINING.
+  - ``median``  : per-point sorted middle (mean of the two central sorted members for even K).
+                  The correct single-field product of a quantile head -- raw head indices carry
+                  no quantile identity (heads do not self-order under the pinball sort).
+  - ``members`` : per-point sort, then the SF loss is computed for EVERY sorted member and
+                  averaged -- pushes realistic spatial texture into each quantile field.
+  - int         : a single RAW member index (pre-sort). Only meaningful when members have fixed
+                  identities (e.g. genuine ensemble runs), not for quantile heads.
 
 Note on scale: choose ``bin_edges_km`` to straddle the artifact scale of the *target* stream;
 on a ~1° stream (IMERG_ANEMOI) the sub-cell scales are unresolved -- prefer a fine stream.
@@ -199,7 +210,7 @@ class LossStructureFunction(LossModuleBase):
         self.increment_power: float = float(cfg.get("increment_power", 2.0))
         self.eps: float = float(cfg.get("eps", 1e-6))
         red = cfg.get("reduce", "mean")
-        self.reduce = red if red == "mean" else int(red)
+        self.reduce = red if red in ("mean", "median", "members") else int(red)
 
         _logger.info(
             "LossStructureFunction: stream=%s, channels=%s, bins(km)=%s, num_pairs=%d, "
@@ -226,11 +237,28 @@ class LossStructureFunction(LossModuleBase):
             self._channel_idx = [names.index(c) for c in self.channels]
         return self._channel_idx
 
-    def _reduce_ensemble(self, pred: torch.Tensor) -> torch.Tensor:
-        """pred: (ens, N, C) -> (N, C). For ens_size=1 the mean equals the single member."""
-        if self.reduce == "mean":
-            return pred.mean(0)
-        return pred[self.reduce]
+    @staticmethod
+    def ensemble_fields(pred: torch.Tensor, reduce) -> list[torch.Tensor]:
+        """Resolve the ensemble dim into the field(s) the SF loss scores.
+
+        pred: (ens, N, C). Returns a list of (N, C) fields; the loss is averaged over them.
+        For ens_size=1 every mode returns the single member. See the module docstring for the
+        semantics of "mean" / "median" / "members" / int.
+        """
+        k = pred.shape[0]
+        if k == 1:
+            return [pred[0]]
+        if reduce == "mean":
+            return [pred.mean(0)]
+        if reduce == "median":
+            srt = pred.sort(0).values
+            if k % 2 == 0:
+                return [srt[k // 2 - 1 : k // 2 + 1].mean(0)]
+            return [srt[k // 2]]
+        if reduce == "members":
+            srt = pred.sort(0).values
+            return [srt[m] for m in range(k)]
+        return [pred[reduce]]
 
     def compute_loss(self, preds, targets, metadata) -> LossValues:
         _source2target_idxs, output_info, _target2source_idxs, _target_info = metadata
@@ -277,7 +305,7 @@ class LossStructureFunction(LossModuleBase):
                     continue
 
                 pred = pred.reshape([pred.shape[0], *target.shape])  # [ens, N, C]
-                pred_red = self._reduce_ensemble(pred)  # [N, C]
+                fields = self.ensemble_fields(pred, self.reduce)  # list of [N, C]
 
                 # target_coords_raw is produced on CPU by the dataloader; move it first
                 coords = coords.to(target.device, non_blocking=True)
@@ -285,25 +313,34 @@ class LossStructureFunction(LossModuleBase):
                 if int(valid.sum()) < 2:
                     continue
 
-                target_sel, pred_sel = target[valid], pred_red[valid]
+                target_sel = target[valid]
                 ch_idx = self._resolve_channel_idx()
                 if ch_idx is not None:
-                    target_sel, pred_sel = target_sel[:, ch_idx], pred_sel[:, ch_idx]
+                    target_sel = target_sel[:, ch_idx]
 
-                loss_ch = structure_function_loss(
-                    target_sel,
-                    pred_sel,
-                    coords[valid],
-                    bin_edges_km=self.bin_edges_km,
-                    num_pairs=self.num_pairs,
-                    increment_power=self.increment_power,
-                    eps=self.eps,
-                    min_pairs_per_bin=self.min_pairs_per_bin,
-                )
-                if loss_ch is None:
+                # average the SF loss over the resolved field(s); one independent pair sample
+                # per field keeps the same-pair pred/target cancellation within each call
+                loss_fields = []
+                for field in fields:
+                    pred_sel = field[valid]
+                    if ch_idx is not None:
+                        pred_sel = pred_sel[:, ch_idx]
+                    loss_ch = structure_function_loss(
+                        target_sel,
+                        pred_sel,
+                        coords[valid],
+                        bin_edges_km=self.bin_edges_km,
+                        num_pairs=self.num_pairs,
+                        increment_power=self.increment_power,
+                        eps=self.eps,
+                        min_pairs_per_bin=self.min_pairs_per_bin,
+                    )
+                    if loss_ch is not None:
+                        loss_fields.append(loss_ch.mean())
+                if not loss_fields:
                     continue
 
-                loss_ts = loss_ts + loss_ch.mean()
+                loss_ts = loss_ts + torch.stack(loss_fields).mean()
                 ctr_b += 1
 
             if ctr_b > 0:

@@ -1,0 +1,86 @@
+# Three-way CERRA sharpness comparison (see playground/docs/cerra_sharpness_plan.md):
+#   p9yamxb2 = K16 baseline        (vbm9r3om:  pure MSE, ens 1, 4 channels)
+#   lduzq3y8 = K16 + SF fine-tune  (qeyws5sj:  mse + 0.05*structure, ens 1)
+#   w125yex0 = quantile heads      (ixrvotpi:  16 heads = quantiles via pinball, no upsampler,
+#                                   3 channels — 10wdir dropped)
+# All inferences: full CERRA grid, single +6h window (2 CERRA 3h slices), validation 2023,
+# shuffle=False -> sample index i is the same date in every run.
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_three_way_cerra.yml
+#
+# Design notes:
+#   * channels restricted to the intersection ["tp","2t","10si"] (w125yex0 has no 10wdir).
+#   * evaluation.ensemble: "mean" -> each run is scored on its ensemble MEAN: identity for the
+#     ens-1 runs, the quantile mean (~conditional mean) for w125yex0. Deterministic
+#     apples-to-apples. Expect the quantile MEAN to be blur-level sharp (SF-on-mean ended
+#     ~3.6-4.8 in ixrvotpi training) — that is by construction, not a failure.
+#   * plotting.ensemble: [0, 8, 15] -> unavailable members are pruned per run (ens-1 runs
+#     keep [0]). For w125yex0 these are (sorted-by-training) tau ~ 0.03 / 0.53 / 0.97:
+#     member 8 ~ the median product, member 15 ~ the sharp-extremes map. NOTE: raw head
+#     index == quantile only holds if the heads self-ordered under the monotone sort —
+#     verify by eye (member 0 should be much drier than member 15).
+#   * The fine-scale verdict comes from: maps (texture), per-member histograms (member 15
+#     tail vs target max 41 mm), and the training-side SF numbers; RMSE alone rewards blur.
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0
+    2t:
+      vmin: 250
+      vmax: 310
+    10si:
+      vmin: 0.0
+      vmax: 25.0
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/three_way_cerra/"
+  plot_ensemble: false
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    channels: ["tp", "2t", "10si"]
+    evaluation:
+      forecast_step: "all"
+      sample: "0-15"          # matched subset across all three runs
+      ensemble: "mean"        # deterministic product of each run (see header)
+    plotting:
+      sample: [0, 1, 2]
+      forecast_step: "all"
+      ensemble: [0, 8, 15]    # pruned to [0] for the ens-1 runs
+      plot_maps: true
+      plot_bias: true
+      plot_target: true
+      plot_histograms: true
+      plot_animations: false
+
+run_ids:
+  p9yamxb2:
+    label: "K16 baseline (pure MSE)"
+    color: "steelblue"
+  lduzq3y8:
+    label: "K16 + SF fine-tune (mse + 0.05*structure)"
+    color: "crimson"
+  w125yex0:
+    label: "16 quantile heads (pinball, scored on quantile mean)"
+    color: "darkorange"
