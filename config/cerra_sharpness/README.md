@@ -16,6 +16,7 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 | `config_ft_structure_generic.yml` | — | — | Stage 2 overlay for ANY 64-ep/ws8 MSE pretrain (Exp A/B); desc via --options |
 | `config_ft_quantile_sf_ixrvotpi.yml` | — | — | Step 3: pinball + per-sorted-member SF ft of ixrvotpi |
 | `config_quantile_sf_cerra.yml` | — | — | Step 4 flagship (2c): fresh joint pinball + SF-on-median |
+| `config_pretrain_mse_sf_ramp.yml` | — | — | One-shot recipe (branch wm/dev/sf_weight_ramp): MSE + SF with per-block weight_schedule ramp (0→0.05 over epochs 2-16), K1, 10wdir silenced (streams cerra_joint_sf) |
 
 ## Launch commands (all training on 2 nodes = world_size 8)
 
@@ -35,6 +36,10 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 
 # Step 4 (after Step-3 readout):
 ../WeatherGenerator-private/hpc/launch-slurm.py --config config/cerra_sharpness/config_quantile_sf_cerra.yml --nodes 2
+
+# One-shot MSE+ramped-SF pretrain (launch FROM branch wm/dev/sf_weight_ramp — needs the
+# weight_schedule support in loss_calculator.py):
+../WeatherGenerator-private/hpc/launch-slurm.py --config config/cerra_sharpness/config_pretrain_mse_sf_ramp.yml --nodes 2
 ```
 
 ## Conventions (hard-won — do not skip)

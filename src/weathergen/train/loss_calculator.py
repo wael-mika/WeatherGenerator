@@ -20,9 +20,28 @@ from omegaconf import DictConfig
 import weathergen.train.loss_modules as LossModules
 from weathergen.model.model import ModelOutput
 from weathergen.train.target_and_aux_module_base import TargetAuxOutput
+from weathergen.train.utils import TRAIN
 from weathergen.utils.train_logger import Stage
 
 _logger = logging.getLogger(__name__)
+
+
+def effective_weight(weight: float, schedule, istep: int) -> float:
+    """Weight of a loss block at training step istep under an optional linear ramp.
+
+    schedule is the block's ``weight_schedule`` config entry (or None): the weight ramps
+    linearly from 0 at ``start_step`` to the full block weight at ``end_step`` and stays
+    constant afterwards. With ``end_step <= start_step`` the ramp degenerates to a step
+    function at ``start_step``. No schedule -> the static block weight.
+    """
+    if schedule is None:
+        return weight
+    start = int(schedule.get("start_step", 0))
+    end = int(schedule.get("end_step", 0))
+    if end <= start:
+        return weight if istep >= start else 0.0
+    frac = (istep - start) / (end - start)
+    return weight * min(1.0, max(0.0, frac))
 
 
 class LossCalculator:
@@ -68,6 +87,7 @@ class LossCalculator:
                     [
                         (
                             params.get("weight", 1.0),
+                            params.get("weight_schedule", None),
                             getattr(LossModules, params.type)(
                                 cf, mode_cfg, stage, self.device, **params.loss_fcts
                             ),
@@ -89,7 +109,11 @@ class LossCalculator:
         loss = torch.tensor(0.0, requires_grad=True)
         for loss_term_name, calc_term in self.loss_calculators.items():
             target = targets_and_aux[loss_term_name]
-            for weight, calculator in calc_term:
+            for weight, schedule, calculator in calc_term:
+                # optional per-block linear weight ramp over training steps; validation
+                # blocks always use their static weight
+                if schedule is not None and self.stage == TRAIN:
+                    weight = effective_weight(weight, schedule, self.cf.general.istep)
                 if weight > 0.0:
                     loss_values = calculator.compute_loss(
                         preds=preds, targets=target, metadata=metadata
