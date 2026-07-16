@@ -3,31 +3,43 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# FULL-FT finetuning config for Experiment 2 (multi-stream uniform dropout).
+# FROZEN-ENCODER finetuning config for Experiment 1 (multi-stream grouped masking).
 # Use with: uv run train_continue --from-run-id <pretrain_run_id> --config <this file>
 # streams_directory is inherited from the pretrain run — do not set it here.
 #
-# freeze_modules "" = everything trainable — the same protocol as the rck9wgm7
-# baseline's forecast stage (its run JSON has freeze_modules: ""). The old §5
-# "frozen wins / catastrophic forgetting" guidance predates the 2026-07-06
-# masking fixes and is not trusted; the freeze question is instead answered
-# empirically by the companion ablation config
-# config_mae_masking_multistream_dropout_finetuning_frozen_encoder.yml
-# (identical except freeze_modules + desc).
+# Identical to config_mae_masking_multistream_groups_finetuning.yml (the full-FT arm)
+# EXCEPT freeze_modules and general.desc — a controlled ablation of the freeze protocol.
+#
+# Freeze boundary: everything up to the forecast engine is frozen; the forecast
+# engine and the full decoder stay trainable. Verified against the pretrain
+# checkpoint's parameter names (2026-07-14):
+#   frozen    360.3M — encoder (stream embeds + local engine + adapter +
+#                      aggregation + global engine + q_cells) and latent_pre_norm
+#   trainable 549.7M — forecast_engine 537.0M, target_token_engines 12.6M,
+#                      pred_heads, embed_target_coords
+# Regex mechanics (model/utils.py apply_fct_to_blocks): re.fullmatch against
+# module names; matching the top-level "encoder" module freezes all its children
+# recursively. The literal "q_cells" substring additionally triggers the
+# special case in model_interface.py that clears requires_grad on the raw
+# q_cells Parameter. Frozen modules are also set to eval() by the trainer
+# (dropout disabled → deterministic encoder). DDP: frozen params are excluded
+# from gradient sync; the touch-all-params term only spans trainable params,
+# so ddp_find_unused_parameters: False below remains valid.
 
-freeze_modules: ""
+freeze_modules: "encoder|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
 
 # ── FT-time source-masking neutralization (audited 2026-07-14) ───────────────
 # The pretrain streams' masking machinery is NOT inert during forecast FT:
-#  - the explicit `masking_strategy: random` overrides replace the forecast
-#    strategy per stream (masking.py merge_masking_config), so sources would
-#    stay masked at 0.2/0.5/0.6/0.7 keep rates during FT,
-#  - channel_drop_rate is gated only on stage==train, not on masking mode.
+#  - variable_groups masks bypass the forecast all-ones source mask
+#    (masking.py Phase 8: group masks take priority regardless of mode),
+#  - channel_drop_rate is gated only on stage==train, not on masking mode,
+#  - explicit `masking_strategy: random` overrides replace the forecast strategy.
 # rck9wgm7's forecast stage ran with FULL sources everywhere except
 # SurfaceCombined (random 0.5, which we inherit unchanged). Patch every other
 # source stream to match, so the FT stage is identical across both arms and
-# rck-comparable. variable_groups keys are set null for symmetry with the
-# groups arm's FT overlay (they are absent in this arm anyway).
+# rck-comparable. `variable_groups: null` is weight-compatible: forcing streams
+# get no decoder/pred-heads (model.py builds none for forcing), so no per-group
+# modules ever existed in the pretrain checkpoint.
 streams:
   ERA5_in:
     variable_groups: null
@@ -78,7 +90,7 @@ general:
   # mutable parameters
   istep: 0
   multiprocessing_method: "spawn"   # fork deadlocks dataloader workers opening the async obs stores
-  desc: "mae_multistream_dropout_uniform_v2_rckalign_ft_full"
+  desc: "mae_multistream_groups_v3_rckalign_ft_frozen_enc"
 
 # parameters for data loading
 data_loading:

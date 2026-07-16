@@ -3,18 +3,70 @@
 # This software is licensed under the terms of the Apache Licence Version 2.0
 # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 #
-# Finetuning config for Experiment 1 (multi-stream grouped masking).
-# Use with --run_id <pretrain_run_id> from config_mae_masking_multistream_groups.yml.
+# FULL-FT finetuning config for Experiment 1 (multi-stream grouped masking).
+# Use with: uv run train_continue --from-run-id <pretrain_run_id> --config <this file>
 # streams_directory is inherited from the pretrain run — do not set it here.
 #
-# Freeze strategy (validated as best by §5 analysis — ERA5 frozen wins):
-#   freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
-# To freeze encoder + ERA5 stream only (recommended starting point):
-#   freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
-# To leave everything trainable (not recommended — §5 shows catastrophic forgetting):
-#   freeze_modules: ""
+# freeze_modules "" = everything trainable — the same protocol as the rck9wgm7
+# baseline's forecast stage (its run JSON has freeze_modules: ""). The old §5
+# "frozen wins / catastrophic forgetting" guidance predates the 2026-07-06
+# masking fixes and is not trusted; the freeze question is instead answered
+# empirically by the companion ablation config
+# config_mae_masking_multistream_groups_finetuning_frozen_encoder.yml
+# (identical except freeze_modules + desc).
 
 freeze_modules: ""
+
+# ── FT-time source-masking neutralization (audited 2026-07-14) ───────────────
+# The pretrain streams' masking machinery is NOT inert during forecast FT:
+#  - variable_groups masks bypass the forecast all-ones source mask
+#    (masking.py Phase 8: group masks take priority regardless of mode),
+#  - channel_drop_rate is gated only on stage==train, not on masking mode,
+#  - explicit `masking_strategy: random` overrides replace the forecast strategy.
+# rck9wgm7's forecast stage ran with FULL sources everywhere except
+# SurfaceCombined (random 0.5, which we inherit unchanged). Patch every other
+# source stream to match, so the FT stage is identical across both arms and
+# rck-comparable. `variable_groups: null` is weight-compatible: forcing streams
+# get no decoder/pred-heads (model.py builds none for forcing), so no per-group
+# modules ever existed in the pretrain checkpoint.
+streams:
+  ERA5_in:
+    variable_groups: null
+    group_masking_apply_base: False
+    channel_drop_rate: 0.0
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  METOP_ABC_AVHRR_IASI:
+    variable_groups: null
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  METEOSAT_SEVIRI_IR:
+    variable_groups: null
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  GOES_ABI_IR:
+    variable_groups: null
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  HIMAWARI_AHI_IR:
+    variable_groups: null
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  GOES_ABI_VIS:
+    channel_drop_rate: 0.0
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
+  HIMAWARI_AHI_VIS:
+    channel_drop_rate: 0.0
+    masking_override:
+      model_input:
+        masking_strategy: "forecast"
 
 # Multi-node DDP path (set explicitly so it holds regardless of the --run_id pretrain config).
 # find_unused_parameters=True collides with activation checkpointing ("marked ready twice");
@@ -27,6 +79,7 @@ general:
   # mutable parameters
   istep: 0
   multiprocessing_method: "spawn"   # fork deadlocks dataloader workers opening the async obs stores
+  desc: "mae_multistream_groups_v3_rckalign_ft_full"
 
 # parameters for data loading
 data_loading:
