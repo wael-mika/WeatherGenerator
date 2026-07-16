@@ -165,8 +165,22 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
+        # optional soft-blend decode (see blend_replicate_targets): decode boundary-zone
+        # points under their k nearest cells and blend the predictions continuously
+        blend = None
+        blend_k = int(stream_info.get("decode_soft_blend_k", 1) or 1)
+        if blend_k > 1:
+            blend = {
+                "ctrs": self.hpy_ctrs_target,
+                "nctrs": self.hpy_nctrs_target,
+                "nbr_ids": self.hpy_nbr_ids_target,
+                "cell_spacing": self.hpy_cell_spacing_target,
+                "k": blend_k,
+                "tau": float(stream_info.get("decode_soft_blend_tau", 0.25)),
+            }
+
         # TODO: split up
-        _, _, _, coords_local, coords_per_cell = tokenize_apply_mask_target(
+        _, _, _, coords_local, coords_per_cell, blend_idx, blend_w = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -179,9 +193,10 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            blend=blend,
         )
 
-        return (coords_local, coords_per_cell)
+        return (coords_local, coords_per_cell, blend_idx, blend_w)
 
     def get_target_values(
         self,
@@ -198,7 +213,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        data, datetimes, coords, _, _ = tokenize_apply_mask_target(
+        data, datetimes, coords, _, _, _, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,

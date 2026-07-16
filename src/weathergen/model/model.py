@@ -857,6 +857,39 @@ class Model(torch.nn.Module):
                     # final prediction head to map back to physical space
                     pred = self.pred_heads[stream_name](tc_tokens)
 
+            # soft-blend decode: combine replicated per-cell predictions back to the
+            # original points with the tokenizer's continuous blend weights (see
+            # blend_replicate_targets). Downstream (loss, output writer) then sees the
+            # original single-assignment point count and ordering.
+            blend_idxs = [
+                batch.samples[i_b].streams_data[stream_name].target_blend_idx[step]
+                for i_b in range(batch_size)
+            ]
+            if pred.numel() > 0 and any(b is not None for b in blend_idxs):
+                blend_ws = [
+                    batch.samples[i_b].streams_data[stream_name].target_blend_weights[step]
+                    for i_b in range(batch_size)
+                ]
+                idxs_glob, ws_glob, lens_orig, n_tot = [], [], [], 0
+                for b, w, n_rep in zip(blend_idxs, blend_ws, t_coords_lens, strict=True):
+                    if b is None:
+                        # sample without blending info (e.g. empty target): identity map
+                        b = torch.arange(n_rep, dtype=torch.int64, device=pred.device)
+                        w = torch.ones(n_rep, dtype=pred.dtype, device=pred.device)
+                    n_orig = int(b.max().item()) + 1 if len(b) > 0 else 0
+                    idxs_glob.append(b + n_tot)
+                    ws_glob.append(w)
+                    lens_orig.append(n_orig)
+                    n_tot += n_orig
+                idxs_glob = torch.cat(idxs_glob)
+                ws_glob = torch.cat(ws_glob).to(pred.dtype)
+                blended = torch.zeros(
+                    (pred.shape[0], n_tot, pred.shape[-1]), dtype=pred.dtype, device=pred.device
+                )
+                blended.index_add_(1, idxs_glob, pred * ws_glob.view(1, -1, 1))
+                pred = blended
+                t_coords_lens = lens_orig
+
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)
             output.add_physical_prediction(step, stream_name, pred)

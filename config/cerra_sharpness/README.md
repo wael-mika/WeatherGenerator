@@ -11,8 +11,8 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 | `config_latent_upsampling_cerra.yml` | vbm9r3om | p9yamxb2 | K16 MSE pretrain, 64 ep. Blur baseline: SF 3.86 (~14% fine-scale variance), tp max 21.6/41.2 |
 | `config_ft_structure_vbm9r3om.yml` | qeyws5sj | lduzq3y8 | +0.05·SF ft, ~16 ep. SF 3.86→~1.0 (~37% variance), visibly sharp; RMSE +4-7% (expected) |
 | `config_quantile_cerra.yml` | ixrvotpi | w125yex0 | 16 pinball quantile heads, 48 ep, no upsampler. Best RMSE all channels (quantile mean); tail fully recovered (41.07/41.24); central products blur-level |
-| `config_pretrain_mse_noup.yml` | — | — | Exp A stage 1: K1 (no upsampler) exact replica of vbm9r3om protocol |
-| `config_pretrain_mse_K16_deep4.yml` | — | — | Exp B stage 1: K16 with 4-block upsampler (true expansion) |
+| `config_pretrain_mse_noup.yml` | mnb4hkd7 | ymnbchza | Exp A stage 1: K1 (no upsampler). BEST RMSE all channels (tp .544); SF fingerprint identical to K16 arms ⇒ upsampler dead |
+| `config_pretrain_mse_K16_deep4.yml` | fc7kn805 | pur2jxnp | Exp B stage 1: K16 4-block (true expansion). No sharpness gain over K1/1-block; RMSE between them |
 | `config_ft_structure_generic.yml` | — | — | Stage 2 overlay for ANY 64-ep/ws8 MSE pretrain (Exp A/B); desc via --options |
 | `config_ft_quantile_sf_ixrvotpi.yml` | — | — | Step 3: pinball + per-sorted-member SF ft of ixrvotpi |
 | `config_quantile_sf_cerra.yml` | — | — | Step 4 flagship (2c): fresh joint pinball + SF-on-median |
@@ -56,6 +56,20 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 - **Never judge these runs on RMSE alone** — sharp fields pay a double penalty; read SF metric +
   histograms + maps together. Keep the validation SF block (tp, reduce: mean) identical in every
   config: it is the single number comparable across the whole campaign since vbm9r3om.
+- **Ablation verdict (2026-07-16, `eval_config_pretrain_ablation_cerra.yml`)**: on 8 date-matched
+  windows, RMSE tp/2t/10si = K1 .544/1.631/1.467 < deep4 .545/1.673/1.491 < 1-blk .560/1.739/1.522;
+  SF ratios identical within noise across all three pure-MSE arms. The upsampler contributes
+  nothing at any depth — drop `decode_latent_expand` from future configs. The blur is entirely
+  the MSE conditional-mean objective. HEALPix tiling persists in K1 ⇒ it comes from the per-cell
+  decode partition, not the upsampler.
+- **Soft-blend decode (`decode_soft_blend_k`)**: stream-level flag (default off) that decodes
+  boundary-zone target points under their k nearest cells and blends predictions with
+  continuous distance weights (`softmax(-d/(tau*cell_spacing))`, `decode_soft_blend_tau`,
+  default 0.25) — the anti-tiling mechanism. No new parameters; can be enabled at inference on
+  any existing checkpoint: `--options streams.CERRA.decode_soft_blend_k=3`. Seam metric:
+  `playground/scripts/seam_metric.py` (baseline seam score tp ≈ 5.6-7.4 across all runs).
 - Eval configs live in `config/evaluate/` (`eval_config_ft_vs_base_cerra.yml`,
-  `eval_config_three_way_cerra.yml`); streams in `config/streams/{latent_upsampling_cerra,
+  `eval_config_three_way_cerra.yml`, `eval_config_pretrain_ablation_cerra.yml` — the latter
+  shows the per-run `streams:` override pattern for date-matching mixed-stride inferences);
+  streams in `config/streams/{latent_upsampling_cerra,
   cerra_mse_noup, quantile_cerra}/`.

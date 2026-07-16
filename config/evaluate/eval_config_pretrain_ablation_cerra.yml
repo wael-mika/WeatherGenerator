@@ -1,0 +1,104 @@
+# Pretrain ablation row of the CERRA sharpness campaign (upsampler isolated from the SF effect):
+#   ymnbchza = K1  no upsampler         (mnb4hkd7: pure MSE, 64 ep, ens 1, 4 ch)
+#   pur2jxnp = K16 deep upsampler (4bl) (fc7kn805: pure MSE, 64 ep, ens 1, 4 ch)
+#   p9yamxb2 = K16 1-block upsampler    (vbm9r3om: pure MSE, 64 ep — original baseline)
+#   lduzq3y8 = K16 1-block + SF ft      (qeyws5sj: reference for what SF adds on top)
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_pretrain_ablation_cerra.yml
+#
+# Date matching: ymnbchza/pur2jxnp/lduzq3y8 are single-rank inferences (6h sample stride,
+# 2023-01-01T12 + 6h*i); p9yamxb2 is the old 2-rank one (12h stride). p9yamxb2 sample k is
+# the same date as single-rank sample 2k, so:
+#   * default streams (single-rank runs): evaluation over even samples 0..14,
+#   * p9yamxb2 gets its own streams block with samples 0..7.
+# => all four runs are scored on the IDENTICAL 8 dates (01-01T12 .. 01-05T00, every 12h).
+# Plotting samples likewise: [0,2,4] (single-rank) == [0,1,2] (p9yamxb2).
+#
+# Expectations (from training-side val at epoch 63):
+#   CERRA mse: K1 0.2510 < deep4 0.2573 < 1-block 0.2639; SF ~3.87/4.00/3.86 (identical).
+#   If ymnbchza's maps/histograms == p9yamxb2's, the upsampler is formally dead weight.
+#   All three pure-MSE runs should be equally blurry; lduzq3y8 shows the SF-ft contrast.
+# 10wdir excluded: circular channel, MSE-family metrics mis-score the 0/360 wrap.
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0
+    2t:
+      vmin: 250
+      vmax: 310
+    10si:
+      vmin: 0.0
+      vmax: 25.0
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/pretrain_ablation_cerra/"
+  plot_ensemble: false
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    channels: ["tp", "2t", "10si"]
+    evaluation:
+      forecast_step: "all"
+      sample: [0, 2, 4, 6, 8, 10, 12, 14]   # 12h dates shared with p9yamxb2 (see header)
+      ensemble: "mean"                       # identity — all runs are ens 1
+    plotting:
+      sample: [0, 2, 4]
+      forecast_step: "all"
+      ensemble: [0]
+      plot_maps: true
+      plot_bias: true
+      plot_target: true
+      plot_histograms: true
+      plot_animations: false
+
+run_ids:
+  ymnbchza:
+    label: "K1 no upsampler (pure MSE)"
+    color: "seagreen"
+  pur2jxnp:
+    label: "K16 deep upsampler, 4 blocks (pure MSE)"
+    color: "darkorange"
+  p9yamxb2:
+    label: "K16 1-block upsampler (pure MSE, original)"
+    color: "steelblue"
+    streams:
+      CERRA:
+        regions: ["europe"]
+        channels: ["tp", "2t", "10si"]
+        evaluation:
+          forecast_step: "all"
+          sample: [0, 1, 2, 3, 4, 5, 6, 7]   # 12h stride: same dates as default's 0..14 even
+          ensemble: "mean"
+        plotting:
+          sample: [0, 1, 2]
+          forecast_step: "all"
+          ensemble: [0]
+          plot_maps: true
+          plot_bias: true
+          plot_target: true
+          plot_histograms: true
+          plot_animations: false
+  lduzq3y8:
+    label: "K16 1-block + SF fine-tune (reference)"
+    color: "crimson"
