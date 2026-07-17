@@ -1,0 +1,90 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# Stage-2 fine-tune of kfon932l (one-shot MSE+ramped-SF pretrain, config_pretrain_mse_sf_ramp)
+# with SOFT-BLEND DECODE ACTIVE IN TRAINING.
+#           (see config/cerra_sharpness/README.md, playground/docs/soft_blend_decode.md §7)
+# ===========================================================================================
+# This is the ft_structure_generic recipe (16 extra epochs, constant low LR) adapted for a
+# ramp pretrain, plus decode_soft_blend_k=3 during training. Two deltas vs the generic file:
+#
+#   * NO losses block here. kfon932l already carries physical MSE + 0.05*SF in its saved
+#     config; both are inherited. Its weight_schedule (ramp ends at step 8192) is long over
+#     at the resumed istep (~32756), so the SF term runs at the full 0.05 throughout.
+#   * NO target_channel_weights override. 10wdir was silenced at pretrain via the stream's
+#     channel_weights dict (cerra_joint_sf/cerra.yml -> tcw [1,0,1,1]), inherited as-is.
+#
+# Why blend during training (the actual experiment):
+#   * The unblended SF fine-tunes had the WORST seam scores of the campaign (tp 6.4-7.4):
+#     part of the small-scale variance the SF loss buys is spent on spurious cell-boundary
+#     roughness. With the blend active the decode is continuous by construction, so the SF
+#     gradient can only be satisfied with real physical texture.
+#   * Train/inference consistency: production inference is blended; training through the
+#     blend lets the per-cell pieces cooperate in the ~35-60% transition band instead of
+#     being averaged post hoc.
+#   The blend is parameter-free (weighted scatter-add before the loss, autograd-safe) and
+#   not stage-gated, so this is a pure config change; checkpoint shapes are untouched.
+#   Cost: ~1.6x decode queries (at max_num_targets 50000 this is a minor share of the step).
+#   NOTE: validation runs blended too — val MSE/SF are the honest (seam-free) numbers, but
+#   not bit-comparable to kfon932l's own unblended val trajectory (expected shift ~ noise:
+#   the frozen-checkpoint blend test was RMSE-neutral with SF ratios within noise).
+#
+# REQUIREMENTS (same resume arithmetic as ft_structure_generic): pretrain must be exactly
+# 64 mini-epochs x 4096 samples at world_size 8 (saved istep ~32756) — kfon932l is. Run the
+# fine-tune at world_size 8 too (--nodes 2). Do NOT set istep and do NOT set a
+# streams_directory (it would wipe the inherited streams, config.py:441).
+#
+# SNAPSHOT CHECK before launching: launch-slurm continuations stage code from the SOURCE
+# run's snapshot (slurm_weathergen_kfon932l_dir). kfon932l was launched from branch
+# wm/dev/sf_weight_ramp, which contains the blend code (in the tree since 5a0b38fc), so no
+# patching should be needed — verify with:
+#   grep -l blend_replicate_targets \
+#     <stage_base>/slurm_weathergen_kfon932l_dir/WeatherGenerator/src/weathergen/datasets/tokenizer_utils.py
+#
+# RUN:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id kfon932l \
+#       --config config/cerra_sharpness/config_ft_blend_kfon932l.yml --nodes 2
+#
+# SMOKE (1 GPU; istep=0 required or the resume arithmetic skips all epochs — this also
+# restarts the SF ramp, so pull the schedule forward to see MSE+SF+blend together):
+#   CUDA_VISIBLE_DEVICES=0 uv run train_continue --from-run-id kfon932l \
+#       --config config/cerra_sharpness/config_ft_blend_kfon932l.yml \
+#       --options general.istep=0 training_config.num_mini_epochs=1 \
+#                 training_config.samples_per_mini_epoch=8 \
+#                 validation_config.samples_per_mini_epoch=8 general.num_workers=0 \
+#                 "training_config.losses.structure.weight_schedule={start_step: 0, end_step: 1}"
+#
+# READ: val LossStructureFunction.CERRA.structure.avg and LossPhysical.CERRA.mse.avg vs
+# kfon932l's final values (expect ~flat MSE, SF steady or slightly down). The decisive
+# comparison is a blended full-grid inference A/B'd against kfon932l's own blended
+# inference: SF ratios per bin (playground/scripts/sf_target_spectrum.py) — the hypothesis
+# is a better 10-100 km recovery — plus seam score ~1 for both and neutral RMSE.
+
+general:
+  desc: "ft_blend_sf005_kfon932l"
+  # do NOT set istep — the saved value positions the LR scheduler and epoch-resume counter.
+
+training_config:
+  num_mini_epochs: 80          # 64 done in kfon932l -> ~16 fine-tune epochs
+  learning_rate_scheduling:
+    lr_max: 7.1e-6             # -> effective constant LR 2.0e-5 at world_size 8 (sqrt policy)
+
+# Merges into the inherited streams dict. The blend keys are read by the tokenizer in every
+# stage (train/val/inference) — this is what makes the fine-tune train THROUGH the blend.
+streams:
+  CERRA:
+    decode_soft_blend_k: 3
+    decode_soft_blend_tau: 0.25
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_ft_blend
+  grid: null
