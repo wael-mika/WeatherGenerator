@@ -13,8 +13,9 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 | `config_quantile_cerra.yml` | ixrvotpi | w125yex0 | 16 pinball quantile heads, 48 ep, no upsampler. Best RMSE all channels (quantile mean); tail fully recovered (41.07/41.24); central products blur-level |
 | `config_pretrain_mse_noup.yml` | mnb4hkd7 | ymnbchza | Exp A stage 1: K1 (no upsampler). BEST RMSE all channels (tp .544); SF fingerprint identical to K16 arms ⇒ upsampler dead |
 | `config_pretrain_mse_K16_deep4.yml` | fc7kn805 | pur2jxnp | Exp B stage 1: K16 4-block (true expansion). No sharpness gain over K1/1-block; RMSE between them |
-| `config_ft_structure_generic.yml` | — | — | Stage 2 overlay for ANY 64-ep/ws8 MSE pretrain (Exp A/B); desc via --options |
-| `config_ft_quantile_sf_ixrvotpi.yml` | — | — | Step 3: pinball + per-sorted-member SF ft of ixrvotpi |
+| `config_ft_structure_generic.yml` | h5jupjyu | fbrl1igf | Stage 2 SF ft of mnb4hkd7 (K1): tp SF ratio .23→.71 (10-25 km), 10si .38→.72 (25-50 km); seams unchanged (rerun inference blended) |
+| `config_ft_structure_generic.yml` | nomobcqx | izfv3hsi | Stage 2 SF ft of fc7kn805 (deep4): same SF gains as K1 arm (tp 10-25 km 1.73 is seam-inflated) |
+| `config_ft_quantile_sf_ixrvotpi.yml` | y2xyoazv | ogvjhulp | Step 3: pinball + members-SF ft of ixrvotpi. Quantile-mean SF tp .25→.88 (10-25 km) — best central product so far |
 | `config_quantile_sf_cerra.yml` | — | — | Step 4 flagship (2c): fresh joint pinball + SF-on-median |
 
 ## Launch commands (all training on 2 nodes = world_size 8)
@@ -70,6 +71,7 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
   `playground/scripts/seam_metric.py` (baseline seam score tp ≈ 5.6-7.4 across all runs).
 - Eval configs live in `config/evaluate/` (`eval_config_ft_vs_base_cerra.yml`,
   `eval_config_three_way_cerra.yml`, `eval_config_pretrain_ablation_cerra.yml` — the latter
-  shows the per-run `streams:` override pattern for date-matching mixed-stride inferences);
+  shows the per-run `streams:` override pattern for date-matching mixed-stride inferences;
+  `eval_config_ft_sf_before_after_cerra.yml` — the 6-run before/after-SF-fine-tune table);
   streams in `config/streams/{latent_upsampling_cerra,
   cerra_mse_noup, quantile_cerra}/`.
