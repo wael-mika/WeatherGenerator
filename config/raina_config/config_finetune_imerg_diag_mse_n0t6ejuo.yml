@@ -1,0 +1,179 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run n0t6ejuo (pure temporal-JEPA pretrain,
+# student-teacher only) -- MSE variant.
+#
+# NOTE this checkpoint's architecture (use_xsa, with_step_conditioning, swiglu, register
+# tokens, deep_ssl) is NOT supported by the current raina branch code. The run therefore
+# ships the srdrwfy6-era code snapshot: slurm_weathergen_n0t6ejuo_raina_dir/WeatherGenerator
+# is a copy of slurm_weathergen_srdrwfy6_dir/WeatherGenerator (that code loaded the n0t6ejuo
+# checkpoint when srdrwfy6 was trained from it). Configs (this file + the streams dir) are
+# overlaid from the home clone at submit time.
+#
+# IMPORTANT -- NO PRETRAINED FORECAST ENGINE: the n0t6ejuo checkpoint contains ONLY
+# encoder + deep_ssl heads + latent_heads (the JEPA predictor). The forecast engine
+# (fe_num_blocks 6 from the checkpoint json) initializes FRESH here and is trained from
+# scratch by the IMERG loss alone; that is why freeze option (b) is the ACTIVE default in
+# this config, unlike the other finetunes. Freezing the forecast engine (option a) would
+# roll the latents through a frozen RANDOM engine -- only do that with forecast num_steps 0.
+# (When srdrwfy6 was finetuned from this checkpoint the team built a fresh 16-block engine:
+# uncomment `fe_num_blocks: 16` below to replicate that instead of the inherited 6.)
+#
+# Stream set (config/streams/imerg_diag_jepa/): the 8 pretraining input streams copied
+# VERBATIM from the srdrwfy6 snapshot's jepa_forecast_multi_data_all_years dir (all
+# `forcing: true`), plus IMERG as the only diagnostic/output stream. Same inputs as
+# n0t6ejuo's pretrain streams, so the pretrained stream embeds load 1:1.
+#
+# JEPA-specific conversion (recipe from srdrwfy6's own finetune config and the team's
+# config_decoder_surfacecombined_n0t6ejuo.yml template): student-teacher loss disabled
+# (filter_config_by_enabled drops it before instantiation -- the checkpoint's latent_heads/
+# deep_ssl weights become unused keys, as in the srdrwfy6 finetune), random_easy maskers
+# disabled, "forecasting" masker + physical MSE loss added, deep_ssl off.
+#
+# COMPARABILITY: training setup matches the ipnpqow8/rck9wgm7/atmofs03/srdrwfy6 IMERG
+# finetunes (budget 64x4096, lr schedule, dates 2016-2022, fsteps 2, logging, optimizer
+# pins, val 256 + EMA 600, workers 10). time_window_step stays at the native 6h.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id n0t6ejuo_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_mse_n0t6ejuo.yml --nodes N
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_jepa/"
+
+# Freeze options -- keep exactly ONE active. Module tree of this architecture:
+# encoder (embeds+local+global+aggregation), forecast_engine, and per-stream decoder modules
+# (target_token_engines.*, pred_heads.*, embed_target_coords.*) which are all IMERG-fresh
+# here and must stay trainable.
+# (b) ACTIVE default: encoder frozen, forecast engine trainable -- MANDATORY here because
+#     the forecast engine has no pretrained weights in this checkpoint (see header).
+freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+# (a) forecast engine ALSO frozen -- do NOT use with forecast num_steps > 0 (frozen random
+#     engine); only meaningful if you switch to an autoencoding probe (num_steps 0):
+# freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+# Uncomment to replicate the fresh-forecast-engine size the team used when finetuning
+# srdrwfy6 from this same checkpoint (inherited value from the checkpoint json is 6):
+fe_num_blocks: 16
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers;
+  # srdrwfy6's finetune from this checkpoint used spawn.
+  multiprocessing_method: "spawn"
+
+  desc: "imerg_diag_mse_from_n0t6ejuo"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # student_teacher -> masking (physical decode)
+  training_mode: ["masking"]
+
+  # JEPA leftovers off (this checkpoint has deep_ssl enabled and teacher_time_offset 1;
+  # srdrwfy6's finetune from it set exactly these values).
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # time_window_step/len NOT overridden: native 6h/6h of this checkpoint. Accepted
+  # deviation vs the 1h window step of the ipnpqow8/rck9wgm7 finetunes.
+
+  # Kept identical to the other IMERG finetunes for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Match the other IMERG finetunes (this checkpoint carries grad_clip 0.25, wd 0.05,
+  # beta1 0.9875, beta2 0.994).
+  optimizer:
+    grad_clip: 0.8
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Latent JEPA loss OFF (filtered out by the enabled-flag before instantiation); plain MSE
+  # on the only output stream (IMERG). The physical block is named "forecast" to match the
+  # naming in srdrwfy6's finetune so both JEPA finetune configs produce the identical
+  # effective losses dict.
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Match the other IMERG finetunes (256 val samples, EMA halflife 600; this checkpoint has
+# validate_with_ema disabled).
+validation_config:
+  samples_per_mini_epoch: 256
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Match the other IMERG finetunes (this checkpoint carries 6).
+data_loading:
+  num_workers: 10
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse
+  grid: null
