@@ -15,7 +15,7 @@
 
 ERA5_in:
   type: anemoi_operan
-  filenames: [aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr]
+  filenames: [aifs-od-an-oper-0001-mars-o96-2016-2025-6h-v1-for-single-v2.zarr]
   stream_id: 0
   source: [q_150, q_200, q_250, q_300, q_400, q_500, q_600, q_700, q_850, q_925, q_1000, t_50, t_100,
     t_150, t_200, t_250, t_300, t_400, t_500, t_600, t_700, t_850, t_925, t_1000, u_50, u_100, u_150,
