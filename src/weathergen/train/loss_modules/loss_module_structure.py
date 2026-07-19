@@ -47,9 +47,29 @@ Expected config (under ``training_config.losses``):
             bin_edges_km: [10, 25, 50, 100, 200],
             increment_power: 2.0,        # 2 = standard structure function; 1 = robust (heavy tails)
             reduce: mean,                # ensemble handling, see below
+            quantile_levels: null,       # e.g. [0.5, 0.9, 0.99] -- distributional matching,
+                                         # REQUIRED for intermittent fields (precip), see below
+            quantile_eps: 1.0e-3,        # zero-mode floor for the quantile log terms
+            match_mean: True,            # keep the mean-matching term alongside the quantiles
           },
         },
       }
+
+Intermittency / zero-inflated fields (IMPORTANT -- the IMERG tp failure mode): matching only
+the per-bin *mean* increment is a location-blind aggregate that a deterministic model can
+satisfy degenerately. On a field with a large exact-zero fraction (IMERG tp is ~70% dry) the
+target bin means are diluted by dry-dry pairs, so adding tiny-amplitude high-frequency noise
+*everywhere* raises the predicted bin means to the target level at negligible MSE cost --
+observed in run ymlx3c4r as a global drizzle moire (SF loss collapsed within ~300 samples,
+pred median lifted off zero, ETS down, FBI up, std unchanged). ``quantile_levels`` closes
+this loophole: per bin, the |increment| *quantiles* of pred and target are matched in log
+space. The target's low/mid quantiles sit on the zero mode (dry-dry pairs), so ubiquitous
+noise is penalised hard, while the high quantiles still demand realistic sharp wet/dry
+contrast. ``quantile_eps`` (default 1e-3, in normalized units) is the "counts as dry" floor
+inside those logs -- deliberately larger than ``eps`` so the loss does not demand exact zeros
+from a linear head. Under quantile matching ``increment_power`` only rescales the log terms
+(log q(|d|^p) = p log q(|d|)); keep p=1. Choose the highest level so the smallest bin still
+has enough pairs to estimate it (level q needs >~ 100/(1-q) pairs in-bin).
 
 ``reduce`` (ensemble handling; all identical for ens_size=1):
   - ``mean``    : ensemble mean field. For quantile heads this is the conditional-mean product
@@ -120,12 +140,18 @@ def structure_function_loss(
     eps: float = 1e-6,
     min_pairs_per_bin: int = 1,
     generator: torch.Generator | None = None,
+    quantile_levels: list[float] | None = None,
+    quantile_eps: float = 1e-3,
+    match_mean: bool = True,
 ) -> torch.Tensor | None:
     """Per-channel grid-free structure-function loss for one (reduced) field.
 
     Samples ``num_pairs`` random point pairs, bins them by great-circle distance into the bins
-    defined by ``bin_edges_km``, and matches the predicted vs target mean increment per bin in
-    log space: loss = mean_{bin, channel} ( log S_pred - log S_target )^2.
+    defined by ``bin_edges_km``, and matches predicted vs target increment statistics per bin
+    in log space. With ``match_mean`` the classic mean term
+    ``( log S_pred - log S_target )^2`` is used; with ``quantile_levels`` the per-bin
+    |increment| quantiles are matched additionally (or instead) -- required for zero-inflated
+    fields, where the mean term alone admits a uniform-noise minimizer (module docstring).
 
     Args:
         target: (N, C) target values (already restricted to valid finite points).
@@ -134,12 +160,17 @@ def structure_function_loss(
         bin_edges_km: ascending list of B+1 edges; bins are (e0, e1], ..., (e_{B-1}, e_B].
         num_pairs: number of random pairs to sample.
         increment_power: p in |y_i - y_j|^p (2 = standard; 1 = robust for heavy tails).
-        eps: stabiliser inside the log.
+        eps: stabiliser inside the log of the mean term.
         min_pairs_per_bin: skip bins with fewer surviving pairs than this.
         generator: optional RNG for reproducible pair sampling.
+        quantile_levels: optional increment-quantile levels in (0, 1) to match per bin.
+        quantile_eps: zero-mode floor inside the quantile log terms.
+        match_mean: include the mean-matching term (must be True if quantile_levels is None).
     Returns:
         (C,) per-channel loss, or None if too few points/pairs to form any bin.
     """
+    if not match_mean and not quantile_levels:
+        raise ValueError("structure_function_loss: match_mean=False requires quantile_levels")
     n = target.shape[0]
     if n < 2:
         return None
@@ -159,14 +190,26 @@ def structure_function_loss(
     inc_t = (target[idx_i] - target[idx_j]).abs().pow(increment_power)  # [P, C]
     inc_p = (pred[idx_i] - pred[idx_j]).abs().pow(increment_power)  # [P, C]
 
+    levels = (
+        torch.tensor(quantile_levels, device=device, dtype=inc_t.dtype) if quantile_levels else None
+    )
+
     losses = []
     for b in range(len(bin_edges_km) - 1):
         in_bin = (dist > float(bin_edges_km[b])) & (dist <= float(bin_edges_km[b + 1]))
         if int(in_bin.sum()) < min_pairs_per_bin:
             continue
-        s_t = inc_t[in_bin].mean(0)  # [C]
-        s_p = inc_p[in_bin].mean(0)  # [C]
-        losses.append((torch.log(s_p + eps) - torch.log(s_t + eps)).pow(2))
+        terms = []
+        if match_mean:
+            s_t = inc_t[in_bin].mean(0)  # [C]
+            s_p = inc_p[in_bin].mean(0)  # [C]
+            terms.append((torch.log(s_p + eps) - torch.log(s_t + eps)).pow(2))
+        if levels is not None:
+            q_t = torch.quantile(inc_t[in_bin], levels, dim=0)  # [L, C]
+            q_p = torch.quantile(inc_p[in_bin], levels, dim=0)  # [L, C]
+            q_terms = (torch.log(q_p + quantile_eps) - torch.log(q_t + quantile_eps)).pow(2)
+            terms.append(q_terms.mean(0))  # [C]
+        losses.append(torch.stack(terms, 0).mean(0))
 
     if not losses:
         return None
@@ -211,16 +254,32 @@ class LossStructureFunction(LossModuleBase):
         self.eps: float = float(cfg.get("eps", 1e-6))
         red = cfg.get("reduce", "mean")
         self.reduce = red if red in ("mean", "median", "members") else int(red)
+        # distributional matching (see module docstring, "Intermittency"); None = mean only
+        q_levels = cfg.get("quantile_levels")
+        self.quantile_levels: list[float] | None = (
+            [float(q) for q in q_levels] if q_levels else None
+        )
+        if self.quantile_levels is not None and not all(
+            0.0 < q < 1.0 for q in self.quantile_levels
+        ):
+            raise ValueError(f"quantile_levels must be in (0, 1), got {self.quantile_levels}")
+        self.quantile_eps: float = float(cfg.get("quantile_eps", 1e-3))
+        self.match_mean: bool = bool(cfg.get("match_mean", True))
+        if not self.match_mean and self.quantile_levels is None:
+            raise ValueError("LossStructureFunction: match_mean=False requires quantile_levels")
 
         _logger.info(
             "LossStructureFunction: stream=%s, channels=%s, bins(km)=%s, num_pairs=%d, "
-            "power=%.1f, reduce=%s",
+            "power=%.1f, reduce=%s, quantile_levels=%s, quantile_eps=%.1e, match_mean=%s",
             self.target_stream,
             self.channels if self.channels is not None else "all",
             self.bin_edges_km,
             self.num_pairs,
             self.increment_power,
             self.reduce,
+            self.quantile_levels,
+            self.quantile_eps,
+            self.match_mean,
         )
 
     def _resolve_channel_idx(self) -> list[int] | None:
@@ -334,6 +393,9 @@ class LossStructureFunction(LossModuleBase):
                         increment_power=self.increment_power,
                         eps=self.eps,
                         min_pairs_per_bin=self.min_pairs_per_bin,
+                        quantile_levels=self.quantile_levels,
+                        quantile_eps=self.quantile_eps,
+                        match_mean=self.match_mean,
                     )
                     if loss_ch is not None:
                         loss_fields.append(loss_ch.mean())
