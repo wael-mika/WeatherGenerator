@@ -43,7 +43,7 @@ ERA5_in:
   # operational v6 zarr — plain anemoi lacks the nominal-time slot handling.
   type: anemoi_operan
   # filenames: ['aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr']
-  filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2023-6h-v6.zarr']
+  filenames: ['aifs-od-an-oper-0001-mars-o96-2016-2025-6h-v1-for-single-v2.zarr']
   stream_id: 0
 
   # Channels (from analysis/multi_stream_channel_inventory.md):
