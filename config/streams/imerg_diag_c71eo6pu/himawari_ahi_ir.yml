@@ -1,0 +1,35 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# HIMAWARI_AHI_IR: input-only (forcing) stream reproduced VERBATIM from the
+# saved config of pretrained run c71eo6pu
+# (/iopsstor/scratch/cscs/thunter/shared_work/models/c71eo6pu/model_c71eo6pu_latest.json),
+# minus runtime-derived keys. Do not edit by hand -- regenerate from the
+# checkpoint config if the source run changes.
+
+HIMAWARI_AHI_IR:
+  type: obs
+  stream_id: 12
+  filenames: [observations-file-2015-2022-himawari8-IR-o256-v1.zarr, observations-file-2022-2024-himawari9-IR-o256-v1.zarr]
+  geoinfo_channels: [cos_local_time, sin_local_time, cos_julian_day, sin_julian_day, zenith, cos_sza]
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config: {rate: 1.0}
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+  target_channel_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
