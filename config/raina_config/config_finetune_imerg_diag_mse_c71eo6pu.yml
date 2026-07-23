@@ -65,10 +65,14 @@ train_logging:
   metrics: 20
   checkpoint: 250
 
-# Pinned to match the other IMERG-diag arms (c71eo6pu pretrained with 12) so the comparison
-# differs only in the pretrained backbone -- same convention as the atmofs03-rebased pair.
+# HOST-RAM bound, NOT a comparability knob. Run bqu9b3cw (2 nodes, workers 10) trained fine for
+# 510 batches (loss 0.92 -> 0.45) and was then OOM-killed the instant it entered validation:
+# trainer.py builds a train AND a validation DataLoader, both with data_loading.num_workers, and
+# the val workers only spawn at iter() -- so 4 ranks/node goes from 40 worker processes to up to
+# 80 at that transition. Each worker buffers all 9 streams (incl. uncapped N320 IMERG targets).
+# 6 here vs 4 for gkm6as6m: this o256 arm is the lighter one. Raise only with evidence.
 data_loading:
-  num_workers: 10
+  num_workers: 6
 
 # config for training
 training_config:
@@ -76,7 +80,7 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 64
+  num_mini_epochs: 32
   samples_per_mini_epoch: 4096
   shuffle: True
 

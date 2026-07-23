@@ -64,10 +64,15 @@ train_logging:
   metrics: 20
   checkpoint: 250
 
-# Pinned to match the other IMERG-diag arms (gkm6as6m pretrained with 8) so the comparison
-# differs only in the pretrained backbone -- same convention as the atmofs03-rebased pair.
+# HOST-RAM bound, NOT a comparability knob. Run c4hua7ig (2 nodes, workers 10) was OOM-killed
+# in mini_epoch 0 train before a single loss line: trainer.py builds a train AND a validation
+# DataLoader, both with data_loading.num_workers, so 4 ranks/node = 40 worker processes/node
+# during training and up to 80 when validation spawns its own set. Each worker buffers all 9
+# streams, and this HIGHRES arm carries h512 obs (token_size 1536 on five geo streams) -- ~4x
+# the o256 data of the c71eo6pu arm, which survived training at 10 and only died at validation.
+# 4 here vs 6 for c71eo6pu: the highres obs need the extra headroom. Raise only with evidence.
 data_loading:
-  num_workers: 10
+  num_workers: 4
 
 # config for training
 training_config:
@@ -75,7 +80,7 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 64
+  num_mini_epochs: 32
   samples_per_mini_epoch: 4096
   shuffle: True
 
