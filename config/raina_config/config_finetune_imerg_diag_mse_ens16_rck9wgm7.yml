@@ -1,0 +1,129 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run rck9wgm7 (ERA5+Obs -> OperAn+obs)
+# -- ens16 / mse_ens variant.
+#
+# IDENTICAL to config_finetune_imerg_diag_mse_rck9wgm7.yml except:
+#   1. streams_directory -> ./config/streams/imerg_diag_mse_ens16_rck9wgm7/ (a verbatim copy
+#      of imerg_diag_rck9wgm7/ with only imerg_anemoi.yml changed: pred_head ens_size 1 -> 16,
+#      a stream-level loss_fcts {"mse_ens": {weight: 1.0}}, and max_num_targets -1 -> 131072
+#      because 16 heads on the uncapped n320 grid OOM a 96 GB GPU -- see that file).
+#   2. num_mini_epochs 64 -> 32 (24 is the shorter option; see the note below).
+# Everything else -- stream set, freeze mask, LR schedule, dates, forecast block -- is byte
+# equivalent to the MSE arm, so the comparison isolates the ensemble head + mse_ens loss.
+#
+# What this arm actually tests: mse_ens averages the per-member MSE, so each of the 16 heads
+# is independently pulled to the same conditional mean -- it does NOT reward spread (that is
+# kernel_crps, config_finetune_imerg_diag_crps_rck9wgm7.yml). Expect the 16 heads to stay
+# near-degenerate and the head-mean loss to track the plain-MSE arm closely; the gain, if any,
+# comes from the extra head capacity / free mini-ensemble averaging (the CERRA quantile run
+# showed 16-head averaging is worth a few % RMSE).
+#
+# Stream set: the pretraining INPUT (forcing) streams (ERA5_in + IASI + geo IR/VIS + surface)
+# reproduced verbatim from the saved checkpoint config, plus IMERG as the ONLY diagnostic/
+# output stream. The pretraining output stream (ERA5) is intentionally dropped: the model is
+# trained exclusively on predicting IMERG from the frozen pretrained representation.
+#
+# The IMERG decoder + pred head are new in this finetune (IMERG was not a pretraining stream),
+# so all 16 heads are freshly initialised -- ens_size 16 does not break checkpoint loading.
+#
+# Smoke-verified on 1 GH200 (run x6zj8ops): train + validate + checkpoint OK,
+# val LossPhysical.IMERG_ANEMOI.mse_ens.avg = 8.70E-01 on 8 samples (untrained IMERG head).
+#
+# Run:
+#   uv run train_continue --from-run-id rck9wgm7_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_mse_ens16_rck9wgm7.yml
+# or, on SLURM:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id rck9wgm7_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_mse_ens16_rck9wgm7.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_mse_ens16_rck9wgm7/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# The ensemble axis comes from pred_head.ens_size (16) in the stream config, so no model-wide
+# latent perturbation here -- keeping both would multiply the two ensemble axes.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_mse_ens16_from_rck9wgm7"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  # 32 epochs (the MSE arm ran 64). For the shorter 24-epoch run set this to 24 -- with
+  # general.istep 0 the LR schedule is step-based (warmup 256 / cooldown 512 steps), so it
+  # is unaffected by the epoch count; only the constant-LR stretch gets shorter.
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5_in v6 zarr covers 2016-2023 and the checkpoint was pretrained on 2016-2022;
+  # earlier start dates would sample windows with no input data at all.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Global loss block kept as plain MSE for parity with the MSE arm; IMERG is the only stream
+  # with targets and it declares its own loss_fcts (mse_ens), which takes precedence, so this
+  # block is effectively inert here.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_ens
+  grid: null

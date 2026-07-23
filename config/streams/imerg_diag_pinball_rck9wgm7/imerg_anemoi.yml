@@ -1,0 +1,75 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder
+# finetune from a pretrained checkpoint. The zarr has a single variable named 'tp'.
+#
+# QUANTILE (pinball) variant of config/streams/imerg_diag_rck9wgm7/imerg_anemoi.yml. Deltas:
+#   - pred_head.ens_size 1 -> 16: the 16 EnsPredictionHead MLPs are read as 16 conditional
+#     QUANTILES of tp, not as exchangeable members. No decoder_ens_latent_perturbation.
+#   - loss_fcts {quantile_pinball: 1.0} with explicit tail-weighted `levels` (see below).
+#   - max_num_targets -1 -> 131072 (memory; see the note at that key).
+# Pinball alone is deliberate: it is a proper scoring rule (CRPS = integral of pinball over
+# tau), so it trains a calibrated distribution on its own. Adding an mse term would pull every
+# head back toward the conditional mean -- the blur this arm exists to escape.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+
+  # REQUIRED vs the ens_size 1 arms (which use -1 = the full n320 grid, ~542k points per
+  # forecast step): with 16 heads the decode activations are 16x and an uncapped window OOMs a
+  # 96 GB GH200 in backward. 131072 is smoke-verified end-to-end; 262144 also passes training.
+  # The cap is a uniform random subsample without replacement per window
+  # (data_reader_base.py:240) -- unbiased, different points every window, not a fixed region.
+  max_num_targets: 131072
+
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 16, num_layers: 2}
+
+  # Stream-specific loss: pinball on 16 conditional quantiles. Overrides the global
+  # losses.physical.loss_fcts for this stream only and bypasses the global loss-name gate
+  # (loss_module_physical.py:310-315, 379-381).
+  #
+  # `levels` is NOT the equispaced default tau_k = (k+0.5)/16, and that is the whole point.
+  # Measured on 24 random 6h slices of this zarr (13.0M points): 67.3% of tp is EXACTLY zero
+  # and 77.9% is below 0.1 mm. Equispaced levels would put eleven heads (tau <= 0.72) on the
+  # zero atom and cap the wettest head at tau=0.969 ~ 5.9 mm/6h, leaving the entire 6-90 mm
+  # range of real precipitation events inexpressible. The ladder below instead spends:
+  #   - 2 heads (0.30, 0.55) inside the dry atom -- they anchor "predict dry", and the level
+  #     at which the ladder lifts off zero is the rain/no-rain boundary (localization);
+  #   - 3 heads (0.68, 0.75, 0.80) straddling the dry edge, where the mask is decided;
+  #   - 11 heads from 0.85 to 0.999 resolving intensity up to ~41 mm/6h (magnitude).
+  # Measured target quantiles in mm/6h, for reference:
+  #   0.68 ~ 0.005 | 0.75 ~ 0.05 | 0.80 ~ 0.16 | 0.85 ~ 0.42 | 0.90 ~ 1.09 | 0.95 ~ 3.35
+  #   0.97 ~ 5.88  | 0.99 ~ 13.5 | 0.995 ~ 19.9 | 0.999 ~ 41.4
+  # CONSEQUENCE FOR SCORING: with non-equispaced levels the plain mean over the 16 heads is
+  # NOT the conditional mean (it over-weights the tail -> wet-biased). Reconstruct the mean by
+  # trapezoidal integration over tau, or score per-quantile / per-member instead.
+  # `monotone: true` (the default) sorts along the ensemble dim, so SORTED head k is level k --
+  # the raw head index is not the quantile index.
+  loss_fcts:
+    "quantile_pinball":
+      weight: 1.0
+      args:
+        monotone: true
+        levels: [0.30, 0.55, 0.68, 0.75, 0.80, 0.85, 0.89, 0.92,
+                 0.94, 0.96, 0.97, 0.98, 0.99, 0.995, 0.998, 0.999]

@@ -1,0 +1,53 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder
+# finetune from a pretrained checkpoint. The zarr has a single variable named 'tp'.
+#
+# ens16 / mse_ens variant of config/streams/imerg_diag_rck9wgm7/imerg_anemoi.yml. Two deltas:
+#   - pred_head.ens_size 1 -> 16: EnsPredictionHead builds 16 independent MLP heads on the
+#     SAME decoded token (engines.py:639), so the ensemble axis comes from the head here,
+#     not from decoder_ens_latent_perturbation (the CRPS variant's route, kept null).
+#   - stream-level loss_fcts {mse_ens: 1.0}: mse_ens averages the per-member MSE over the
+#     ensemble axis (loss_functions.py:65), i.e. every head is pulled to the conditional
+#     mean independently -> heads stay near-degenerate; this is a capacity/ensemble-plumbing
+#     probe, NOT a spread-generating loss (use kernel_crps for that).
+# A stream-level loss_fcts overrides the global losses.physical.loss_fcts for this stream only
+# and bypasses the global loss-name gate (loss_module_physical.py:310-315, 379-381).
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  # REQUIRED CHANGE vs the ens_size 1 arm (which uses -1 = the full n320 grid, ~542k points per
+  # forecast step). With 16 heads the decode activations are 16x and an uncapped window OOMs a
+  # 96 GB GH200 in backward (verified: 1.04 GiB alloc failure with 94 GB in use). 131072 was
+  # smoke-verified end-to-end (train + validate + checkpoint); 262144 also passes training if
+  # more target coverage per window is wanted. The cap is a uniform random subsample without
+  # replacement per window (data_reader_base.py:240), so it is unbiased -- different points
+  # every window, not a fixed region.
+  max_num_targets: 131072
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 16, num_layers: 2}
+
+  # Stream-specific loss: MSE averaged over the 16 ensemble members.
+  loss_fcts:
+    "mse_ens":
+      weight: 1.0
