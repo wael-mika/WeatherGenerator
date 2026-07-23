@@ -190,20 +190,33 @@ def quantile_pinball(
     weights_channels: torch.Tensor | None,
     weights_points: torch.Tensor | None,
     monotone: bool = True,
+    levels: list[float] | None = None,
 ):
     """
     Pinball (quantile-regression) loss.
 
-    Interprets the ensemble dimension as a set of conditional quantiles at levels
-    tau_k = (k + 0.5) / K and applies the pinball loss per quantile. This formalises the
-    dry->wet member spread observed in the oracle audit (docs/decoder_assessment.md §2.1.1)
-    on purpose and calibrated, and yields a valid CRPS (= integral over tau of the pinball
-    loss), curing the degenerate kernel_crps (no stochastic source needed).
+    Interprets the ensemble dimension as a set of conditional quantiles and applies the pinball
+    loss per quantile. This formalises the dry->wet member spread observed in the oracle audit
+    (docs/decoder_assessment.md §2.1.1) on purpose and calibrated, and yields a valid CRPS
+    (= integral over tau of the pinball loss), curing the degenerate kernel_crps (no stochastic
+    source needed).
+
+    By default the levels are equispaced, tau_k = (k + 0.5) / K. For a zero-inflated field that
+    wastes most heads: IMERG 6h tp is 67% exact zeros and 78% below 0.1 mm, so at K=16 the
+    eleven heads with tau <= 0.72 all sit on the zero atom and the wettest head only reaches
+    tau=0.969 ~ 5.9 mm/6h -- the whole 6-90 mm range of real precipitation events is then
+    inexpressible. `levels` overrides the equispaced grid with an explicit ascending list
+    (len == ens_size) so the heads can be concentrated where the field actually varies. Note
+    that with non-equispaced levels the plain mean over heads is NO LONGER an estimate of the
+    conditional mean (it over-weights whichever region is dense); reconstruct the mean by
+    trapezoidal integration over tau instead.
 
     Params:
         target : shape (num_data_points, num_channels)
         pred   : shape (ens_dim, num_data_points, num_channels); ens_dim = number of quantiles K
         monotone : if True, sort predictions along the ensemble dim so quantiles do not cross
+        levels : optional ascending quantile levels in (0, 1), one per ensemble member;
+                 None = equispaced (k + 0.5) / K
         weights_channels : shape (num_channels,) or None
         weights_points : shape (num_data_points,) or None
 
@@ -222,7 +235,20 @@ def quantile_pinball(
     if monotone:
         p = torch.sort(p, dim=0).values
 
-    taus = (torch.arange(ens_size, device=pred.device, dtype=p.dtype) + 0.5) / ens_size
+    if levels is None:
+        taus = (torch.arange(ens_size, device=pred.device, dtype=p.dtype) + 0.5) / ens_size
+    else:
+        # may arrive as an OmegaConf ListConfig from a stream's loss_fcts.args
+        levels = [float(q) for q in levels]
+        if len(levels) != ens_size:
+            raise ValueError(
+                f"quantile_pinball: len(levels)={len(levels)} must equal ens_size={ens_size}."
+            )
+        if not all(0.0 < q < 1.0 for q in levels):
+            raise ValueError(f"quantile_pinball: levels must lie strictly in (0, 1), got {levels}.")
+        if any(q2 <= q1 for q1, q2 in zip(levels[:-1], levels[1:], strict=True)):
+            raise ValueError(f"quantile_pinball: levels must be strictly ascending, got {levels}.")
+        taus = torch.tensor(levels, device=pred.device, dtype=p.dtype)
     taus = taus.view(ens_size, 1, 1)
 
     r = t.unsqueeze(0) - p  # [K, num_data_points, num_channels]
