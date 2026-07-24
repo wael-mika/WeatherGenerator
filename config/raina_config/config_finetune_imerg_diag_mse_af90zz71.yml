@@ -1,0 +1,180 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run af90zz71 -- MSE variant.
+#
+# LINEAGE: af90zz71 is the third link of the JEPA chain, confirmed by its own run_history
+# [[n0t6ejuo,0],[srdrwfy6,17384],[srdrwfy6,0],[af90zz71,4072]]:
+#     n0t6ejuo (temporal-JEPA pretrain) -> srdrwfy6 (2-step 6h forecast ft) -> af90zz71
+# af90zz71 itself is an 8-step/6h multi-stream forecast finetune, istep 5072, fe_num_blocks 16
+# (trained), ae_local 4 blocks/dim 1024, ae_global 5 blocks, register tokens 64, healpix L5,
+# decoder PerceiverIOCoordConditioning, ae_local_num_queries 1, with_fsdp False.
+#
+# NOTE this checkpoint's architecture (use_xsa, with_step_conditioning, embed_orientation:
+# channels) is NOT supported by the current raina branch code. The run therefore ships the
+# af90zz71 code snapshot: slurm_weathergen_af90zz71_raina_dir/WeatherGenerator is a copy of
+# slurm_weathergen_af90zz71_dir/WeatherGenerator. Configs (this file + the streams dir) are
+# overlaid from the home clone at submit time by launch-slurm.py, so they only need to exist
+# here.
+#
+# Stream set (config/streams/imerg_diag_jepa/): af90zz71's stream set is IDENTICAL to
+# srdrwfy6's -- the same 8 pretraining forcing inputs (ERA5_in analysis + IASI + 5
+# geostationary + SurfaceCombined) with the diagnostic ERA5 output stream REPLACED by IMERG as
+# the only output stream. The shared dir therefore needs no af90zz71-specific variant.
+#
+# JEPA-specific conversion: af90zz71 ALREADY carries student-teacher Disabled and
+# deep_ssl.enabled False (it is a physical-loss forecast finetune, not a JEPA stage), so the
+# pins below are idempotent restatements kept for identity with the n0t6ejuo/srdrwfy6 configs.
+# random_easy / random_easy_target ARE active in this checkpoint and are genuinely disabled here.
+#
+# DELIBERATE DEVIATION -- forecast steps: af90zz71 pretrained with num_steps 8, but this file
+# uses 2 to stay comparable with every other IMERG diagnostic finetune in the family
+# (ipnpqow8/rck9wgm7/atmofs03/n0t6ejuo/srdrwfy6). Uncomment the 8-step block below to probe at
+# the checkpoint's native rollout depth instead.
+#
+# COMPARABILITY: budget 64x4096, lr schedule, dates 2016-2022, logging, optimizer pins, val 256
+# + EMA 600 all match the rest of the family. time_window_step stays at this checkpoint's
+# native 6h (same accepted deviation as the srdrwfy6/atmofs03 finetunes). grad_clip 0.8 is
+# already this checkpoint's native value.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id af90zz71_raina --config config/raina_config/config_finetune_imerg_diag_mse_af90zz71.yml --nodes N
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_jepa/"
+
+# Freeze options -- keep exactly ONE active. Module tree of this architecture:
+# encoder (embeds+local+global+aggregation), forecast_engine, and per-stream decoder modules
+# (target_token_engines.*, pred_heads.*, embed_target_coords.*) which are all IMERG-fresh
+# here and must stay trainable.
+# (a) pure decoder probe: encoder AND the pretrained 16-block forecast engine frozen.
+freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+# (b) forecast engine left trainable:
+# freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
+  multiprocessing_method: "spawn"
+
+  desc: "imerg_diag_mse_from_af90zz71"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off (already off in this checkpoint; pinned for identity with the
+  # n0t6ejuo/srdrwfy6 finetune configs).
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # time_window_step/len NOT overridden: native 6h/6h of this checkpoint.
+
+  # Kept identical to the other IMERG finetunes for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Match the other IMERG finetunes (grad_clip 0.8 is already native to this checkpoint).
+  optimizer:
+    grad_clip: 0.8
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Latent JEPA loss OFF (already Disabled here; filtered out by the enabled-flag before
+  # instantiation); plain MSE on the only output stream (IMERG). The physical block keeps the
+  # name "forecast" this checkpoint already uses so the merge is idempotent.
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  # 2 steps for family comparability (see header). Native depth was 8.
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+  # Native 8-step alternative:
+  # forecast :
+  #     time_step: 06:00:00
+  #     offset: 1
+  #     num_steps: 8
+  #     policy: "fixed"
+
+# Match the other IMERG finetunes (256 val samples, EMA halflife 600).
+validation_config:
+  samples_per_mini_epoch: 256
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Match the other IMERG finetunes. NOTE this checkpoint carries 4; 10 follows the family
+# convention but host RAM is the binding constraint here (trainer builds a train AND a val
+# DataLoader, each with num_workers, per rank -- they coexist at the train->validate
+# transition). If workers get OOM-killed, drop to 6 then 4 via
+# --options data_loading.num_workers=N rather than editing this file.
+data_loading:
+  num_workers: 10
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse
+  grid: null
