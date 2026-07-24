@@ -132,6 +132,16 @@ def align_clim_data(
                 ),
                 dims=["statistic"] + list(target_da.dims),
                 coords=all_stat_coords,
+            ).assign_coords(
+                # Carry over the target's non-dimension coords (e.g. lat/lon on
+                # ipoint) so the aligned climatology is a proper spatial array and
+                # can be region-masked like the data. The legacy branch below keeps
+                # these via coords=target_da.coords; mirror that here.
+                {
+                    name: coord
+                    for name, coord in target_da.coords.items()
+                    if name not in all_stat_coords
+                }
             )
         else:
             aligned_clim[fstep] = xr.DataArray(

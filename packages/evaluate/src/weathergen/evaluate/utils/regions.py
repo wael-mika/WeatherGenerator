@@ -40,6 +40,13 @@ class RegionLibrary:
         "uwc-west": (39.0, 63.0, -26.0, 41.0, ccrs.PlateCarree()),
         "arome": (37.0, 56.0, -12.0, 16.0, ccrs.PlateCarree()),
         "icon": (42.0, 51.0, -1.0, 18.0, ccrs.PlateCarree()),
+        # Geostationary fields of view, for observing-system / data-denial studies.  A denied
+        # geostationary stream can only affect skill where its instrument actually looks, so a
+        # global-mean impact score for one of these badly under-represents it.  Bounds are the
+        # usable part of each disk (out to ~60 deg from the sub-satellite point).
+        "seviri_disk": (-60.0, 60.0, -60.0, 60.0, ccrs.PlateCarree()),
+        "goes_disk": (-60.0, 60.0, -135.0, -15.0, ccrs.PlateCarree()),
+        "himawari_disk": (-60.0, 60.0, 80.0, 180.0, ccrs.PlateCarree()),
     }
 
 

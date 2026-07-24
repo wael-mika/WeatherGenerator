@@ -77,8 +77,9 @@ def _score_single_fstep(
     if preds.sizes.get("ipoint") == 0:
         return None
 
-    tars, preds, tars_next, preds_next = [
-        bbox.apply_mask(x) if x is not None else None for x in (tars, preds, tars_next, preds_next)
+    tars, preds, tars_next, preds_next, climatology = [
+        bbox.apply_mask(x) if x is not None else None
+        for x in (tars, preds, tars_next, preds_next, climatology)
     ]
 
     score_data = VerifiedData(preds, tars, preds_next, tars_next, climatology)
