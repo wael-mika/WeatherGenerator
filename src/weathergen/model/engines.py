@@ -818,6 +818,102 @@ class EnsPredictionHead(torch.nn.Module):
         return preds
 
 
+class EnsPredictionHeadFourier(torch.nn.Module):
+    """
+    Fourier-feature pred head with one or more frequency bands (Tancik et al. NeurIPS 2020).
+
+    For each scale σ in ``freq_scales``, builds an independent Fourier basis
+    ``W_σ ~ N(0, σ²·I)`` and a dedicated MLP sub-head operating on the decoder
+    output augmented with that band's sinusoidal features. Sub-head outputs are
+    summed:
+
+        pred = Σ_b  sub_head_b( [toks ; sin(2π·coords·W_b^T), cos(...)] )
+
+    A single-element ``freq_scales`` (default ``[10.0]``) is the canonical
+    single-band Random Fourier Feature head; multiple scales let the model route
+    different channels to different frequency bands (e.g. q_850 → high-freq band,
+    z_500 → low-freq band). This combats spectral bias on high-activity channels.
+
+    Parameters
+    ----------
+    freq_scales : list[float]
+        One scale (σ) per band. ``len(freq_scales)`` = number of bands/sub-heads.
+        Default ``[10.0]`` (single band). Larger σ injects higher frequencies.
+    num_freqs_per_band : int
+        Fourier basis size per band (default 64), applied uniformly to all bands.
+    learnable_freqs : bool
+        If True the projection matrix trains; default False (canonical fixed RFF).
+
+    Notes
+    -----
+    The projection matrix is a frozen ``Parameter`` (not a buffer): FSDP shards
+    parameters into DTensors, while plain buffers stay as Tensors after the FSDP
+    wrap and break state-dict gathering at checkpoint time.
+    """
+
+    def __init__(
+        self,
+        dim_embed,
+        dim_out,
+        dim_coord_in,
+        ens_num_layers,
+        ens_size,
+        stream_name: str,
+        num_freqs_per_band: int = 64,
+        freq_scales: list[float] | tuple[float, ...] = (10.0,),
+        learnable_freqs: bool = False,
+        norm_type: str = "LayerNorm",
+        hidden_factor: int = 2,
+        final_activation: None | str = None,
+    ):
+        super().__init__()
+        self.name = f"EnsPredictionHeadFourier_{stream_name}"
+
+        self.num_bands = len(freq_scales)
+        self.num_freqs_per_band = num_freqs_per_band
+
+        # Fourier bases for all bands stacked: shape [num_bands, num_freqs_per_band, dim_coord_in].
+        # Each band slice is drawn from N(0, σ_b²·I) so bands sample different frequency scales.
+        scales = torch.tensor(list(freq_scales), dtype=torch.float32).view(-1, 1, 1)
+        ws = torch.randn(self.num_bands, num_freqs_per_band, dim_coord_in) * scales
+        self.Ws = torch.nn.Parameter(ws, requires_grad=learnable_freqs)
+
+        # One sub-head per (ensemble member × band). Each takes [toks ; ff_b].
+        dim_input = dim_embed + 2 * num_freqs_per_band
+        dim_internal = dim_input * hidden_factor
+        enl = ens_num_layers
+
+        self.band_heads = torch.nn.ModuleList()
+        for _ in range(ens_size):
+            per_ens = torch.nn.ModuleList()
+            for _b in range(self.num_bands):
+                head = torch.nn.ModuleList()
+                head.append(torch.nn.Linear(dim_input, dim_out if enl == 1 else dim_internal))
+                for i in range(ens_num_layers - 1):
+                    head.append(torch.nn.GELU())
+                    head.append(
+                        torch.nn.Linear(dim_internal, dim_out if enl - 2 == i else dim_internal)
+                    )
+                if final_activation is not None and enl >= 1:
+                    head.append(ActivationFactory.get(final_activation))
+                per_ens.append(head)
+            self.band_heads.append(per_ens)
+
+    def forward(self, toks, coords):
+        preds = []
+        for per_ens in self.band_heads:
+            cpred = None
+            for b, head in enumerate(per_ens):
+                phases = 2.0 * torch.pi * (coords @ self.Ws[b].T)
+                ff = torch.cat([torch.sin(phases), torch.cos(phases)], dim=-1)
+                x = torch.cat([toks, ff], dim=-1)
+                for block in head:
+                    x = block(x)
+                cpred = x if cpred is None else cpred + x
+            preds.append(cpred)
+        return torch.stack(preds, 0)
+
+
 class TargetPredictionEngineClassic(nn.Module):
     def __init__(
         self,
@@ -1107,6 +1203,121 @@ class TargetPredictionEngine(nn.Module):
             else output
         )
         return output
+
+
+class TargetPredictionEngineMLPMultiStage(nn.Module):
+    """
+    Multi-stage MLP decoder: K cross-attention lookups interleaved with MLP blocks.
+
+    Splits the MLP stack into K equal stages, each preceded by its own cross-attention lookup
+    into the same latent 1-ring neighbourhood.  The second (and later) lookups allow the
+    decoder to re-attend to the latent after MLP processing, testing whether iterative
+    spatial refinement helps over a single lookup.
+
+    Architecture (num_cross_attn=2, num_layers=4 example):
+        CrossAttn_0 → MLP_0 → MLP_1 → CrossAttn_1 → MLP_2 → MLP_3
+
+    Forward signature is identical to TargetPredictionEngineClassic:
+        forward(latent, output, latent_lens, output_lens, coordinates)
+
+    Config consumed (from cf and stream_config):
+        - cf.ae_global_dim_embed       : KV embedding dimension
+        - cf.with_flash_attention      : flash attention toggle
+        - cf.norm_type                 : LayerNorm or RMSNorm
+        - cf.norm_eps, cf.mlp_norm_eps : norm epsilons
+        - cf.pred_mlp_adaln            : enable coord conditioning in MLPs
+        - cf.attention_dtype           : attention dtype (bf16 recommended)
+        - stream_config["target_readout"]["num_layers"]    : total MLP blocks; must be divisible
+                                                             by num_cross_attn
+        - stream_config["target_readout"]["num_heads"]     : attention heads
+        - stream_config["target_readout"]["num_cross_attn"]: number of stages (default: 2)
+    Optional in cf:
+        - cf.qk_norm_type              : qk-lnorm type override (defaults to norm_type)
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+    ):
+        super(TargetPredictionEngineMLPMultiStage, self).__init__()
+        self.name = f"TargetPredictionEngineMLPMultiStage_{stream_config['name']}"
+
+        self.cf = cf
+        self.dims_embed = dims_embed
+        self.dim_coord_in = dim_coord_in
+        self.tr_dim_head_proj = tr_dim_head_proj
+        self.tr_mlp_hidden_factor = tr_mlp_hidden_factor
+        self.softcap = softcap
+
+        num_cross_attn = stream_config["target_readout"].get("num_cross_attn", 2)
+        num_mlp_blocks = len(self.dims_embed) - 1
+        assert num_mlp_blocks % num_cross_attn == 0, (
+            f"num_layers ({num_mlp_blocks}) must be divisible by num_cross_attn ({num_cross_attn})"
+        )
+
+        cross_attn_kwargs = dict(
+            dim_embed_q=self.dims_embed[0],
+            dim_embed_kv=self.cf.ae_global_dim_embed,
+            num_heads=stream_config["target_readout"]["num_heads"],
+            dim_head_proj=self.tr_dim_head_proj,
+            with_residual=True,
+            with_qk_lnorm=True,
+            dropout_rate=0.1,
+            with_flash=self.cf.with_flash_attention,
+            norm_type=self.cf.norm_type,
+            qk_norm_type=self.cf.get("qk_norm_type", self.cf.norm_type),
+            softcap=self.softcap,
+            dim_aux=self.dim_coord_in,
+            norm_eps=self.cf.norm_eps,
+            attention_dtype=get_dtype(self.cf.attention_dtype),
+        )
+        self.cross_attns = torch.nn.ModuleList(
+            [MultiCrossAttentionHeadVarlen(**cross_attn_kwargs) for _ in range(num_cross_attn)]
+        )
+
+        self.mlp_blocks = torch.nn.ModuleList()
+        for i in range(num_mlp_blocks):
+            self.mlp_blocks.append(
+                MLP(
+                    self.dims_embed[i],
+                    self.dims_embed[i + 1],
+                    with_residual=True,
+                    hidden_factor=self.tr_mlp_hidden_factor,
+                    dropout_rate=0.1,
+                    norm_type=self.cf.norm_type,
+                    dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
+                    norm_eps=self.cf.mlp_norm_eps,
+                )
+            )
+
+    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+        """
+        Args:
+            latent       : [total_kv_tokens, ae_global_dim_embed] flattened 1-ring KV tokens.
+            output       : [total_query_tokens, dims_embed[0]] query embeddings (target coords).
+            latent_lens  : [num_groups + 1] per-cell KV lens (typically 9 for 1-ring).
+            output_lens  : [num_groups + 1] per-cell query lens.
+            coordinates  : [total_query_tokens, dim_coord_in] raw coordinates for AdaLN.
+
+        Returns:
+            [total_query_tokens, dims_embed[-1]] decoded per-query embeddings ready for pred_head.
+        """
+        x = output
+        mlps_per_stage = len(self.mlp_blocks) // len(self.cross_attns)
+        for stage_idx, ca in enumerate(self.cross_attns):
+            x = checkpoint(
+                ca, x, latent, output_lens, latent_lens, coordinates, use_reentrant=False
+            )
+            start = stage_idx * mlps_per_stage
+            for mlp in self.mlp_blocks[start : start + mlps_per_stage]:
+                x = checkpoint(mlp, x, coordinates, use_reentrant=False)
+        return x
 
 
 @dataclasses.dataclass
