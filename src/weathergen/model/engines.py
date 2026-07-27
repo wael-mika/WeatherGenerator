@@ -29,6 +29,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.norms import RMSNorm
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -1318,6 +1319,193 @@ class TargetPredictionEngineMLPMultiStage(nn.Module):
             for mlp in self.mlp_blocks[start : start + mlps_per_stage]:
                 x = checkpoint(mlp, x, coordinates, use_reentrant=False)
         return x
+
+
+class CoarseContextBranch(nn.Module):
+    """Gated cross-attention from the target queries into the pooled coarse-scale latent.
+
+    Kept as its own module rather than as loose attributes of ``MultiScaleContextDecoder`` for a
+    concrete warm-start reason: when a checkpoint lacks parameters, ``load_model_state`` groups
+    the missing keys, takes the highest-level module covering them, and calls ``to_empty()`` +
+    ``reset_parameters()`` on it. With the new weights sitting directly on the decoder, that root
+    would be the *whole decoder* -- and the re-init would discard the inherited
+    ``TargetPredictionEngineClassic`` weights the fine-tune exists to reuse. Confining them here
+    makes this branch the root, so only the new weights are initialised.
+    """
+
+    def __init__(self, cf, dims_embed, dim_coord_in, tr_dim_head_proj, softcap, stream_config):
+        super().__init__()
+
+        self.num_levels = len(cf.get("decode_context_levels") or [])
+        assert self.num_levels > 0, (
+            "decoder_type: MultiScaleContext requires a non-empty decode_context_levels"
+        )
+        self.tokens_per_cell = 9 * self.num_levels
+
+        dim_kv = cf.ae_global_dim_embed
+        # (level, compass direction) embedding for the coarse keys; small init so the slots are
+        # distinguishable from the first step. gamma still gates the whole branch to zero.
+        self.slot_embed = torch.nn.Parameter(torch.empty(self.tokens_per_cell, dim_kv))
+
+        num_blocks = cf.get("decode_context_num_blocks", 1)
+        self.ctx_attns = torch.nn.ModuleList(
+            [
+                MultiCrossAttentionHeadVarlen(
+                    dim_embed_q=dims_embed[0],
+                    dim_embed_kv=dim_kv,
+                    num_heads=stream_config["target_readout"]["num_heads"],
+                    dim_head_proj=tr_dim_head_proj,
+                    # the delta is gated externally by gamma, so no internal residual
+                    with_residual=False,
+                    with_qk_lnorm=True,
+                    dropout_rate=0.1,
+                    with_flash=cf.with_flash_attention,
+                    norm_type=cf.norm_type,
+                    qk_norm_type=cf.get("qk_norm_type", cf.norm_type),
+                    softcap=softcap,
+                    dim_aux=dim_coord_in,
+                    norm_eps=cf.norm_eps,
+                    attention_dtype=get_dtype(cf.attention_dtype),
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.gamma = torch.nn.Parameter(torch.empty(num_blocks))
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Re-initialise every weight under this branch.
+
+        Called directly by the warm-start path after ``to_empty()``, so it must cover *all*
+        parameters here, not just the two owned outright.
+        """
+        for module in self.modules():
+            if module is self:
+                continue
+            if isinstance(module, RMSNorm):
+                # RMSNorm holds a bare weight and defines no reset_parameters of its own
+                torch.nn.init.ones_(module.weight)
+            elif hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+        torch.nn.init.normal_(self.slot_embed, std=1.0 / self.slot_embed.shape[-1])
+        # zero init => the decoder starts bit-identical to TargetPredictionEngineClassic
+        torch.nn.init.zeros_(self.gamma)
+
+    def forward(self, output, ctx_latent, ctx_lens, output_lens, coordinates):
+        """Returns the query tokens with the gated coarse-context delta added."""
+        if ctx_latent is None or ctx_latent.shape[0] == 0:
+            return output
+
+        num_groups = ctx_latent.shape[0] // self.tokens_per_cell
+        ctx = ctx_latent + self.slot_embed.repeat(num_groups, 1)
+
+        q = output
+        for i_block, ctx_attn in enumerate(self.ctx_attns):
+            delta = checkpoint(
+                ctx_attn, q, ctx, output_lens, ctx_lens, coordinates, use_reentrant=False
+            )
+            q = q + self.gamma[i_block] * delta
+        return q
+
+
+class MultiScaleContextDecoder(TargetPredictionEngineClassic):
+    """
+    Coordinate-conditioned readout with an added coarse-scale context branch.
+
+    The production decoder lets every target point attend to the 9 latent vectors of its own
+    HEALPix cell's 1-ring -- roughly 450 km at L5, at a single scale, with keys that carry no
+    positional code. Where a sharp atmospheric gradient belongs (a front, a convergence line, a
+    shear zone) is set by the deformation and thermal-gradient field over 500-1500 km, so the
+    decoder is being asked to place fine structure while blind to the synoptic setting that
+    determines it. This class widens the receptive field across HEALPix scales.
+
+    Architecture::
+
+        q = output + sum_i  gamma_i * ctx_attn_i(output, coarse_kv)     # new, gated
+        x = TargetPredictionEngineClassic.forward(latent, q, ...)       # inherited, unchanged
+
+    It **subclasses** ``TargetPredictionEngineClassic`` rather than wrapping it so the inherited
+    block stack keeps its state-dict paths (``tte.*``). A checkpoint trained with the classic
+    decoder therefore loads into this one with no re-keying: the only missing keys are
+    ``context.*``.
+
+    ``coarse_kv`` is built by ``utils.pool_latent_levels`` / ``utils.gather_context_latent``, which
+    ``Model.predict_decoders`` calls per step: for each configured level in
+    ``cf.decode_context_levels`` (e.g. ``[4, 3]``), the 1-ring of the target cell's ancestor at
+    that level, mean-pooled over its descendants -- 9 tokens per level, ~2^(hl-l) x the cell
+    width. Levels are concatenated per cell, so ``coarse_kv`` carries ``9 * num_levels`` tokens
+    per active cell.
+
+    Two properties are deliberate:
+
+    - **Exact continuation.** ``gamma`` is zero-initialised and the context branch is a pure
+      additive delta on the query, so at step 0 the module is bit-identical to
+      ``TargetPredictionEngineClassic``. A checkpoint trained with the classic decoder can be
+      fine-tuned into this one without a warm-up transient. (Merging the coarse tokens into the
+      *same* KV set would not have this property: they would absorb softmax mass from the fine
+      tokens even with their values zeroed.)
+    - **Position on the keys.** ``slot_embed`` is a learned ``[9 * num_levels, dim_kv]`` table
+      added to the coarse KV. Because ``hp.neighbours`` returns the 1-ring in a fixed order, slot
+      ``j`` of a level is a consistent compass direction, so one table encodes both *which scale*
+      and *which direction* a key sits in -- the relative geometry the cross-attention otherwise
+      cannot see. This needs no change to ``MultiCrossAttentionHeadVarlen``, unlike RoPE (which
+      has no hook there, and whose ``apply_rotary_pos_emb`` assumes q and k are index-aligned).
+
+    Config consumed:
+        - ``cf.decode_context_levels``     : coarse HEALPix levels, e.g. ``[4, 3]``. Required.
+        - ``cf.decode_context_num_blocks`` : context cross-attention blocks (default 1).
+        - everything ``TargetPredictionEngineClassic`` consumes.
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+    ):
+        super(MultiScaleContextDecoder, self).__init__(
+            cf,
+            dims_embed,
+            dim_coord_in,
+            tr_dim_head_proj,
+            tr_mlp_hidden_factor,
+            softcap,
+            stream_config=stream_config,
+        )
+        self.name = f"MultiScaleContextDecoder_{stream_config['name']}"
+
+        self.context = CoarseContextBranch(
+            cf, dims_embed, dim_coord_in, tr_dim_head_proj, softcap, stream_config
+        )
+
+    @property
+    def tokens_per_cell(self) -> int:
+        return self.context.tokens_per_cell
+
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        ctx_latent=None,
+        ctx_lens=None,
+    ):
+        """
+        Args beyond the TargetPredictionEngineClassic contract:
+            ctx_latent : ``[num_active * 9 * num_levels, ae_global_dim_embed]`` pooled coarse KV,
+                grouped per cell, levels concatenated. ``None`` skips the context branch.
+            ctx_lens   : ``[num_groups + 1]`` int32, ``9 * num_levels`` at cells with targets this
+                step and ``0`` elsewhere, ``[0] == 0``.
+        """
+        q = self.context(output, ctx_latent, ctx_lens, output_lens, coordinates)
+        return super().forward(latent, q, latent_lens, output_lens, coordinates)
 
 
 @dataclasses.dataclass

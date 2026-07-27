@@ -44,7 +44,7 @@ ae_aggregation_att_dense_rate: 1.0
 ae_aggregation_block_factor: 64
 ae_aggregation_mlp_hidden_factor: 2
 
-decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, MLPDecoderMultiStage, Linear
+decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, MultiScaleContext, MLPDecoderMultiStage, Linear
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
@@ -57,6 +57,14 @@ pred_mlp_adaln: True
 # (+MLP) blocks in the upsampler, used only when decode_latent_expand > 1.
 decode_latent_expand: 1
 decode_upsample_num_blocks: 1
+
+# Coarse-scale decode context (decoder_type: MultiScaleContext, see MultiScaleContextDecoder).
+# HEALPix levels, all coarser than healpix_level, whose 1-ring around the target cell's ancestor
+# is added as a second, gated KV set for the decoder -- synoptic context the 450 km 1-ring at the
+# latent level cannot supply. [] = off. Example at healpix_level 5: [4, 3] adds ~600 km and
+# ~1200 km rings. num_blocks = context cross-attention blocks applied to the query.
+decode_context_levels: []
+decode_context_num_blocks: 1
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder

@@ -36,12 +36,18 @@ from weathergen.model.engines import (
     LatentPredictionHeadTransformer,
     LatentState,
     LatentUpsamplingEngine,
+    MultiScaleContextDecoder,
     TargetPredictionEngine,
     TargetPredictionEngineClassic,
     TargetPredictionEngineMLPMultiStage,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.utils import get_num_parameters
+from weathergen.model.utils import (
+    build_context_map,
+    gather_context_latent,
+    get_num_parameters,
+    pool_latent_levels,
+)
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
@@ -159,6 +165,30 @@ class ModelParams(torch.nn.Module):
         )
         self.q_cells_lens.data[0] = 0
 
+        # Coarse HEALPix context levels for the multi-scale decoder (see
+        # engines.MultiScaleContextDecoder). Empty = off, which is the default and leaves every
+        # tensor below unallocated. Each level l < healpix_level contributes the 1-ring of the
+        # target cell's ancestor at that level, i.e. 9 pooled tokens spanning ~2^(hl-l) x the
+        # cell width. Nested ordering makes the ancestor of cell c simply c // 4**(hl - l), and
+        # a coarse cell's descendants contiguous, so pooling is a reshape-mean (see
+        # utils.pool_latent_levels / utils.gather_context_latent).
+        self.decode_context_levels = [int(v) for v in (cf.get("decode_context_levels") or [])]
+        for level in self.decode_context_levels:
+            assert 0 <= level < self.healpix_level, (
+                f"decode_context_levels entry {level} must be in [0, healpix_level="
+                f"{self.healpix_level}); coarser than the latent, and not the latent itself."
+            )
+        # per level: map from a fine cell to the 9 coarse cells its ancestor's 1-ring covers
+        self.hp_ctx_maps = torch.nn.ParameterList(
+            [
+                torch.nn.Parameter(
+                    torch.empty((self.num_healpix_cells, 9), dtype=torch.int32),
+                    requires_grad=False,
+                )
+                for _ in self.decode_context_levels
+            ]
+        )
+
     def create(self, cf: Config) -> "ModelParams":
         self.reset_parameters(cf)
         return self
@@ -255,6 +285,12 @@ class ModelParams(torch.nn.Module):
         # nbors *and* self
         self.hp_nbours.data[:, 0] = torch.arange(temp.shape[0], device=self.hp_nbours.device)
         self.hp_nbours.data[:, 1:] = torch.from_numpy(temp).to(self.hp_nbours.device)
+
+        # coarse-level context maps: for each fine cell, the 9 coarse cells forming the 1-ring
+        # of its ancestor at that level
+        for i_level, level in enumerate(self.decode_context_levels):
+            ctx_map = self.hp_ctx_maps[i_level]
+            ctx_map.data.copy_(build_context_map(hlc, level).to(ctx_map.device))
 
         # precompute for varlen attention
         self.q_cells_lens.data.fill_(1)
@@ -462,6 +498,18 @@ class Model(torch.nn.Module):
                             dims_embed[0],
                             cf.ae_global_dim_embed,
                             self.targets_num_channels[i_stream],
+                        )
+                    elif cf.decoder_type == "MultiScaleContext":
+                        # Classic readout + a gated coarse-scale context branch.
+                        # See engines.MultiScaleContextDecoder for rationale.
+                        tte = MultiScaleContextDecoder(
+                            cf,
+                            dims_embed,
+                            dim_coord_in,
+                            tr_dim_head_proj,
+                            tr_mlp_hidden_factor,
+                            softcap,
+                            stream_config=si,
                         )
                     elif cf.decoder_type == "MLPDecoderMultiStage":
                         # Multi-stage: K cross-attention lookups interleaved with MLP blocks.
@@ -830,13 +878,28 @@ class Model(torch.nn.Module):
         # get 1-ring neighborhood for prediction
         batch_size = len(batch)
         s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
-        idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).flatten(0, 1)
+        # hp_nbours indexes cells within one sample, so it must be offset by i_b * num_cells
+        # before indexing the flattened (sample, cell) axis -- without this every sample reads
+        # sample 0's latent, which is silent at batch_size_per_gpu == 1 and wrong above it.
+        idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).long()
+        cell_offsets = (torch.arange(batch_size, device=idxs.device) * self.num_healpix_cells).view(
+            -1, 1, 1
+        )
+        idxs = (idxs + cell_offsets).flatten(0, 1)
         tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
         # TODO: precompute in model_params?
         tokens_nbors_lens = torch.full(
             (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
         )
         tokens_nbors_lens[0] = 0
+
+        # coarse-scale context for the multi-scale decoder; pooled once per step and shared by
+        # every stream, then gathered per stream over that stream's active cells.
+        pooled_levels = None
+        if model_params.decode_context_levels:
+            pooled_levels = pool_latent_levels(
+                tokens.reshape(s).mean(2), self.healpix_level, model_params.decode_context_levels
+            )
 
         # pair with tokens from assimilation engine to obtain target tokens
         for stream_name in self.streams.keys():
@@ -897,12 +960,26 @@ class Model(torch.nn.Module):
                             tokens_nbors, tokens_nbors_lens, tcs_lens
                         )
 
-                    tc_tokens = self.target_token_engines[stream_name](
+                    tte = self.target_token_engines[stream_name]
+                    tte_kwargs = {}
+                    if isinstance(tte, MultiScaleContextDecoder):
+                        # coarse 1-ring context for this stream's active cells only
+                        ctx_latent, ctx_lens = gather_context_latent(
+                            pooled_levels,
+                            list(model_params.hp_ctx_maps),
+                            tcs_lens,
+                            batch_size,
+                            self.num_healpix_cells,
+                        )
+                        tte_kwargs = {"ctx_latent": ctx_latent, "ctx_lens": ctx_lens}
+
+                    tc_tokens = tte(
                         latent=decode_latent,
                         output=tc_tokens,
                         latent_lens=decode_latent_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
+                        **tte_kwargs,
                     )
 
                     # final prediction head to map back to physical space

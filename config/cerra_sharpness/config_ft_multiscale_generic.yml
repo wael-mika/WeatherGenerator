@@ -1,0 +1,83 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# GENERIC stage-2 MULTI-SCALE CONTEXT fine-tune overlay for any 64-epoch/ws8 CERRA pretrain.
+#           (see config/cerra_sharpness/README.md, playground/docs/cerra_sharpness_plan.md)
+# ===========================================================================================
+# Swaps the decoder for `MultiScaleContext`: alongside the usual 9-token 1-ring at the latent
+# level, each target point also cross-attends to the 1-ring of its ancestor cell at levels 4
+# and 3 (~600 km and ~1200 km), mean-pooled over descendants.
+#
+# WHY. Amplitude is no longer the binding constraint (pinball + SF fine-tune took the tp SF
+# ratio from .25 to .88 at 10-25 km) and seams are fixed (decode_soft_blend_k). What is left is
+# *placement*: whether a sharp gradient belongs at this point. That is set by the deformation
+# and thermal-gradient field over 500-1500 km, and the decoder currently sees 9 latent vectors
+# spanning ~450 km at one scale, with keys carrying no positional code at all. This is purely
+# atmospheric information -- it works identically over ocean, plains and mountains, which is
+# what separates it from terrain-driven sharpening (and what the terrain-stratified SF metric
+# is there to check).
+#
+# This is an OVERLAY for train_continue: it merges ON TOP of the saved pretrain run config.
+# Everything not listed here (streams, window/forecast settings, validation SF metric) is
+# inherited unchanged.
+#
+# CHECKPOINT COMPATIBILITY. No re-keying, no conversion step: MultiScaleContextDecoder
+# subclasses TargetPredictionEngineClassic, so the inherited block stack keeps its state-dict
+# paths (`tte.*`) and the pretrain checkpoint loads verbatim. `load_model_state` reports only
+# the `context.*` keys as missing and re-initialises that branch alone (it is deliberately its
+# own module so the re-init root cannot swallow the inherited weights). Because `context.gamma`
+# is zero-init, step 0 of the fine-tune reproduces the pretrain bit-exactly -- no warm-up
+# transient. All verified against the real modules, not assumed.
+#
+# RUN (world_size 8, as the epoch-resume arithmetic assumes):
+#   uv run train_continue --from-run-id mnb4hkd7 \
+#       --config config/cerra_sharpness/config_ft_multiscale_generic.yml \
+#       --options general.desc=ft_multiscale_L43_mnb4hkd7
+#
+# Ablation arms worth running (via --options, no new file needed):
+#   * single coarse level:   decode_context_levels=[4]
+#   * two context blocks:    decode_context_num_blocks=2
+#
+# READ: validation LossStructureFunction.CERRA.structure.avg (the campaign-wide comparable
+#       number) AND the terrain-stratified SF split (ocean / flat land / mountainous). The
+#       claim of this arm is that it improves ALL THREE strata; a gain confined to the
+#       mountainous stratum would mean the model found orography, not synoptic context.
+#       Also watch context.gamma: if it stays at ~0 the branch is being ignored and the
+#       hypothesis is not supported.
+
+general:
+  desc: "ft_multiscale_OVERRIDE_ME"  # set per arm via --options general.desc=...
+  # do NOT set istep here — the saved value positions the LR scheduler and the epoch counter.
+
+# Coarse decode context. Levels must be < healpix_level (5 here): 4 ~= 600 km ring,
+# 3 ~= 1200 km ring. Memory: the coarse KV is gathered only for cells that have targets this
+# step, so for a regional stream like CERRA it is a few hundred cells, not all 12,288.
+decoder_type: MultiScaleContext
+decode_context_levels: [4, 3]
+decode_context_num_blocks: 1
+
+training_config:
+  num_mini_epochs: 80          # 64 done in the pretrain -> ~16 fine-tune epochs
+  learning_rate_scheduling:
+    lr_max: 7.1e-6             # -> effective constant LR 2.0e-5 at world_size 8 (sqrt policy)
+
+streams:
+  CERRA:
+    # order = train_target_channels = ['10si', '10wdir', 'tp', '2t'] -> zero out 10wdir.
+    # MSE on a circular variable mis-penalizes the 0/360 wrap; it was ~1/4 of the gradient.
+    target_channel_weights: [1.0, 0.0, 1.0, 1.0]
+    # anti-tiling blend, so seams do not confound the placement read
+    decode_soft_blend_k: 3
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_ft_multiscale
+  grid: null
