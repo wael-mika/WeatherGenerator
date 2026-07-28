@@ -37,6 +37,13 @@
 
 streams_directory: "./config/streams/imerg_diag_c71eo6pu/"
 
+# Absolute target coordinates in the decoder queries -- MATCHES THE BACKBONE: c71eo6pu was
+# pretrained with the fixed-grid patch active (verified in its slurm snapshot), while the earlier
+# finetune qljpw7sa ran without it. Because the value is stored in the run config, inference
+# inherits it automatically; do NOT set it on the inference command line.
+# The c71eo6pu_raina staging dir must carry the gated tokenizer code for this key to be honoured.
+target_coords_absolute: True
+
 # Freeze options -- keep exactly ONE active:
 # (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
 freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
@@ -80,7 +87,10 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 32
+  # 16, halved from the 32 the qljpw7sa/ybw9z1zs arms used: those curves were flat well before
+  # the end, and the cosine decay rescales to the shorter schedule automatically (lr_steps is
+  # derived from num_mini_epochs).
+  num_mini_epochs: 16
   samples_per_mini_epoch: 4096
   shuffle: True
 
