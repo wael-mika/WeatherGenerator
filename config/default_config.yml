@@ -44,7 +44,7 @@ ae_aggregation_att_dense_rate: 1.0
 ae_aggregation_block_factor: 64
 ae_aggregation_mlp_hidden_factor: 2
 
-decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, MultiScaleContext, MLPDecoderMultiStage, Linear
+decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, MultiScaleContext, MLPDecoderMultiStage, FlowMatching, Linear
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
@@ -65,6 +65,14 @@ decode_upsample_num_blocks: 1
 # ~1200 km rings. num_blocks = context cross-attention blocks applied to the query.
 decode_context_levels: []
 decode_context_num_blocks: 1
+
+# Conditional flow-matching decoder (decoder_type: FlowMatching, see FlowMatchingPointDecoder).
+# Training regresses the velocity of the linear probability path; evaluation integrates it with
+# flow_num_steps Euler steps and draws pred_head.ens_size independent samples. flow_dim_time is
+# the width of the sinusoidal embedding of the flow time (must be even), which is concatenated
+# to the coordinate frame in the AdaLN conditioning.
+flow_num_steps: 24
+flow_dim_time: 32
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder

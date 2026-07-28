@@ -18,6 +18,37 @@ Docs: `playground/docs/cerra_sharpness_plan.md` (roadmap), `playground/docs/sf_f
 | `config_ft_quantile_sf_ixrvotpi.yml` | y2xyoazv | ogvjhulp | Step 3: pinball + members-SF ft of ixrvotpi. Quantile-mean SF tp .25→.88 (10-25 km) — best central product so far |
 | `config_quantile_sf_cerra.yml` | — | — | Step 4 flagship (2c): fresh joint pinball + SF-on-median |
 
+## Decoder arms (2026-07-27, not yet run)
+
+One fresh 64-ep pretrain per decoder, all on the mnb4hkd7 protocol so only the readout differs.
+Rationale: `playground/docs/decoder_assessment.md`; the two new decoders are Decoder 1 and
+Decoder 2 of the branch plan.
+
+| Config (this dir) | Streams dir | Decoder delta |
+|---|---|---|
+| `config_pretrain_multistage.yml` | `cerra_multistage` | `MLPDecoderMultiStage`: 4 MLP blocks split into 2 stages, each with its own cross-attention lookup |
+| `config_pretrain_fourier.yml` | `cerra_fourier` | Fourier pred head, 1 band (sigma=10, 128 freqs), CERRA only |
+| `config_pretrain_fourier_multiband.yml` | `cerra_fourier_multiband` | Fourier pred head, 3 bands (sigma 1/10/100) |
+| `config_pretrain_multiscale.yml` | `cerra_mse_noup` | `MultiScaleContext`: adds the pooled L4 (~600 km) and L3 (~1200 km) 1-rings as a gated second KV set |
+| `config_pretrain_flowmatch.yml` | `cerra_flowmatch` | `FlowMatching`: generative readout, integrates a velocity field; ens_size = ODE samples |
+| `config_pretrain_mse_hl6.yml` | `cerra_hl6` | **BLOCKED** — healpix_level 6 crashes in flash-attn's dense backward; see the config header |
+| `config_ft_multiscale_generic.yml` | inherited | `train_continue` overlay: swaps any pretrain onto `MultiScaleContext` (gamma zero-init ⇒ exact continuation) |
+
+Reading the arms:
+
+- **All arms except FlowMatching** are comparable on `LossStructureFunction.CERRA.structure.avg`
+  as usual.
+- **MultiScaleContext**: also read the SF split by terrain (ocean / flat / mountainous). Its claim
+  is that it improves all three; a gain only over mountains means the model found orography, not
+  synoptic context. Watch `context.gamma` — if it stays ~0 the branch is being ignored.
+- **FlowMatching cannot be ranked on MSE.** Validation MSE is a *sample* MSE and sits above every
+  regression arm by construction. The headline is
+  `LossStructureFunction_members.CERRA.structure.avg` (single members) against
+  `LossStructureFunction.CERRA.structure.avg` (ensemble mean): a working generator has member-SF
+  near the target while mean-SF collapses. `LossStructureFunction` now suffixes its metric name by
+  reduce mode so both can coexist in one config; `reduce: mean` keeps the bare name, so every
+  number since vbm9r3om stays comparable.
+
 ## Launch commands (all training on 2 nodes = world_size 8)
 
 ```bash

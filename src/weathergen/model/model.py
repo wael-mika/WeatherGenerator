@@ -29,6 +29,7 @@ from weathergen.model.engines import (
     BilinearDecoder,
     EnsPredictionHead,
     EnsPredictionHeadFourier,
+    FlowMatchingPointDecoder,
     ForecastingEngine,
     IdentityEngine,
     LatentPredictionHeadIdentity,
@@ -499,6 +500,31 @@ class Model(torch.nn.Module):
                             cf.ae_global_dim_embed,
                             self.targets_num_channels[i_stream],
                         )
+                    elif cf.decoder_type == "FlowMatching":
+                        # Generative readout: integrates a velocity field instead of regressing.
+                        # See engines.FlowMatchingPointDecoder for rationale.
+                        assert int(si.get("decode_soft_blend_k", 1) or 1) == 1, (
+                            f"stream {stream_name}: decode_soft_blend_k must be off for "
+                            "FlowMatching. Blending averages independent samples inside the "
+                            "transition band, which re-smooths exactly the fine structure the "
+                            "generator produces."
+                        )
+                        if not cf.pred_self_attention and is_root():
+                            logger.warning(
+                                "FlowMatching with pred_self_attention: False -- target points "
+                                "are then sampled independently and the output will not be "
+                                "spatially coherent, which defeats the point of this decoder."
+                            )
+                        tte = FlowMatchingPointDecoder(
+                            cf,
+                            dims_embed,
+                            dim_coord_in,
+                            tr_dim_head_proj,
+                            tr_mlp_hidden_factor,
+                            softcap,
+                            stream_config=si,
+                            num_channels=self.targets_num_channels[i_stream],
+                        )
                     elif cf.decoder_type == "MultiScaleContext":
                         # Classic readout + a gated coarse-scale context branch.
                         # See engines.MultiScaleContextDecoder for rationale.
@@ -782,13 +808,34 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
-    def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
+    @property
+    def requires_targets_in_forward(self) -> bool:
+        """Whether ``forward`` needs ``target_batch`` (training only).
+
+        True only for the flow-matching decoder, which has to place the target on the probability
+        path to build its own input. Every other decoder is a pure function of the source, so the
+        trainer leaves ``target_batch`` at None and the model cannot see targets at all.
+        """
+        return any(
+            isinstance(tte, FlowMatchingPointDecoder)
+            for tte in (self.target_token_engines or {}).values()
+        )
+
+    def forward(
+        self,
+        model_params: ModelParams,
+        batch: ModelBatch,
+        target_batch: ModelBatch | None = None,
+    ) -> ModelOutput:
         """Forward pass of the model
 
         Tokens are processed through the model components, which were defined in the create method.
         Args:
             model_params : Query and embedding parameters
-            batch
+            batch : source samples (network input + target coordinates)
+            target_batch : full ModelBatch carrying target *values*, which live on a different
+                sample set than the source. Required in training when
+                ``requires_targets_in_forward``; ignored otherwise and never read in eval.
         Returns:
             A list containing all prediction results
         """
@@ -815,7 +862,7 @@ class Model(torch.nn.Module):
 
             tokens = self.forecast_engine(tokens, step, model_params.rope_coords)
             # decoder predictions
-            output = self.predict_decoders(model_params, step, tokens, batch, output)
+            output = self.predict_decoders(model_params, step, tokens, batch, output, target_batch)
             # latent predictions (raw and with SSL heads)
             output = self.predict_latent(model_params, step, tokens, batch, output)
 
@@ -851,6 +898,7 @@ class Model(torch.nn.Module):
         tokens: torch.Tensor,
         batch: ModelBatch,
         output: ModelOutput,
+        target_batch: ModelBatch | None = None,
     ) -> ModelOutput:
         """
         Compute decoder-based predictions
@@ -973,21 +1021,71 @@ class Model(torch.nn.Module):
                         )
                         tte_kwargs = {"ctx_latent": ctx_latent, "ctx_lens": ctx_lens}
 
-                    tc_tokens = tte(
-                        latent=decode_latent,
-                        output=tc_tokens,
-                        latent_lens=decode_latent_lens,
-                        output_lens=tcs_lens,
-                        coordinates=t_coords,
-                        **tte_kwargs,
-                    )
+                    if isinstance(tte, FlowMatchingPointDecoder):
+                        # Generative decoder: it owns its own velocity readout and returns
+                        # physical values directly, so pred_heads[stream_name] is bypassed (it
+                        # is still built, which keeps the `if not self.pred_heads` guard above
+                        # honest; DDP runs with find_unused_parameters=True).
+                        tte_kwargs["ens_size"] = self.streams[stream_name]["pred_head"]["ens_size"]
+                        if self.training:
+                            # Ground truth for the probability path. Target *values* live on a
+                            # different sample set than the target *coordinates* the decoder
+                            # queries with (source_select carries "target_coords",
+                            # target_select carries "target_values"), so they must be fetched
+                            # from target_batch through the source->target matching -- not from
+                            # `batch`, where target_tokens is empty.
+                            assert target_batch is not None, (
+                                "FlowMatching needs target values in the forward pass; the "
+                                "trainer must pass target_batch (see "
+                                "Model.requires_targets_in_forward)."
+                            )
+                            tgts = []
+                            for i_b in range(batch_size):
+                                i_t = target_batch.get_target_idx_for_source(i_b)
+                                assert i_t >= 0, (
+                                    f"source sample {i_b} has no matching target sample"
+                                )
+                                tgts.append(
+                                    target_batch.get_target_sample(i_t)
+                                    .streams_data[stream_name]
+                                    .target_tokens[step]
+                                    .reshape(-1, tte.num_channels)
+                                )
+                            tgt = torch.cat(tgts)
+                            # LossPhysical pairs target and prediction by a plain reshape, so
+                            # the two are in the same point order; assert the count to catch any
+                            # future divergence rather than silently training on mispaired data.
+                            assert tgt.shape[0] == tc_tokens.shape[0], (
+                                f"{stream_name}: {tgt.shape[0]} target points vs "
+                                f"{tc_tokens.shape[0]} decoded points -- ordering assumption "
+                                "for flow matching is broken"
+                            )
+                            tte_kwargs["target"] = tgt
 
-                    # final prediction head to map back to physical space
-                    ph = self.pred_heads[stream_name]
-                    if isinstance(ph, EnsPredictionHeadFourier):
-                        pred = ph(tc_tokens, t_coords)
+                        pred = tte(
+                            latent=decode_latent,
+                            output=tc_tokens,
+                            latent_lens=decode_latent_lens,
+                            output_lens=tcs_lens,
+                            coordinates=t_coords,
+                            **tte_kwargs,
+                        )
                     else:
-                        pred = ph(tc_tokens)
+                        tc_tokens = tte(
+                            latent=decode_latent,
+                            output=tc_tokens,
+                            latent_lens=decode_latent_lens,
+                            output_lens=tcs_lens,
+                            coordinates=t_coords,
+                            **tte_kwargs,
+                        )
+
+                        # final prediction head to map back to physical space
+                        ph = self.pred_heads[stream_name]
+                        if isinstance(ph, EnsPredictionHeadFourier):
+                            pred = ph(tc_tokens, t_coords)
+                        else:
+                            pred = ph(tc_tokens)
 
             # soft-blend decode: combine replicated per-cell predictions back to the
             # original points with the tokenizer's continuous blend weights (see

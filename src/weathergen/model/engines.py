@@ -1508,6 +1508,169 @@ class MultiScaleContextDecoder(TargetPredictionEngineClassic):
         return super().forward(latent, q, latent_lens, output_lens, coordinates)
 
 
+def flow_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+    """Sinusoidal embedding of the flow time ``t`` in [0, 1].
+
+    Args:
+        t   : ``[N, 1]`` flow time per point.
+        dim : embedding width (even).
+
+    Returns:
+        ``[N, dim]``
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(half, device=t.device, dtype=torch.float32) / half
+    )
+    ang = t.float() * freqs.unsqueeze(0) * 1000.0
+    return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1).to(t.dtype)
+
+
+class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
+    """
+    Conditional flow-matching readout: emits jointly sampled fields instead of a regression.
+
+    Every other decoder on this branch factorises ``p(y | latent)`` over target points, so it can
+    only ever produce correct one-point statistics. Pinball quantile heads make that concrete: the
+    tau=0.97 map is "the 97th percentile everywhere at once", which is not a realization of
+    anything. This decoder learns a velocity field that transports noise to data and integrates it
+    at inference, so each forward pass is one coherent draw.
+
+    **Why it is not vulnerable to the failure that sank the quantile arm.** A noise-conditioned
+    regressor scored by a proper loss keeps a degenerate optimum available -- ignore the noise,
+    emit the conditional mean. Flow matching removes that option: the noise *is* the state being
+    transported, so at small ``t`` the network's input is essentially pure noise and being a
+    function of it is unavoidable.
+
+    **Where the spatial coherence comes from.** Not from correlated base noise -- the base is iid
+    Gaussian per point. It comes from the inherited block stack, which already self-attends over
+    the target points grouped by cell (``pred_self_attention``, varlen over ``tcs_lens``). That
+    makes the model ``p(y_cell | latent)`` jointly over the ~750 points of a cell rather than
+    point-by-point, which is exactly what pointwise quantiles structurally cannot do. Set
+    ``pred_self_attention: True`` or this decoder degenerates into an expensive per-point sampler.
+
+    Training (conditional flow matching, Lipman et al. 2023). With ``y1`` the target and
+    ``y0 ~ N(0, I)``, on the linear path ``y_t = (1-t) y0 + t y1`` the target velocity is
+    ``u = y1 - y0``. The module returns ``y0 + v_theta`` rather than ``v_theta``, so the ordinary
+    ``mse`` term of ``LossPhysical`` computes ``||y1 - (y0 + v)||^2 = ||u - v||^2`` -- the flow
+    matching objective exactly, with the existing channel/point weighting and NaN masking, and
+    with no new loss function or plumbing.
+
+    Evaluation. Integrates ``dy/dt = v_theta`` from ``t=0`` to ``1`` with ``flow_num_steps`` Euler
+    steps, drawing ``pred_head.ens_size`` independent samples. Validation MSE is therefore a
+    *sample* MSE and is expected to sit above a regression arm's by construction -- read the
+    structure function instead, and specifically member-SF against mean-SF: a coherent generator
+    has member-SF close to the target while mean-SF collapses.
+
+    Config consumed:
+        - ``cf.flow_num_steps`` : Euler steps at inference (default 24).
+        - ``cf.flow_dim_time``  : width of the sinusoidal time embedding (default 32).
+        - ``pred_head.ens_size``: number of samples drawn at evaluation.
+        - everything ``TargetPredictionEngineClassic`` consumes.
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+        num_channels: int,
+    ):
+        dim_time = int(cf.get("flow_dim_time", 32))
+        assert dim_time % 2 == 0, f"flow_dim_time must be even, got {dim_time}"
+        # the time embedding rides along with the coordinate frame in the AdaLN conditioning,
+        # so the inherited stack must be built for the widened aux vector
+        super(FlowMatchingPointDecoder, self).__init__(
+            cf,
+            dims_embed,
+            dim_coord_in + dim_time,
+            tr_dim_head_proj,
+            tr_mlp_hidden_factor,
+            softcap,
+            stream_config=stream_config,
+        )
+        self.name = f"FlowMatchingPointDecoder_{stream_config['name']}"
+
+        self.dim_time = dim_time
+        self.num_channels = num_channels
+        self.num_steps = int(cf.get("flow_num_steps", 24))
+
+        # current ODE state -> query token, and decoded token -> velocity
+        self.embed_state = torch.nn.Linear(num_channels, dims_embed[0])
+        # Default init on purpose. Zero-initialising an output head is the usual trick for a
+        # *gated residual* branch, but here the head is the only path from the block stack to
+        # the loss: with zero weights the gradient w.r.t. the decoded tokens is exactly zero, so
+        # the whole stack and embed_state would receive no gradient at all on the first step.
+        self.vel_head = torch.nn.Linear(dims_embed[-1], num_channels)
+
+    def velocity(self, y_t, t, latent, output, latent_lens, output_lens, coordinates):
+        """One evaluation of ``v_theta(y_t, t, token, coords)`` -> ``[N, num_channels]``."""
+        q = output + self.embed_state(y_t.to(output.dtype))
+        aux = torch.cat([coordinates, flow_time_embedding(t, self.dim_time)], dim=-1)
+        tokens = super().forward(latent, q, latent_lens, output_lens, aux)
+        return self.vel_head(tokens)
+
+    def sample(self, latent, output, latent_lens, output_lens, coordinates, ens_size):
+        """Integrate the probability flow ODE; returns ``[ens_size, N, num_channels]``."""
+        n = output.shape[0]
+        dt = 1.0 / self.num_steps
+        preds = []
+        # never needed with gradients: an unrolled 24-step ODE would hold 24x the activations
+        with torch.no_grad():
+            for _ in range(ens_size):
+                y = torch.randn((n, self.num_channels), device=output.device, dtype=torch.float32)
+                for i_step in range(self.num_steps):
+                    t = torch.full((n, 1), i_step * dt, device=output.device, dtype=torch.float32)
+                    v = self.velocity(y, t, latent, output, latent_lens, output_lens, coordinates)
+                    y = y + dt * v.float()
+                preds.append(y)
+        return torch.stack(preds, 0)
+
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        target=None,
+        ens_size=1,
+    ):
+        """
+        Args beyond the TargetPredictionEngineClassic contract:
+            target   : ``[N, num_channels]`` ground truth, required in training mode and ignored
+                in eval. Must be in the decoder's point order (it is: ``LossPhysical`` pairs
+                prediction and target by a plain reshape, with no permutation).
+            ens_size : samples to draw in eval mode.
+
+        Returns:
+            ``[1, N, num_channels]`` in training (``y0 + v``, so plain mse is the flow-matching
+            loss) or ``[ens_size, N, num_channels]`` in eval (integrated samples).
+        """
+        if not self.training:
+            return self.sample(latent, output, latent_lens, output_lens, coordinates, ens_size)
+
+        assert target is not None, (
+            "FlowMatchingPointDecoder needs the target during training to build the "
+            "probability path; predict_decoders must pass it."
+        )
+        y1 = target.float()
+        y0 = torch.randn_like(y1)
+        # masked / spoofed targets are NaN. Substituting y0 gives them zero velocity instead of
+        # poisoning y_t; the loss masks these points anyway, so they contribute no gradient.
+        y1 = torch.where(torch.isfinite(y1), y1, y0)
+
+        t = torch.rand((y1.shape[0], 1), device=y1.device, dtype=y1.dtype)
+        y_t = (1.0 - t) * y0 + t * y1
+
+        v = self.velocity(y_t, t, latent, output, latent_lens, output_lens, coordinates)
+        return (y0 + v.float()).unsqueeze(0)
+
+
 @dataclasses.dataclass
 class LatentState:
     """

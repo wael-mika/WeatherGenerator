@@ -212,6 +212,15 @@ class LossStructureFunction(LossModuleBase):
         red = cfg.get("reduce", "mean")
         self.reduce = red if red in ("mean", "median", "members") else int(red)
 
+        # Results are keyed by self.name in LossCalculator.compute_loss, so two
+        # LossStructureFunction terms in one config would overwrite each other's log entry (the
+        # loss values are still both summed -- only the reported breakdown is lost). Suffixing by
+        # reduce mode lets e.g. a mean-SF and a members-SF coexist, which is how the generative
+        # arm reads coherence. 'mean' deliberately keeps the bare name so the campaign-comparable
+        # metric key is byte-identical to every run since vbm9r3om.
+        if self.reduce != "mean":
+            self.name = f"LossStructureFunction_{self.reduce}"
+
         _logger.info(
             "LossStructureFunction: stream=%s, channels=%s, bins(km)=%s, num_pairs=%d, "
             "power=%.1f, reduce=%s",
