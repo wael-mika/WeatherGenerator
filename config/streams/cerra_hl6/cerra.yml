@@ -1,0 +1,69 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Latent-upsampling A/B: CERRA (~5.5 km / 3h, Europe) as the high-resolution DIAGNOSTIC target.
+# Four channels on purpose — tp carries the canonical "blob", but if the capacity expansion is a
+# real routing fix the win should show up across the selected channels (2t and 10 m wind carry
+# strong orography/coastline structure the 9 shared latent slots also cannot route).
+# NOTE: 10wdir is circular — plain MSE mis-penalizes the 0/360 wrap; read its loss as indicative
+# only (or switch to u/v components if it dominates).
+#
+# >>> THE A/B KNOB <<<
+#                                             decode capacity via LatentUpsamplingEngine)
+# Run both arms (edit this one line + general.desc) and compare per-channel CERRA loss (tp is
+# the headline) + tp quicklooks. See playground/docs/latent_upsampling.md.
+
+CERRA:
+  type: anemoi
+  filenames: ["cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"]
+  stream_id: 5
+
+  source: []
+  source_exclude: []
+  target: ['10si', '10wdir', 'tp', '2t']
+  target_exclude: ['tp_tp', 'sf_sf', 'ssrd_ssrd', 'strd_strd', 'mn2t', 'mx2t']
+
+  geoinfo_channels: ['lsm', 'orog']
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "03:00:00"
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  # L6 cells are 1/4 the area of L5, so ~1/4 the CERRA points land in each. token_size is
+  # padded up to a multiple, so keeping 2048 here would make most of every token padding.
+  token_size: 512
+  tokenize_spacetime: True
+  max_num_targets: 50000    # target-point subsample; raise toward -1 for production
+
+  # Upsampler knob REMOVED on purpose: this is the Exp-A "K1" arm (no LatentUpsamplingEngine).
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    type: 'obs_value'
+    num_layers: 4
+    num_heads: 8
+  pred_head:
+    ens_size: 1
+    num_layers: 2
+
+  # Deterministic MSE only — the clean attribution arm.
+  loss_fcts:
+    "mse":
+      weight: 1.0

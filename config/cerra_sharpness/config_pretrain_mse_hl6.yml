@@ -1,0 +1,297 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# HEALPIX LEVEL 6 pretrain (stage 1, MSE) -- same protocol as config_pretrain_mse_noup.yml
+# (the mnb4hkd7 baseline) at 4x the latent resolution, with the backbone resized so the run
+# stays affordable. See config/cerra_sharpness/README.md, playground/docs/cerra_sharpness_plan.md.
+# ===========================================================================================
+#
+# !!! BLOCKED (2026-07-27): THIS CONFIG DOES NOT RUN YET. !!!
+#
+# A 1-GPU smoke crashes in the BACKWARD pass with
+#   torch.AcceleratorError: CUDA error: an illegal memory access was encountered
+# raised from flash_attn's DENSE backward (flash_attn_interface._flash_attn_backward ->
+# flash_attn_gpu.bwd). The forward pass completes. Not an OOM: it reproduces on a GH200 with
+# 97 GB total and ~6 GB in use.
+#
+# What was ruled out, each by an actual run:
+#   * NOT the retuned tokenization below -- the same crash occurs with
+#     streams_directory=./config/streams/cerra_mse_noup/ (the untouched L5 token sizes).
+#   * NOT the backbone resize -- this exact config with healpix_level=5 trains, validates and
+#     checkpoints cleanly.
+#   * NOT the L5 protocol itself -- config_pretrain_mse_noup.yml smoke-runs fine unchanged.
+# So the trigger is the cell count itself: 49,152 vs 12,288.
+#
+# Lead worth chasing (reproduced standalone, NOT yet tied to a specific call site in the model):
+# flash_attn_func fwd+bwd is fine at [1, 49152, 16, 64] (the global-attention shape, with and
+# without dropout), but fails with the same illegal access at LARGE BATCH x SHORT SEQUENCE --
+# e.g. [49152, 16, 8, 64] and [49152, 32, 8, 64] -- while [49152, 64, 8, 64] succeeds. Each
+# shape was checked in a fresh process, since one illegal access poisons the CUDA context and
+# makes every later call in the same process fail. At L6 the many-cells x few-tokens-per-cell
+# regime is exactly what the encoder produces, which is the natural suspect.
+#
+# Reproduce:
+#   uv run --extra gpu train --config config/cerra_sharpness/config_pretrain_mse_hl6.yml \
+#     --options training_config.num_mini_epochs=1 training_config.samples_per_mini_epoch=4 \
+#               validation_config.samples_per_mini_epoch=1 data_loading.num_workers=0 \
+#               train_logging.checkpoint=999999
+#
+# Everything below is otherwise reviewed and the model builds correctly (126M params, latent
+# capacity 50.3M numbers vs 25.2M at L5). Keep it as the starting point once the kernel issue
+# is resolved -- e.g. by a flash-attn version bump, or by routing the offending attention
+# through the varlen path.
+# ===========================================================================================
+#
+# WHY L6. L5 cells are ~150 km across and hold ~750 CERRA points that all share the same 9
+# latent vectors. L6 quarters the cell area: ~190 points per cell, and the decoder's 1-ring
+# spans ~225 km instead of ~450 km. It is the only lever that adds real latent capacity per
+# unit area -- unlike decode_latent_expand, which the 2026-07-16 ablation showed does nothing.
+#
+# TWO CAVEATS, both important before spending an allocation:
+#
+#  1. THE LATENT GRID IS NOW FINER THAN ITS INPUT. ERA5 o96 has ~40k points against 49,152 L6
+#     cells -- less than one source point per cell. L6 therefore buys DECODER capacity and a
+#     tighter decode neighbourhood, NOT finer input information. Expect it to help placement
+#     and sub-cell routing; do not expect it to conjure 5 km input detail.
+#  2. COST. Global self-attention scales as N^2 * d and N goes 4x. The resize below
+#     (ae_global_dim_embed 2048->1024, num_blocks 4->3) brings that from ~16x down to ~6x the
+#     L5 cost per step. MLP cost is unchanged (N*d^2 is flat under this trade). Run the
+#     throughput/memory probe before committing to 64 epochs:
+#       uv run train --config config/cerra_sharpness/config_pretrain_mse_hl6.yml \
+#           --options training_config.num_mini_epochs=1 \
+#                     training_config.samples_per_mini_epoch=8 \
+#                     validation_config.samples_per_mini_epoch=2 data_loading.num_workers=0 \
+#                     train_logging.checkpoint=999999
+#
+# THE RESIZE, and the reasoning. The L6 cost lives entirely in the global backbone, so that is
+# where the width is spent down; the CERRA readout (embed_target_coords / target_readout, 512)
+# is left ALONE because that is what turns latent into 5.5 km output. Net latent capacity still
+# rises: 49,152 x 1024 = 50.3M latent numbers vs L5's 12,288 x 2048 = 25.2M.
+#
+# CHECKPOINT-INCOMPATIBLE with every L5 run in the campaign (cell count and widths both change).
+# This is a fresh run, and its SF number is still comparable -- the validation block is
+# unchanged, and the SF metric is computed in physical space on target points, not on cells.
+#
+# STAGE 1 ONLY. Like mnb4hkd7 this is pure MSE, so it will be blurry by construction; that is
+# the point of the arm. Run config_ft_structure_generic.yml on top for stage 2. Do not read the
+# stage-1 maps as a product.
+#
+# To combine L6 with the multi-scale decoder, add:
+#   decoder_type: MultiScaleContext
+#   decode_context_levels: [5, 4]     # levels must be < healpix_level, so shift up with it
+# ===========================================================================================
+
+embed_orientation: "channels"
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 512     # L5: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 8       # L5: 16 (keeps head dim at 64)
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 8     # L5: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 1024   # L5: 2048. Halving d halves the N^2*d attention cost.
+ae_global_num_blocks: 3     # L5: 4
+ae_global_num_heads: 16     # L5: 32 (head dim stays 64)
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 1
+ae_aggregation_num_heads: 16   # L5: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_dyadic_dims: False
+pred_mlp_adaln: True
+num_class_tokens: 0
+num_register_tokens: 0
+
+# Latent-upsampling knobs. The model-level default is OFF (1); the A/B treatment is set
+# per-stream on CERRA. decode_upsample_num_blocks is the upsampler depth (used only when > 1).
+decode_latent_expand: 1
+decode_upsample_num_blocks: 1
+
+fe_num_blocks: 6            # L5: 8
+fe_num_heads: 8             # L5: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [5]   # last block index
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+# 12 * 4**6 = 49,152 cells (~75 km) vs 12,288 (~150 km) at L5
+healpix_level: 6
+
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False           # FSDP2 sharding bug with ae_local_blocks; use DDP
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+#####################################
+
+streams_directory: "./config/streams/cerra_hl6/"
+streams: ???
+
+zarr_store: "zip"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "cerra_mse_hl6"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+data_loading:
+  num_workers: 12
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  log_spoof_warnings: False
+
+training_config:
+
+  training_mode: ["masking"]
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5 (1979-2023) and CERRA (1985-2023) both cover this range. Hold out 2023 for validation.
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # 6h window = ERA5 cadence -> ERA5 present in every window (no starvation).
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  model_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
+  forecast:
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 1           # predict CERRA tp at t+6h
+      policy: "fixed"
+
+
+validation_config:
+  samples_per_mini_epoch: 256
+  shuffle: False
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+  # Validation-ONLY sharpness metric (merged on top of training losses at validation time;
+  # training gradients stay pure MSE — verified run vedt5qan, see doc §8). MSE alone cannot
+  # detect blob sharpening (it rewards blur); read LossStructureFunction.CERRA.structure.avg:
+  # 0 = spectrum matched, lower is sharper. Compare arms on the full-validation average.
+  losses: {
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          channels: ['tp'],           # tp only: keeps circular 10wdir out of the metric
+          num_pairs: 262144,          # uniform pairs starve the 10-25 km bin at lower counts
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,
+        },
+      },
+    },
+  }
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+    }
+  validate_before_training: False
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_hl6
+  grid: null

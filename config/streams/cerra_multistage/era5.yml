@@ -1,0 +1,67 @@
+# (C) Copyright 2024 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Latent-upsampling A/B: ERA5 as the macroscale state anchor (input + output).
+# With time_window_step=6h and ERA5 at 6h cadence, ERA5 is present in EVERY window, so the
+# encoder is never starved — no second dense input stream is needed for this minimal test.
+#
+# ERA5 output channels: small precip-relevant subset (not the full state), added as an
+# auxiliary decode target alongside CERRA.tp. Same family used as the ERA5 *input* subset in
+# config/streams/era5_to_cerra/era5.yml ("precip-relevant subset", A3 experiment), reused here
+# as an *output* set — physically tied to precipitation formation over the CERRA/Europe domain:
+#   msl          synoptic cyclone/front driver of extratropical precip
+#   z_500        500 hPa trough/ridge; trough approach forces synoptic-scale ascent
+#   t_850        850 hPa thermal/frontal structure; controls rain-vs-snow phase
+#   q_850, q_700 low/mid-level moisture; the direct water-vapor ingredient for precip
+#   u_850, v_850 850 hPa wind; low-level jet / moisture transport & convergence
+#                (e.g. Alpine/Pyrenean orographic uplift, a known CERRA precip signature)
+#   2d           2 m dewpoint; surface moisture/saturation proxy, tied to CERRA's own 2t target
+# loss_weight kept below CERRA's (1.0) so this stays an auxiliary signal, not a competing
+# objective with the CERRA.tp attribution this experiment is designed around.
+
+ERA5 :
+  type : anemoi
+  filenames : ['aifs-ea-an-oper-0001-mars-o96-1979-2023-6h-v8.zarr']
+  stream_id : 0
+  source_exclude : ['w_', 'skt', 'tcw', 'cp', 'tp']
+  target : ['msl', 'z_500', 't_850', 'q_850', 'q_700', 'u_850', 'v_850', '2d']
+  target_exclude : []
+  loss_weight : 0.3
+  location_weight : cosine_latitude
+  masking_rate : 0.6
+  masking_rate_none : 0.05
+  token_size : 8
+  tokenize_spacetime : True
+  max_num_targets: -1
+  embed :
+    net : transformer
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 2
+    num_heads : 4
+    num_cross_attn : 2      # decoder_type is global, so ERA5 uses the multistage decoder
+                            # too; num_layers must stay divisible by it (2 % 2 == 0)
+  pred_head :
+    ens_size : 1
+    num_layers : 1
+  # Per-channel weights carried over from the full-state pressure-level scaling convention
+  # used elsewhere in the repo (weight increases toward the surface); msl/2d default to 1.0.
+  channel_weights :
+    q_700: 0.61
+    q_850: 0.71
+    t_850: 0.71
+    u_850: 0.71
+    v_850: 0.71
+    z_500: 0.48

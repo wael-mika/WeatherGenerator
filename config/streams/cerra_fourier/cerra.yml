@@ -1,0 +1,71 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# CERRA (~5.5 km / 3h, Europe) as the high-resolution DIAGNOSTIC target -- DECODER ABLATION
+# arm "EnsPredictionHeadFourier, single band". Byte-identical to config/streams/cerra_mse_noup/cerra.yml apart from the delta
+# noted below, so the arms differ only in the readout and stay comparable to mnb4hkd7.
+# NOTE: 10wdir is circular — plain MSE mis-penalizes the 0/360 wrap; read its loss as indicative
+# only.
+#
+# DELTA vs cerra_mse_noup:
+#   * pred_head gains a random-Fourier-feature basis of the target coordinates (sigma=10,
+#     128 frequencies). Counters the MLP head's spectral bias toward smooth outputs.
+#     Applied to CERRA only -- ERA5 keeps the plain head, so this isolates the CERRA readout.
+
+CERRA:
+  type: anemoi
+  filenames: ["cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"]
+  stream_id: 5
+
+  source: []
+  source_exclude: []
+  target: ['10si', '10wdir', 'tp', '2t']
+  target_exclude: ['tp_tp', 'sf_sf', 'ssrd_ssrd', 'strd_strd', 'mn2t', 'mx2t']
+
+  geoinfo_channels: ['lsm', 'orog']
+
+  diagnostic: True
+  loss_weight: 1.0
+
+  frequency: "03:00:00"
+
+  masking_rate: 0.6
+  masking_rate_none: 0.05
+  token_size: 2048
+  tokenize_spacetime: True
+  max_num_targets: 50000    # target-point subsample; raise toward -1 for production
+
+  # No decode_latent_expand: the 2026-07-16 ablation showed the upsampler contributes
+  # nothing at any depth, so every arm here runs without it.
+
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 8
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    type: 'obs_value'
+    num_layers: 4
+    num_heads: 8
+  pred_head:
+    ens_size: 1
+    num_layers: 2
+    with_fourier_features: True    # -> EnsPredictionHeadFourier
+    freq_scales: [10.0]            # one band; list length = number of bands
+    num_freqs_per_band: 128        # frequencies per band (default 64)
+    # learnable_freqs: False       # default: fixed RFF (canonical Tancik et al. 2020)
+
+  # Deterministic MSE only — the clean attribution arm.
+  loss_fcts:
+    "mse":
+      weight: 1.0
