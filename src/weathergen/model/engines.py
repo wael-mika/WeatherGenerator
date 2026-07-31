@@ -715,6 +715,15 @@ class TargetPredictionEngineClassic(nn.Module):
         super(TargetPredictionEngineClassic, self).__init__()
         self.name = f"TargetPredictionEngine_{stream_config['name']}"
 
+        # Diagnostic: drop the within-group self-attention from the decode stack, leaving only
+        # cross-attention to the cell's 9 latents. Self-attention is the ONLY mechanism coupling
+        # a cell's target points to each other, so it is what a generative readout relies on to
+        # emit a joint sample rather than independent per-point draws. Running a trained
+        # checkpoint with and without it measures how much that coupling actually contributes:
+        # an unchanged output means the coupling is inert and the "joint sample" is a fiction.
+        # Off by default; it changes weights' meaning, so it is for evaluation, not training.
+        self.skip_self_attention = bool(cf.get("decode_ablate_self_attention", False))
+
         self.cf = cf
         self.dims_embed = dims_embed
         self.dim_coord_in = dim_coord_in
@@ -784,6 +793,8 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
+                if self.skip_self_attention:
+                    continue
                 tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
             else:
                 tc_tokens = checkpoint(
@@ -1134,6 +1145,10 @@ class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
         self.time_sampling = str(cf.get("flow_time_sampling", "uniform"))
         self.time_logit_mean = float(cf.get("flow_time_logit_mean", 0.0))
         self.time_logit_std = float(cf.get("flow_time_logit_std", 1.0))
+        # Draw the flow time once per decode cell instead of once per target point. See
+        # `_sample_time` -- this is a train/eval consistency fix, not a tuning knob. Off by
+        # default so existing checkpoints and configs behave exactly as before.
+        self.time_per_cell = bool(cf.get("flow_time_per_cell", False))
         self.solver = str(cf.get("flow_solver", "euler"))
         assert self.solver in ("euler", "heun"), f"unknown flow_solver '{self.solver}'"
         # classifier-free guidance: dropout is a TRAINING knob, guidance a SAMPLING knob
@@ -1150,6 +1165,52 @@ class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
         # the loss: with zero weights the gradient w.r.t. the decoded tokens is exactly zero, so
         # the whole stack and embed_state would receive no gradient at all on the first step.
         self.vel_head = torch.nn.Linear(dims_embed[-1], num_channels)
+
+    def _sample_time(self, y1, output_lens):
+        """Flow time for the training path -> ``[N, 1]``.
+
+        Default (``flow_time_per_cell: False``) draws an independent ``t`` for every target
+        point. That is **inconsistent with the sampler**, which advances every point of a cell
+        together on one shared ``t`` (see ``sample``). Two consequences, both bad for a decoder
+        whose whole purpose is to emit a joint sample:
+
+        * the states the ODE visits (all coordinates at the same ``t``) have vanishing
+          probability under a training distribution of iid per-point times, so the velocity
+          field is evaluated far outside the region it was fitted on;
+        * during training a point's cell-mates sit at unrelated noise levels, some of them
+          nearly clean, so the cheapest way to predict a velocity is to copy from a neighbour
+          that has already resolved. No such neighbour exists at sampling time, and the learned
+          coupling is then inert.
+
+        With the option on, ``t`` is drawn once per decode cell and broadcast over that cell's
+        points, which is exactly the state the sampler produces. Cells stay independent -- they
+        are independent in the network too (varlen groups, per-cell KV), and one draw per cell
+        keeps hundreds of distinct times per step, so the time marginal is still well covered.
+        """
+        if not self.time_per_cell:
+            return sample_flow_time(
+                y1.shape[0],
+                y1.device,
+                y1.dtype,
+                mode=self.time_sampling,
+                logit_mean=self.time_logit_mean,
+                logit_std=self.time_logit_std,
+            )
+        # output_lens is a per-group count vector with a leading 0 (the attention cumsums it)
+        counts = output_lens[1:].to(torch.long)
+        assert int(counts.sum()) == y1.shape[0], (
+            f"flow_time_per_cell: decode-group counts sum to {int(counts.sum())} but there are "
+            f"{y1.shape[0]} target points"
+        )
+        t_cell = sample_flow_time(
+            counts.shape[0],
+            y1.device,
+            y1.dtype,
+            mode=self.time_sampling,
+            logit_mean=self.time_logit_mean,
+            logit_std=self.time_logit_std,
+        )
+        return t_cell.repeat_interleave(counts, dim=0)
 
     def velocity(self, y_t, t, latent, output, latent_lens, output_lens, coordinates):
         """One evaluation of ``v_theta(y_t, t, token, coords)`` -> ``[N, num_channels]``."""
@@ -1253,14 +1314,7 @@ class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
         # poisoning y_t; the loss masks these points anyway, so they contribute no gradient.
         y1 = torch.where(torch.isfinite(y1), y1, y0)
 
-        t = sample_flow_time(
-            y1.shape[0],
-            y1.device,
-            y1.dtype,
-            mode=self.time_sampling,
-            logit_mean=self.time_logit_mean,
-            logit_std=self.time_logit_std,
-        )
+        t = self._sample_time(y1, output_lens)
         y_t = (1.0 - t) * y0 + t * y1
 
         # Conditioning dropout for classifier-free guidance. Written as a blend rather than an
