@@ -77,3 +77,27 @@ class ActivationFactory:
             raise ValueError(f"Unsupported activation type: '{name}'")
         fn = cls._registry[name]
         return fn(**kwargs) if callable(fn) else fn
+
+
+def neighbour_gather_idxs(
+    hp_nbours: torch.Tensor, batch_size: int, num_healpix_cells: int
+) -> torch.Tensor:
+    """Row indices gathering each cell's HEALPix 1-ring out of a (batch, cell)-flattened tensor.
+
+    ``hp_nbours`` is ``[num_healpix_cells, 9]`` holding cell indices in
+    ``[0, num_healpix_cells)`` -- it is shared by every sample. The tensor it indexes is
+    flattened over ``(batch, cell)`` and therefore has ``batch_size * num_healpix_cells`` rows,
+    so each sample's ring must be shifted into its own block. Omitting that offset makes every
+    batch element read sample 0's latent, which is silent: the shapes still line up.
+
+    Args:
+        hp_nbours: ``[num_healpix_cells, 9]`` 1-ring, self first.
+        batch_size: samples in the batch.
+        num_healpix_cells: cells per sample.
+
+    Returns:
+        ``[batch_size * num_healpix_cells, 9]`` indices into the flattened tensor.
+    """
+    idxs = hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).long()
+    cell_offsets = (torch.arange(batch_size, device=idxs.device) * num_healpix_cells).view(-1, 1, 1)
+    return (idxs + cell_offsets).flatten(0, 1)

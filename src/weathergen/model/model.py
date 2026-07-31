@@ -38,7 +38,7 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.utils import get_num_parameters
+from weathergen.model.utils import get_num_parameters, neighbour_gather_idxs
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
@@ -765,7 +765,7 @@ class Model(torch.nn.Module):
         # get 1-ring neighborhood for prediction
         batch_size = len(batch)
         s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
-        idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).flatten(0, 1)
+        idxs = neighbour_gather_idxs(model_params.hp_nbours, batch_size, self.num_healpix_cells)
         tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
         # TODO: precompute in model_params?
         tokens_nbors_lens = torch.full(
