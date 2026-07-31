@@ -1,0 +1,61 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# *** OVERLAY on config_pretrain_flowmatch_v2.yml. Never launch this file alone. ***
+#
+#   uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --nodes 4 --chain-jobs 3 --account e-ext-2025e01-128 \
+#     --base-config config/cerra_sharpness/config_pretrain_flowmatch_v2.yml \
+#     --config     config/cerra_sharpness/config_pretrain_flowmatch_v2_diag.yml
+#
+# The v2 file is the BASE (it is a complete configuration; with --base-config,
+# default_config.yml is not loaded at all). This file is an OVERWRITE, which outranks the base,
+# so it wins on the three keys below and inherits everything else. Alone it would be a
+# near-empty config falling back to default_config.yml -- a different model entirely.
+# ===========================================================================================
+#
+# WHY AN OVERLAY AND NOT A COPY. This arm and v2 differ in exactly one thing: whether CERRA is
+# also an input. Every other setting -- architecture, budget, LR, target density, channel
+# weights, validation estimator -- must be identical or the comparison is confounded. A
+# duplicated 300-line config drifts the first time someone edits one of them, and the drift is
+# silent. Editing the shared base updates both arms by construction.
+#
+# WHAT THIS ARM IS. CERRA output only, diagnosed at t+6h from ERA5 alone: the campaign's
+# original task, so the numbers ARE comparable with every arm since vbm9r3om, and there is no
+# persistence shortcut. The five 850 hPa fields are extra supervision that pushes the encoder to
+# represent the moisture and wind precipitation depends on, without handing the model the
+# answer. See config/streams/cerra_flowmatch_v2_diag/cerra.yml for the full contrast with v2.
+#
+# WHICH TO BELIEVE. v2_diag is the honest measure of progress on the campaign question. v2 is
+# the diagnostic that says whether the readout can work at all once the latent is rich. If
+# v2_diag stays blurry while v2 sharpens, the limit is the latent, not the decoder, and the next
+# move is upstream (latent probe, encoder capacity, healpix_level 6) rather than another
+# readout. That inference is the reason to run both.
+#
+# COST. Strictly cheaper than v2: CERRA is not embedded or attended on the input side, so the
+# encoder sees only ERA5. Probe with the same recipe if in doubt, but v2's number is an upper
+# bound.
+#
+# EVERYTHING ELSE -- flow_time_per_cell, max_num_targets, the stratified SF estimator, the kill
+# gates, the end-of-run inference recipe -- is in config_pretrain_flowmatch_v2.yml. Read that
+# header first; it is the one that explains the experiment.
+# ===========================================================================================
+
+general:
+  desc: "cerra_flowmatch_v2_diag"
+
+# The only functional change: CERRA output-only, same eight channels.
+streams_directory: "./config/streams/cerra_flowmatch_v2_diag/"
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_generative_v2_diag
+  grid: null

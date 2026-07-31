@@ -1,0 +1,271 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# STAGE 2 for the flow-matching arm: close the decode-density gap.
+# Overlay for train_continue on a finished FlowMatching run. Measurements behind every choice
+# here are in playground/docs/decoder_forensics.md (Phase 0 + the two probes of 2026-07-31).
+# ===========================================================================================
+#
+# WHAT IS ACTUALLY WRONG (measured on g1ydywu2, not inferred)
+#
+# The decoder's only mechanism for making neighbouring target points agree is the self-attention
+# over the points of one HEALPix cell. Everything else it sees is constant within a cell: the
+# cross-attention KV is the same 9 latents for every point in the cell.
+#
+# Training put ~59 points in that cell, ~26 km apart (max_num_targets: 50000 over 845 active L5
+# cells and 2 CERRA time slices per window). Evaluation puts ~2705 points in it, 5.5 km apart.
+# The model is therefore asked, at evaluation only, to correlate points at separations it never
+# saw, through an attention whose group is 46x longer than it was trained on.
+#
+# Probe kdtalh4z decoded the SAME weights at the training density. Both fields thinned to
+# 24,942 points/slice and scored with the same estimator:
+#
+#                                 tp S_pred/S_targ            rho(mem0-mem1)   spread-skill
+#                              30 km   45 km   70 km              at 30 km      tp/10si/2t
+#   2705 pts/cell (as evaluated) 0.097   0.098   0.101               0.126    0.13/0.32/0.26
+#     59 pts/cell (as trained)   0.441   0.370   0.345               0.465    0.44/0.62/0.62
+#
+# 3.5-4.5x more fine-scale variance, a 3.7x more coherent stochastic component, 3.3x better
+# spread-skill -- from the same checkpoint, purely by decoding in-regime. 10si and 2t structure
+# functions land at 0.95-1.26 of target. Most of what looked like a broken generator was a
+# decoder evaluated far outside its training regime.
+#
+# Probe zl6g3bwx confirms the mechanism: with decode_ablate_self_attention: True the
+# member-to-member difference field becomes EXACTLY white (rho = -0.008..+0.004 at every
+# separation, all channels), because without self-attention nothing couples a cell's points.
+# So self-attention is the coupling, and today it only carries the field from rho = 0.000 to
+# rho = 0.14 against a target rho(5.5 km) = 0.98.
+#
+# WHY 800000, AND WHAT IT COSTS (measured 2026-07-31, not estimated)
+#
+# The prediction is too smooth in a band from ~22 km to ~90 km, recovering above it. That band
+# sits between the finest separation training ever presented (~26 km) and the cell size
+# (~200 km) where the latent and cross-attention take over. Raising max_num_targets shrinks BOTH
+# gaps at once: the point spacing the model is taught to correlate, and the length of the
+# self-attention group it is asked to run at evaluation.
+#
+#   max_num_targets   pts/cell   spacing   samples/sec   cost   group-size gap vs eval
+#         50000 (old)       59    26.0 km        0.595   1.00x                     46x
+#        200000            237    13.0 km        0.519   1.15x                     11x
+#        400000            473     9.2 km        0.420   1.42x                      6x
+#        800000            947     6.5 km        0.320   1.86x                      3x
+#
+# Measured on 1 node / 4 ranks from g1ydywu2_raina, steady-state (ignore the first logged step,
+# it is warm-up). No OOM at any setting. Per-rank batch is 1 sample either way, so the 2-node
+# layout has the same per-rank memory.
+#
+# 800000 is the choice: at ~6.5 km it is essentially CERRA's native 5.5 km grid, so the model is
+# trained to correlate at every scale it will be asked about, and the residual group-size
+# mismatch drops from 46x to 3x. It costs 1.86x, not the 4-5x that was guessed before measuring
+# -- the step is dominated by the global attention over 12288 cells at dim 2048, so the decoder
+# has far more headroom than the quadratic within-cell attention suggests.
+#
+# Fall back to 400000 (1.42x) if the wall clock is tight; it still covers the whole 22-90 km
+# hole. 200000 is the minimum that covers it and is barely more expensive than today.
+#
+# WHAT THIS DOES NOT DO. It does not deliver a full-resolution product. Training at
+# max_num_targets: -1 is not the endpoint either -- the fix that scales is density-INVARIANT
+# coupling (k-nearest-neighbour self-attention inside the cell, O(n*k)), which is also cheaper
+# than today's full within-cell attention. This run buys the measurement that justifies that
+# work, and a better checkpoint on the way.
+#
+# LEVERS THAT ARE NOT THE ANSWER HERE, with the reason:
+#   * classifier-free guidance with w > 1. It removes spread, and every channel is
+#     UNDER-dispersed (spread-skill 0.13-0.62). w < 1 adds spread and is the interesting
+#     direction if anything. flow_cond_dropout is left on so that stays available for free.
+#   * config_ft_structure_generic.yml / any LossStructureFunction in TRAINING on this arm. In
+#     training the decoder returns y0 + v_theta -- a noise-shifted velocity, not a field -- so
+#     the SF loss would score the structure function of noise. It is a validation metric here
+#     and nothing else.
+#   * flow_num_steps beyond 24. Measured on dg48kzg6: euler-64 moved members-SF only
+#     5.58 -> 5.19 while making the ensemble mean 27% worse. Finer integration mostly removed
+#     diversity that had been integration noise.
+#
+# ===========================================================================================
+# HOW TO RUN
+# ===========================================================================================
+#
+# CODE COMES FROM THE PARENT SNAPSHOT, NOT FROM YOUR WORKING TREE. launch-slurm.py resolves
+#   wgen_dir = <slurm>/slurm_weathergen_<FROM_RUN_ID>_dir/WeatherGenerator   when from_run_id is set
+# and copies CONFIGS separately from the home clone, so a continuation runs fresh configs
+# against old code and any key whose reader postdates the parent is silently ignored.
+#
+# *** DO NOT `cp src/weathergen/model/engines.py` INTO g1ydywu2's SNAPSHOT. *** That snapshot
+# is from the latent_upsampling lineage: it contains LatentUpsamplingEngine,
+# MultiScaleContextDecoder, CoarseContextBranch, EnsPredictionHeadFourier and
+# TargetPredictionEngineMLPMultiStage, its own model.py imports them, and this branch has none
+# of them. Overwriting the file makes g1ydywu2 permanently unlaunchable.
+#
+# Use the seeded copy instead. `g1ydywu2_raina` already exists and already carries this
+# branch's flow_time_per_cell, decode_ablate_self_attention and pair_sampling. To make another:
+#   WG_MODELS_DIR=/e/scratch/weatherai/shared_work/models \
+#   WG_SLURM_DIR=/e/scratch/weatherai/slurm \
+#   uv run python playground/raina/seed_raina_run.py <PARENT> \
+#       --code-from /e/scratch/weatherai/slurm/slurm_weathergen_<PARENT>_dir/WeatherGenerator
+# then patch that copy, and verify before launching:
+#   R=/e/scratch/weatherai/slurm/slurm_weathergen_<PARENT>_raina_dir/WeatherGenerator
+#   grep -c flow_time_per_cell $R/src/weathergen/model/engines.py                        # > 0
+#   grep -c pair_sampling $R/src/weathergen/train/loss_modules/loss_module_structure.py  # > 0
+#
+# TWO LAUNCHER TRAPS, both hit on 2026-07-31:
+#   * `--account e-ext-2025e01-128` is REQUIRED. Without it sbatch rejects the job with
+#     "Invalid account or account/partition combination specified".
+#   * `--options general.desc=...` CRASHES the launcher when the experiment tracker is on:
+#     mlflow logs the merged config's `general` block first, then the command-line one, and
+#     refuses the second write ("Parameter with key general was already logged"). Either pass
+#     `--no-register` (right for throwaway probes) or set `general.desc` in a config file and
+#     drop it from --options (right for a real arm). This is why o3jjkqb7 is still called
+#     "ft_flowmatch_OVERRIDE_ME".
+#   * launch-slurm.py needs `uv run --with dacite` -- dacite is not in the project venv.
+#
+# STEP 1 -- COST PROBE (~10 min, do this before committing an allocation):
+#   for N in 50000 200000 400000; do
+#     uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#       --from-run-id g1ydywu2_raina --nodes 1 --account e-ext-2025e01-128 --no-register \
+#       --config config/cerra_sharpness/config_ft_flowmatch_density.yml \
+#       --options streams.CERRA.max_num_targets=$N \
+#                 training_config.num_mini_epochs=97 \
+#                 training_config.samples_per_mini_epoch=128 \
+#                 validation_config.samples_per_mini_epoch=4 \
+#                 validation_config.output.num_samples=0 \
+#                 general.desc=probe_cost_$N
+#   done
+# num_mini_epochs=97 against a parent that finished 96 gives exactly one short mini-epoch.
+# Read step time and peak memory from logs/<RUN>/log.txt; take the largest N whose step time is
+# within ~2x of the N=50000 arm and that does not OOM.
+# Probes launched 2026-07-31: cl2z3n8v (50k), dco5lv17 (200k), dc1brrp5 (400k).
+#
+# STEP 2 -- THE FINE-TUNE (arm A, density only). Set the desc in this file, not in --options:
+#   uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --from-run-id g1ydywu2_raina --nodes 2 --account e-ext-2025e01-128 \
+#     --config config/cerra_sharpness/config_ft_flowmatch_density.yml
+#
+# ARM B (density + per-cell flow time) -- run second, and only as a SEPARATE arm so the two
+# changes stay separable. Edit `flow_time_per_cell: True` and `general.desc` below, or add a
+# tiny overlay config; do not push desc through --options.
+# Rationale for keeping it separate: at matched density the sampler already reaches
+# spread-skill 0.44-0.62 with per-point t, so per-cell t is now a refinement rather than the
+# headline, and confounding it with the density change would waste the density measurement.
+#
+# STEP 3 -- READ THE RESULT with the offline tool, never from the training log:
+#   uv run python playground/scripts/decoder_forensics.py <RUN> \
+#       --channels tp 10si 2t --subsample 24942 --radii 30 45 70 110 180 --tol-min-km 13
+# Compare against kdtalh4z (in-regime baseline) and kt8g6wey (out-of-regime baseline). Success
+# is the 22-90 km band of S_pred/S_target rising toward 1 AT THE EVALUATION DENSITY, and
+# spread-skill moving toward 1. RMSE is expected to get slightly worse; that is the sharpness
+# trade, not a regression. Judge per member, never on the ensemble mean.
+# ===========================================================================================
+
+general:
+  # Set the desc HERE, never via --options: mlflow logs the merged config's `general` block and
+  # then refuses the command-line one ("Parameter with key general was already logged"), which
+  # aborts the launch. Arm B should edit this line as well as flow_time_per_cell below.
+  desc: "ft_density_800k_percellt"
+  # do NOT set istep here -- the saved value positions the LR scheduler and the epoch counter.
+
+# ===========================================================================================
+# RESULT OF ARM A (f8as896p, density only, per-point t) -- IT FAILED. Do not repeat it.
+#
+# 16 epochs at 800000 targets from g1ydywu2_raina. Training converged nicely; the samples got
+# monotonically WORSE on every measure:
+#
+#            training residual ||u-v||^2      validation (sample) tp MSE    SF ratio 25-50km
+#   g1ydywu2 (50k)   tp 0.234  avg 0.088           0.602 at ep96              0.073 (members 0.099)
+#   f8as896p (800k)  tp 0.098  avg 0.040           0.825 at ep111             0.024 (members 0.033)
+#
+# Member amplitude drained with training: sd 0.549 (parent) -> 0.347 (ep96) -> 0.196 (ep111)
+# against a target sd of 1.10; in the Iberian precip band, 1.709 -> 0.996 -> 0.444 vs 3.71.
+#
+# THE DIAGNOSTIC IS THE TRAINING LOSS FALLING 2.4-3.9x. Sixteen times more target points at
+# finer spacing means MORE aleatoric detail to predict, so the flow-matching residual should
+# rise or stay flat. The only thing that gets easier when points are packed closer is reading
+# the answer off a neighbour. With an independent t per point, a point's cell-mates sit at
+# unrelated noise levels; any neighbour with t ~ 1 has y_t ~ y1, and at 6.5 km the field is
+# strongly correlated, so y1 at the query point follows -- and so does u = y1 - y0, exactly.
+# At 59 points 26 km apart that shortcut is weak. At 947 points 6.5 km apart it dominates.
+# It is worth nothing at sampling time, where every point shares one t.
+#
+# CONCLUSION: density and per-cell t are NOT independent levers. Raising the density while
+# leaving t per point makes the model strictly worse, because it scales up the leak. They must
+# be changed together, which is what this config now does.
+# ===========================================================================================
+
+# Draw the flow time once per decode cell, so training states match the ones the sampler
+# actually visits and the neighbour-leak above is removed entirely. See engines.py
+# `_sample_time`. This is REQUIRED at high density, not optional -- see the arm A result.
+flow_time_per_cell: True
+
+# Sampling knobs, left at the pretrain's operating point so the fine-tune stays comparable.
+flow_solver: euler
+flow_num_steps: 24
+# Kept on so a guidance sweep is available afterwards at sampling time for free. Read the
+# header: w > 1 is the wrong direction for an under-dispersed arm; w < 1 is the interesting one.
+flow_cond_dropout: 0.1
+flow_guidance: 1.0
+flow_time_sampling: logit_normal
+flow_time_logit_mean: 0.0
+flow_time_logit_std: 1.0
+
+training_config:
+  # 96 done (dg48kzg6's 64 + g1ydywu2's 32) -> 32 more. The counter is absolute: bump it, never
+  # reset it. If the wall is shorter the run stops early and every checkpoint is usable.
+  num_mini_epochs: 128
+  learning_rate_scheduling:
+    # Same as the previous stage-2: 2.0e-5 -> ~5.7e-5 effective at world_size 8 (sqrt policy).
+    # The decoder has to learn correlations at separations it has never been shown, which is
+    # closer to learning something new than to polishing, so not the 7.1e-6 of a polish overlay.
+    lr_max: 2.0e-5
+
+validation_config:
+  samples_per_mini_epoch: 32
+  # Validate the INHERITED weights before a single gradient step. f8as896p had no such row, so
+  # its first validation already contained one epoch of training and the trend had to be read
+  # without an anchor. With this on, epoch -1 is the parent measured in exactly this estimator
+  # and at exactly this density -- the only honest reference for "did the fine-tune help".
+  validate_before_training: True
+  # Write fields so the offline forensics can run. 4 samples x 4 ranks = 4 dates.
+  # NOTE this is ~590 MB per rank per validated mini-epoch: f8as896p produced 128 zips / 75 GB
+  # in 16 epochs. Drop to 1, or prune old checkpoints, if scratch is tight.
+  output:
+    num_samples: 4
+  losses:
+    structure:
+      loss_fcts:
+        struct:
+          # DELIBERATE BREAK WITH THE PRE-2026-07-31 NUMBERS. Uniform pair sampling put ~16 of
+          # 262144 pairs in the 10-25 km bin on this domain and ~43 in the 25-50 km bin, so the
+          # two bins the campaign cares about were noise or were dropped by min_pairs_per_bin.
+          # 'stratified' fills every bin independently. Cross-run comparisons must therefore use
+          # the offline tool, which is the same estimator, and not the older logged ratios.
+          pair_sampling: stratified
+          log_bin_ratios: True
+    structure_members:
+      loss_fcts:
+        struct_members:
+          pair_sampling: stratified
+          log_bin_ratios: True
+
+streams:
+  CERRA:
+    # THE LEVER. ~947 points per decode cell at ~6.5 km spacing -- essentially CERRA's native
+    # grid, so every scale the model is asked about at evaluation is a scale it was trained to
+    # correlate. Measured cost 1.86x (see the table in the header). Drop to 400000 (1.42x) if
+    # the wall clock is tight.
+    max_num_targets: 800000
+    # Positional, against the RESOLVED order ['10si', '10wdir', '2t', 'tp'] (alphabetical, NOT
+    # the stream-yml order). Index 1 is 10wdir: circular, so a squared error mis-penalises the
+    # 0/360 wrap. Check the resolved order in the run log before changing which is zeroed.
+    target_channel_weights: [1.0, 0.0, 1.0, 1.0]
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_ft_flowmatch_density
+  grid: null

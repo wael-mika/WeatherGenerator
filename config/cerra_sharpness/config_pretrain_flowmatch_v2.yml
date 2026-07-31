@@ -1,0 +1,342 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# GENERATIVE arm v2 -- FRESH conditional flow-matching pretrain, no --from-run-id.
+# Plan: playground/docs/fresh_run_plan.md. Measurements: playground/docs/decoder_forensics.md.
+# ===========================================================================================
+#
+# WHY FRESH, not another fine-tune.
+#
+# Practical: with no --from-run-id, launch-slurm.py takes code from wgen_dir_home -- your
+# working tree -- instead of a parent snapshot (launch-slurm.py:1364). No seeding, no patched
+# _raina copy, no silently-ignored key. Every fix on this branch is live.
+#
+# Scientific: the whole lineage l4m31jbd -> dg48kzg6 -> g1ydywu2 trained with an independent
+# flow time per target point, which let the decoder read the answer off a cell-mate sitting at
+# t ~ 1. A decoder that can do that never needs the latent to carry sub-cell information, so
+# there was never gradient pressure to put fine detail INTO the latent. The encoder co-adapted
+# to a cheating decoder, and a fine-tune inherits that encoder. Only a fresh run tests the
+# architecture instead of the residue of the leak.
+#
+# THE DESIGN PRINCIPLE: TRAIN IN THE REGIME YOU EVALUATE IN. Both known violations are removed
+# here, together -- and they must be together, because f8as896p showed that closing the density
+# gap ALONE makes things strictly worse (it scales the leak up):
+#   * flow_time_per_cell: True                    (t per cell, as the sampler does)
+#   * streams.CERRA.max_num_targets: -1           (decode density == evaluation density)
+#
+# WHAT ELSE CHANGED vs config_pretrain_flowmatch.yml:
+#   * streams_directory -> cerra_flowmatch_v2. CERRA is now an INPUT as well as a target, and
+#     carries r/t/u/v/z at 850 hPa. *** THIS CHANGES THE TASK from diagnosis to forecasting. ***
+#     Read the header of config/streams/cerra_flowmatch_v2/cerra.yml before comparing anything
+#     to an earlier arm; persistence is a strong baseline at +6h for the smooth channels.
+#   * 10wdir dropped from the targets (circular; mis-penalised by a squared error).
+#   * Validation: stratified SF pairs, validate_before_training, and a much smaller footprint.
+#   * data_loading.num_workers 12 -> 6 (host RAM at full target density).
+#
+# COST. Measured on the 50k parent: 0.595 samples/sec/rank. 800000 targets cost 1.86x. -1 is
+# extrapolated at ~3.5-5x but the quadratic within-cell attention term is only starting to show,
+# so PROBE IT (fresh_run_plan.md section 5) and fall back to 800000 if it is out of reach.
+#
+# LAUNCH -- pass this file as --base-config, NOT --config. It is a complete base configuration
+# (it carries every ae_*/fe_*/training_config key), which is how the original pretrain was
+# launched: `run_train.py train --base-config .../config_pretrain_flowmatch.yml --config
+# .../config_command_line.yaml` (l4m31jbd). With --base-config, default_config.yml is NOT loaded
+# at all (config.py::_load_base_conf) and this file IS the base. Passing it as --config instead
+# makes default_config.yml the base and this file an overlay, so every key not set here silently
+# falls back to a default the pretrain never used -- a different model, quietly.
+# Never `--options general.desc`: mlflow refuses a second write of the `general` block and
+# aborts the launch. Set desc in this file.
+#
+#   uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --nodes 4 --chain-jobs 3 --account e-ext-2025e01-128 \
+#     --base-config config/cerra_sharpness/config_pretrain_flowmatch_v2.yml
+#
+# *** --options streams.<X>.<key>=... IS SILENTLY DISCARDED ON A FRESH `train` RUN. ***
+# run_train.py:183 re-reads the streams directory AFTER the config merge and overwrites
+# cf.streams wholesale. Only run_train does this -- run_continue and run_inference do not,
+# which is why the same override works for train_continue and inference. On a fresh run the
+# stream yml is the ONLY authoritative place for stream settings; edit the file.
+#
+# KILL GATES -- check these, do not wait for the end (f8as896p ran 16 epochs the wrong way):
+#   ~ep 4  training LossPhysical.loss_avg must NOT collapse. Without the leak the task is
+#          genuinely harder, so expect >= g1ydywu2's converged 0.088. Sliding toward
+#          f8as896p's 0.040 means the leak is still open -- verify flow_time_per_cell resolved.
+#   ~ep 8  member SF ratio rising, spread-skill rising. Falling for 4 straight epochs while the
+#          train loss falls is the f8as896p signature: stop.
+# Read from results/<RUN>/<RUN>_train_metrics.json (stage=="val"); ratio_*km never reaches
+# log.txt. Maps: playground/scripts/plot_member_maps.py. Metrics: decoder_forensics.py.
+#
+# END-OF-RUN full-fidelity validation (routine validation is deliberately cheap):
+#   uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --stage inference --from-run-id <RUN> --nodes 1 --account e-ext-2025e01-128 --no-register \
+#     --config config/cerra_sharpness/config_pretrain_flowmatch_v2.yml \
+#     --options streams.CERRA.pred_head.ens_size=8 flow_num_steps=24 \
+#               test_config.samples_per_mini_epoch=4 test_config.output.num_samples=4
+# ===========================================================================================
+
+embed_orientation: "channels"
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 4
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 1
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: FlowMatching
+pred_adapter_kv: False
+pred_self_attention: True
+pred_mlp_adaln: True
+num_class_tokens: 0
+num_register_tokens: 0
+
+# NOTE: decode_latent_expand / decode_upsample_num_blocks were removed on 2026-07-31. They are
+# latent_upsampling-branch keys with ZERO readers here (LatentUpsamplingEngine does not exist on
+# this branch), so they merged cleanly and did nothing -- exactly the failure mode that cost the
+# g1ydywu2 fine-tune. Check `grep -rl <key> src/` before adding a key inherited from a config.
+
+# Euler steps for the probability-flow ODE at evaluation, and the width of the
+# sinusoidal flow-time embedding that rides along with the coordinate frame in AdaLN.
+# 24 steps is a reasonable accuracy/cost point; 8-16 is usually enough for a quick look.
+flow_num_steps: 24
+flow_dim_time: 32
+
+# THE FIX THIS RUN EXISTS FOR. Training draws the flow time once per DECODE CELL instead of
+# once per target point, so the states the model is trained on are the states the sampler
+# actually visits. With per-point t, a point's cell-mates sit at unrelated noise levels and
+# any neighbour at t ~ 1 is nearly clean, so "copy from the neighbour" solves the training
+# objective completely -- and is worth nothing at sampling time, where all points share one t.
+# f8as896p is the proof: at 800000 targets the training residual fell 2.4-3.9x below the 50k
+# parent while the samples got monotonically worse. The leak scales with density, so this is
+# REQUIRED here, not optional. See engines.py `_sample_time`.
+flow_time_per_cell: True
+
+# REQUIRED on torch >= ~2.9, and nothing to do with this experiment. A stream's decoder runs at
+# every output step, and `_get_output_length` is `offset + num_steps` = 2 here, so ERA5's
+# velocity head is used twice per iteration. Older torch tolerated that under DDP; 2.9 raises
+# "Parameter target_token_engines.ERA5.vel_head.bias has been marked as ready twice" and the run
+# dies on the first backward. l4m31jbd trained fine with a byte-identical config on an older
+# torch -- uv.lock is gitignored on this branch, so every fresh run re-resolves dependencies and
+# eventually picked up the stricter torch. static_graph is the documented fix and subsumes
+# find_unused_parameters, which is safe here because the unused set (pred_heads, bypassed by the
+# flow decoder) is identical every iteration. See model_interface.py.
+ddp_static_graph: True
+
+fe_num_blocks: 8
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+healpix_level: 5
+
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False           # FSDP2 sharding bug with ae_local_blocks; use DDP
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+#####################################
+
+streams_directory: "./config/streams/cerra_flowmatch_v2/"
+streams: ???
+
+zarr_store: "zip"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "cerra_flowmatch_v2"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# 12 workers x ~1 GB per prefetched sample at max_num_targets: -1 is a lot of host RAM.
+# Drop further if workers get OOM-killed; the bottleneck is the model, not the loader.
+data_loading:
+  num_workers: 6
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  log_spoof_warnings: False
+
+training_config:
+
+  training_mode: ["masking"]
+
+  num_mini_epochs: 64
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5 (1979-2023) and CERRA (1985-2023) both cover this range. Hold out 2023 for validation.
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # 6h window = ERA5 cadence -> ERA5 present in every window (no starvation).
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  model_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
+  forecast:
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 1           # predict CERRA tp at t+6h
+      policy: "fixed"
+
+
+validation_config:
+  # Routine validation is deliberately small. At max_num_targets: -1 one member is a decode pass
+  # over ~1.1M points, and ens_size x flow_num_steps is that many passes PER SAMPLE. f8as896p
+  # also wrote 71 GB of zarr in 16 epochs at num_samples: 4. Full-fidelity numbers come from a
+  # separate validation-only inference at the end (see the header).
+  samples_per_mini_epoch: 4
+  shuffle: False
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+  # Validate the untrained model before the first gradient step. f8as896p had no such anchor and
+  # its trend had to be read without one.
+  validate_before_training: True
+  losses: {
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          channels: ['tp'],           # tp only: the campaign target, and the hard one
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,               # ensemble MEAN
+          # Uniform sampling put ~16 of 262144 pairs in the 10-25 km bin on this domain and ~43
+          # in the 25-50 km bin, i.e. the two bins that matter were noise or were dropped.
+          # 'stratified' fills every bin. Numbers are NOT comparable with pre-2026-07-31 runs;
+          # use playground/scripts/decoder_forensics.py, which is the same estimator.
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+    "structure_members": {
+      type: LossStructureFunction,
+      weight: 1.0,
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct_members": {
+          target_stream: CERRA,
+          channels: ['tp'],
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: members,            # the coherence read: per-member, not the mean
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+  }
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+  output: {
+    num_samples: 1,
+    normalized_samples: False,
+    streams: null,
+    }
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_generative_v2
+  grid: null

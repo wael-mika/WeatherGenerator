@@ -97,15 +97,14 @@ ae_aggregation_mlp_hidden_factor: 2
 decoder_type: FlowMatching
 pred_adapter_kv: False
 pred_self_attention: True
-pred_dyadic_dims: False
 pred_mlp_adaln: True
 num_class_tokens: 0
 num_register_tokens: 0
 
-# Latent-upsampling knobs. The model-level default is OFF (1); the A/B treatment is set
-# per-stream on CERRA. decode_upsample_num_blocks is the upsampler depth (used only when > 1).
-decode_latent_expand: 1
-decode_upsample_num_blocks: 1
+# NOTE: decode_latent_expand / decode_upsample_num_blocks were removed on 2026-07-31. They are
+# latent_upsampling-branch keys with ZERO readers here (LatentUpsamplingEngine does not exist on
+# this branch), so they merged cleanly and did nothing -- exactly the failure mode that cost the
+# g1ydywu2 fine-tune. Check `grep -rl <key> src/` before adding a key inherited from a config.
 
 # Euler steps for the probability-flow ODE at evaluation, and the width of the
 # sinusoidal flow-time embedding that rides along with the coordinate frame in AdaLN.
