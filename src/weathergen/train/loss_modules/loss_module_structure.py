@@ -47,6 +47,7 @@ Expected config (under ``training_config.losses``):
             bin_edges_km: [10, 25, 50, 100, 200],
             increment_power: 2.0,        # 2 = standard structure function; 1 = robust (heavy tails)
             reduce: mean,                # ensemble handling, see below
+            pair_sampling: uniform,      # 'uniform' (default, comparable) | 'stratified'
           },
         },
       }
@@ -65,13 +66,20 @@ Expected config (under ``training_config.losses``):
 Note on scale: choose ``bin_edges_km`` to straddle the artifact scale of the *target* stream;
 on a ~1° stream (IMERG_ANEMOI) the sub-cell scales are unresolved -- prefer a fine stream.
 
-Note on ``num_pairs`` (IMPORTANT): pairs are sampled uniformly over points, so their distance
-distribution follows the domain's pair-distance density -- short separations are RARE. On a
-continental domain (CERRA Europe), 8192 pairs put only ~1 pair into the 10-25 km bin, i.e.
-below ``min_pairs_per_bin`` and the fine-scale bins (exactly where decoder blur lives) are
-silently skipped. Empirically, ~1e6 pairs give ~150/500/1900/7200 pairs for the default bins;
-the default here (262144) is a safe floor. The cost is a few gathers + elementwise ops --
-negligible next to the model forward.
+Note on ``num_pairs`` and ``pair_sampling`` (IMPORTANT): with ``pair_sampling: uniform`` pairs are
+sampled uniformly over points, so their distance distribution follows the domain's pair-distance
+density -- short separations are RARE. Measured on the CERRA Europe domain (~6.9e6 km^2 of points,
+1.14e6 points per time slice), ``num_pairs: 262144`` yields roughly **6 / 22 / 89 / 358** pairs for
+the default 10-25 / 25-50 / 50-100 / 100-200 km bins. The finest bin therefore falls below
+``min_pairs_per_bin`` and is dropped, and the next one is estimated from ~20 heavy-tailed
+increments, i.e. it is noise. Any conclusion drawn from ``ratio_10_25km`` or ``ratio_25_50km`` of a
+uniform-sampled run -- including the "25-50 km anomaly" seen across the CERRA campaign -- has to be
+re-checked before it is believed.
+
+``pair_sampling: stratified`` removes the problem by filling every bin to ``num_pairs``
+independently; it costs a sort per bin and is the recommended setting for new runs. ``uniform``
+remains the default so that every run since vbm9r3om stays comparable. The realised per-bin pair
+count is logged next to each ratio (``npairs_<lo>_<hi>km``) when ``log_bin_ratios`` is on.
 
 Validation-only usage: since the loss calculator skips terms with ``weight: 0`` and the
 validation config is merged ON TOP of the training config, adding this block under
@@ -110,6 +118,80 @@ def _haversine_km(coords: torch.Tensor, idx_i: torch.Tensor, idx_j: torch.Tensor
     return 2.0 * earth_radius_km * torch.asin(torch.sqrt(a.clamp(0.0, 1.0)))
 
 
+def _bucket_pairs(
+    coords: torch.Tensor,
+    lo: float,
+    hi: float,
+    num_pairs: int,
+    generator: torch.Generator | None,
+    max_rounds: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Point pairs whose separation lands in (lo, hi] km, without a spatial index.
+
+    Uniform pair sampling is hopeless at short separations: on a continental domain the fraction
+    of point pairs closer than 25 km is ~1e-5, so a 262144-pair draw yields single digits. This
+    instead bins points onto a planar km grid of side ``hi/1.5``, pairs each anchor with a random
+    point from a randomly chosen neighbouring bucket, and keeps whatever lands in the bin. Every
+    step is a sort or a gather, so it runs on the GPU next to the model with no new dependency.
+
+    The planar approximation (degrees -> km with a per-point cos(lat) factor) is only used to
+    assign buckets; the distances that decide membership are exact haversine.
+    """
+    lat, lon = coords[:, 0], coords[:, 1]
+    side = hi / 1.5
+    by = torch.floor(lat * 111.0 / side).long()
+    bx = torch.floor(lon * 111.0 * torch.cos(torch.deg2rad(lat)) / side).long()
+    by = by - by.min()
+    bx = bx - bx.min()
+    width = int(bx.max().item()) + 1
+    key = by * width + bx
+
+    order = torch.argsort(key)
+    key_sorted = key[order]
+    uniq, counts = torch.unique_consecutive(key_sorted, return_counts=True)
+    starts = torch.cumsum(counts, 0) - counts
+
+    keep_i, keep_j, found = [], [], 0
+    for _ in range(max_rounds):
+        n = num_pairs
+        i = torch.randint(0, coords.shape[0], (n,), device=coords.device, generator=generator)
+        # a random neighbouring bucket, including the anchor's own
+        dy = torch.randint(-1, 2, (n,), device=coords.device, generator=generator)
+        dx = torch.randint(-1, 2, (n,), device=coords.device, generator=generator)
+        want = key[i] + dy * width + dx
+        loc = torch.searchsorted(uniq, want.clamp(min=0))
+        loc = loc.clamp(max=len(uniq) - 1)
+        hit = uniq[loc] == want
+        off = (
+            torch.rand(n, device=coords.device, generator=generator) * counts[loc].to(torch.float32)
+        ).long()
+        j = order[(starts[loc] + off.clamp(max=counts[loc] - 1)).clamp(0, len(order) - 1)]
+        dist = _haversine_km(coords, i, j)
+        ok = hit & (dist > lo) & (dist <= hi) & (i != j)
+        keep_i.append(i[ok])
+        keep_j.append(j[ok])
+        found += int(ok.sum())
+        if found >= num_pairs:
+            break
+    return torch.cat(keep_i)[:num_pairs], torch.cat(keep_j)[:num_pairs]
+
+
+def _bin_term(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    idx_i: torch.Tensor,
+    idx_j: torch.Tensor,
+    increment_power: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Squared log-ratio of the predicted and target mean increment for one distance bin."""
+    inc_t = (target[idx_i] - target[idx_j]).abs().pow(increment_power)  # [P, C]
+    inc_p = (pred[idx_i] - pred[idx_j]).abs().pow(increment_power)  # [P, C]
+    s_t = inc_t.mean(0)  # [C]
+    s_p = inc_p.mean(0)  # [C]
+    return (torch.log(s_p + eps) - torch.log(s_t + eps)).pow(2), s_p, s_t
+
+
 def structure_function_loss(
     target: torch.Tensor,
     pred: torch.Tensor,
@@ -121,6 +203,7 @@ def structure_function_loss(
     min_pairs_per_bin: int = 1,
     generator: torch.Generator | None = None,
     return_spectra: bool = False,
+    pair_sampling: str = "uniform",
 ) -> torch.Tensor | None | tuple:
     """Per-channel grid-free structure-function loss for one (reduced) field.
 
@@ -138,57 +221,91 @@ def structure_function_loss(
         eps: stabiliser inside the log.
         min_pairs_per_bin: skip bins with fewer surviving pairs than this.
         generator: optional RNG for reproducible pair sampling.
-        return_spectra: also return the per-bin S_pred and S_target. The scalar loss is a
-            SQUARED LOG RATIO and is therefore blind to the sign of the mismatch -- too much and
-            too little fine-scale variance score identically. Only the ratio S_pred/S_target
+        return_spectra: also return the per-bin S_pred, S_target and pair count. The scalar loss
+            is a SQUARED LOG RATIO and is therefore blind to the sign of the mismatch -- too much
+            and too little fine-scale variance score identically. Only the ratio S_pred/S_target
             tells you which, and that is what decides whether a fix should add or remove
             variance. See playground/docs/flow_matching_decoder.md.
+        pair_sampling: ``uniform`` (default) draws pairs uniformly over points, which is what
+            every run since vbm9r3om used -- keep it for comparability. It severely under-samples
+            short separations: on a continental domain 262144 pairs put ~6 into a 10-25 km bin,
+            below any usable ``min_pairs_per_bin``, so the finest bins are noise or are skipped.
+            ``stratified`` fills each bin to ``num_pairs`` independently (see ``_bucket_pairs``),
+            which is what the offline tool playground/scripts/decoder_forensics.py does.
     Returns:
         (C,) per-channel loss, or None if too few points/pairs to form any bin.
-        With ``return_spectra``: ``(loss, s_pred, s_target)`` where the spectra are
-        ``(B, C)`` with NaN in bins that had too few pairs.
+        With ``return_spectra``: ``(loss, s_pred, s_target, counts)`` where the spectra are
+        ``(B, C)`` with NaN in bins that had too few pairs and ``counts`` is ``(B,)``.
     """
+    empty = (None, None, None, None) if return_spectra else None
     n = target.shape[0]
     if n < 2:
-        return (None, None, None) if return_spectra else None
+        return empty
 
     device = target.device
-    idx_i = torch.randint(0, n, (num_pairs,), device=device, generator=generator)
-    idx_j = torch.randint(0, n, (num_pairs,), device=device, generator=generator)
-
-    dist = _haversine_km(coords, idx_i, idx_j)
-    lo, hi = float(bin_edges_km[0]), float(bin_edges_km[-1])
-    keep = (dist > lo) & (dist <= hi) & (idx_i != idx_j)
-    if int(keep.sum()) < min_pairs_per_bin:
-        return (None, None, None) if return_spectra else None
-    idx_i, idx_j, dist = idx_i[keep], idx_j[keep], dist[keep]
-
-    # increments (target side carries no gradient; pred side does, via the index gather)
-    inc_t = (target[idx_i] - target[idx_j]).abs().pow(increment_power)  # [P, C]
-    inc_p = (pred[idx_i] - pred[idx_j]).abs().pow(increment_power)  # [P, C]
-
     num_bins, num_ch = len(bin_edges_km) - 1, target.shape[1]
+
+    # per-bin (idx_i, idx_j); the uniform branch draws once and masks, so its RNG consumption
+    # and its arithmetic are unchanged from the original implementation
+    bin_pairs: list[tuple[torch.Tensor, torch.Tensor] | None] = []
+    if pair_sampling == "uniform":
+        idx_i = torch.randint(0, n, (num_pairs,), device=device, generator=generator)
+        idx_j = torch.randint(0, n, (num_pairs,), device=device, generator=generator)
+        dist = _haversine_km(coords, idx_i, idx_j)
+        lo, hi = float(bin_edges_km[0]), float(bin_edges_km[-1])
+        keep = (dist > lo) & (dist <= hi) & (idx_i != idx_j)
+        if int(keep.sum()) < min_pairs_per_bin:
+            return empty
+        idx_i, idx_j, dist = idx_i[keep], idx_j[keep], dist[keep]
+        for b in range(num_bins):
+            in_bin = (dist > float(bin_edges_km[b])) & (dist <= float(bin_edges_km[b + 1]))
+            bin_pairs.append((idx_i[in_bin], idx_j[in_bin]))
+    elif pair_sampling == "stratified":
+        for b in range(num_bins):
+            bin_pairs.append(
+                _bucket_pairs(
+                    coords,
+                    float(bin_edges_km[b]),
+                    float(bin_edges_km[b + 1]),
+                    num_pairs,
+                    generator,
+                )
+            )
+    else:
+        raise ValueError(f"unknown pair_sampling '{pair_sampling}' (use 'uniform'/'stratified')")
+
     losses = []
+    counts = torch.zeros(num_bins, dtype=torch.int64)
     if return_spectra:
         nan = float("nan")
         sp_all = torch.full((num_bins, num_ch), nan, device=device, dtype=torch.float32)
         st_all = torch.full((num_bins, num_ch), nan, device=device, dtype=torch.float32)
 
-    for b in range(num_bins):
-        in_bin = (dist > float(bin_edges_km[b])) & (dist <= float(bin_edges_km[b + 1]))
-        if int(in_bin.sum()) < min_pairs_per_bin:
+    for b, pair in enumerate(bin_pairs):
+        i_b, j_b = pair
+        counts[b] = len(i_b)
+        if len(i_b) < min_pairs_per_bin:
+            # a starved bin is a measurement failure, not a no-op: the loss silently stops
+            # covering that scale. Say so rather than dropping it.
+            _logger.warning(
+                "LossStructureFunction: bin %g-%g km got %d pairs (< %d) and is not scored; "
+                "raise num_pairs or set pair_sampling: stratified",
+                bin_edges_km[b],
+                bin_edges_km[b + 1],
+                len(i_b),
+                min_pairs_per_bin,
+            )
             continue
-        s_t = inc_t[in_bin].mean(0)  # [C]
-        s_p = inc_p[in_bin].mean(0)  # [C]
-        losses.append((torch.log(s_p + eps) - torch.log(s_t + eps)).pow(2))
+        loss_b, s_p, s_t = _bin_term(target, pred, i_b, j_b, increment_power, eps)
+        losses.append(loss_b)
         if return_spectra:
             sp_all[b] = s_p.detach().float()
             st_all[b] = s_t.detach().float()
 
     if not losses:
-        return (None, None, None) if return_spectra else None
+        return empty
     loss = torch.stack(losses, 0).mean(0)  # [C]
-    return (loss, sp_all, st_all) if return_spectra else loss
+    return (loss, sp_all, st_all, counts) if return_spectra else loss
 
 
 class LossStructureFunction(LossModuleBase):
@@ -234,6 +351,10 @@ class LossStructureFunction(LossModuleBase):
         self.log_bin_ratios: bool = bool(cfg.get("log_bin_ratios", False))
         self._bin_ratio_sum: torch.Tensor | None = None
         self._bin_ratio_cnt: torch.Tensor | None = None
+        self._bin_pair_sum: torch.Tensor | None = None
+        # 'uniform' reproduces every run since vbm9r3om exactly; 'stratified' fills each distance
+        # bin independently so the short-separation bins are actually measured. See the function.
+        self.pair_sampling: str = str(cfg.get("pair_sampling", "uniform"))
 
         # Results are keyed by self.name in LossCalculator.compute_loss, so two
         # LossStructureFunction terms in one config would overwrite each other's log entry (the
@@ -246,13 +367,14 @@ class LossStructureFunction(LossModuleBase):
 
         _logger.info(
             "LossStructureFunction: stream=%s, channels=%s, bins(km)=%s, num_pairs=%d, "
-            "power=%.1f, reduce=%s",
+            "power=%.1f, reduce=%s, pair_sampling=%s",
             self.target_stream,
             self.channels if self.channels is not None else "all",
             self.bin_edges_km,
             self.num_pairs,
             self.increment_power,
             self.reduce,
+            self.pair_sampling,
         )
 
     def _resolve_channel_idx(self) -> list[int] | None:
@@ -304,6 +426,7 @@ class LossStructureFunction(LossModuleBase):
             nb = len(self.bin_edges_km) - 1
             self._bin_ratio_sum = torch.zeros(nb, device=self.device)
             self._bin_ratio_cnt = torch.zeros(nb, device=self.device)
+            self._bin_pair_sum = torch.zeros(nb, device=self.device)
 
         for timestep_idx, (preds_cur, target_cur) in enumerate(
             zip(preds.physical, targets.physical, strict=True)
@@ -372,9 +495,10 @@ class LossStructureFunction(LossModuleBase):
                         eps=self.eps,
                         min_pairs_per_bin=self.min_pairs_per_bin,
                         return_spectra=self.log_bin_ratios,
+                        pair_sampling=self.pair_sampling,
                     )
                     if self.log_bin_ratios:
-                        loss_ch, s_p, s_t = out
+                        loss_ch, s_p, s_t, n_pairs = out
                         if s_p is not None:
                             # channel-mean ratio per bin; accumulated so the logged value is an
                             # average over the whole validation pass, not one batch
@@ -382,6 +506,7 @@ class LossStructureFunction(LossModuleBase):
                             fin = torch.isfinite(ratio)
                             self._bin_ratio_sum[fin] += ratio[fin]
                             self._bin_ratio_cnt[fin] += 1
+                            self._bin_pair_sum += n_pairs.to(self._bin_pair_sum)
                     else:
                         loss_ch = out
                     if loss_ch is not None:
@@ -417,10 +542,14 @@ class LossStructureFunction(LossModuleBase):
         # > 1 = too much fine-scale variance (over-sharp / noisy), < 1 = too smooth (blurred).
         if self.log_bin_ratios and float(self._bin_ratio_cnt.sum()) > 0:
             ratios = self._bin_ratio_sum / self._bin_ratio_cnt.clamp_min(1)
+            pairs = self._bin_pair_sum / self._bin_ratio_cnt.clamp_min(1)
             for b in range(len(self.bin_edges_km) - 1):
                 if float(self._bin_ratio_cnt[b]) == 0:
                     continue
                 lo, hi = int(self.bin_edges_km[b]), int(self.bin_edges_km[b + 1])
                 reordered[stream_name]["structure"][f"ratio_{lo}_{hi}km"] = ratios[b].detach()
+                # a ratio estimated from a handful of pairs is noise, not a measurement; log the
+                # sample size next to it so the two are never read apart
+                reordered[stream_name]["structure"][f"npairs_{lo}_{hi}km"] = pairs[b].detach()
 
         return LossValues(loss=loss, losses_all=reordered, stddev_all=None)

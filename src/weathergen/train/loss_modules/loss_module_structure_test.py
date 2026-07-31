@@ -9,10 +9,13 @@
 
 """CPU tests for LossStructureFunction ensemble handling and the SF estimator."""
 
+import pytest
 import torch
 
 from weathergen.train.loss_modules.loss_module_structure import (
     LossStructureFunction,
+    _bucket_pairs,
+    _haversine_km,
     structure_function_loss,
 )
 
@@ -100,3 +103,87 @@ def test_sf_loss_penalizes_damped_field_and_has_grad():
     total.backward()
     assert pred.grad is not None
     assert torch.isfinite(pred.grad).all()
+
+
+def test_uniform_pair_sampling_starves_the_short_bins():
+    """The reason `stratified` exists: uniform sampling barely populates the finest bin.
+
+    Pair separations follow the domain's pair-distance density, so the share of pairs below
+    25 km falls off as the domain grows. Even on this toy 3-degree grid the 10-25 km bin gets
+    orders of magnitude fewer pairs than the widest one; on CERRA Europe it is ~16 of 262144.
+    """
+    coords = _grid_coords()
+    g = torch.Generator().manual_seed(3)
+    y = torch.randn(coords.shape[0], 1, generator=g)
+    _, _, _, counts = structure_function_loss(
+        y,
+        y.clone(),
+        coords,
+        bin_edges_km=[10, 25, 50, 100, 200],
+        num_pairs=20000,
+        generator=torch.Generator().manual_seed(4),
+        return_spectra=True,
+        pair_sampling="uniform",
+    )
+    assert counts[0] < counts[-1] / 10
+
+
+def test_stratified_pair_sampling_fills_every_bin():
+    coords = _grid_coords(n_side=64, extent_deg=4.0)
+    g = torch.Generator().manual_seed(5)
+    y = torch.randn(coords.shape[0], 1, generator=g)
+    _, _, _, counts = structure_function_loss(
+        y,
+        y.clone(),
+        coords,
+        bin_edges_km=[10, 25, 50, 100, 200],
+        num_pairs=4000,
+        generator=torch.Generator().manual_seed(6),
+        return_spectra=True,
+        pair_sampling="stratified",
+    )
+    assert int(counts.min()) >= 1000, f"a bin was starved even when stratified: {counts.tolist()}"
+
+
+def test_stratified_pairs_land_in_their_bin():
+    """Bin membership is decided by exact haversine, not by the planar bucket approximation."""
+    coords = _grid_coords(n_side=64, extent_deg=4.0)
+    for lo, hi in [(10.0, 25.0), (50.0, 100.0)]:
+        i, j = _bucket_pairs(coords, lo, hi, 2000, torch.Generator().manual_seed(7))
+        dist = _haversine_km(coords, i, j)
+        assert len(i) > 0
+        assert bool(((dist > lo) & (dist <= hi)).all())
+
+
+def test_stratified_matches_uniform_on_a_stationary_field():
+    """Both estimators target the same S(r); on a field with plenty of pairs they must agree.
+
+    A damped copy of a random field has a known ratio (0.3^2 = 0.09) at every separation, so
+    both samplings must recover the same per-bin loss up to sampling error.
+    """
+    coords = _grid_coords(n_side=64, extent_deg=4.0)
+    g = torch.Generator().manual_seed(8)
+    y = torch.randn(coords.shape[0], 1, generator=g)
+    pred = 0.3 * y
+    kwargs = dict(bin_edges_km=[10, 25, 50, 100, 200], num_pairs=40000)
+    uni = structure_function_loss(
+        y, pred, coords, generator=torch.Generator().manual_seed(9), **kwargs
+    )
+    strat = structure_function_loss(
+        y,
+        pred,
+        coords,
+        generator=torch.Generator().manual_seed(9),
+        pair_sampling="stratified",
+        **kwargs,
+    )
+    assert torch.allclose(uni, strat, rtol=0.05)
+
+
+def test_unknown_pair_sampling_raises():
+    coords = _grid_coords()
+    y = torch.randn(coords.shape[0], 1, generator=torch.Generator().manual_seed(10))
+    with pytest.raises(ValueError, match="unknown pair_sampling"):
+        structure_function_loss(
+            y, y.clone(), coords, bin_edges_km=[10, 25, 50], pair_sampling="nope"
+        )
