@@ -1,0 +1,130 @@
+# Evaluation of the FLOW-MATCHING arm: kt8g6wey = inference of g1ydywu2.
+#   run history: l4m31jbd -> dg48kzg6 (64 ep pretrain) -> g1ydywu2 (+32 ep) -> kt8g6wey (inference)
+#   full CERRA grid (max_num_targets=-1), ens_size 2, euler-24, flow_guidance 1.0, 4 samples.
+#
+# THE 4 ZIPS ARE ONE RUN, NOT FOUR. validation_chkpt00000_rank{0000..0003}.zip are the four DDP
+# ranks of kt8g6wey, each holding a DISJOINT sample. WeatherGenReader handles this itself:
+# `rank` defaults to "all", it globs validation_chkpt{mini_epoch:05d}_rank*.zip and assigns
+# global sample indices by cumulative offset (rank0 -> 0, rank1 -> 1, ...). So there is ONE
+# entry under run_ids and the merged run has samples 0-3. Do not list the zips individually.
+# `mini_epoch` defaults to 0, which is what chkpt00000 in the filenames means -- leave it unset.
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_flowmatch_kt8g6wey.yml
+#
+# Read, in this order:
+#   1. SINGLE-MEMBER maps in ./results/kt8g6wey/plots/. This is the whole point of a generative
+#      decoder: the ensemble mean is smooth BY CONSTRUCTION, so judging flow matching on mean
+#      maps measures nothing. plot_ensemble is on below so members are drawn separately.
+#   2. The tp histogram against the target (CERRA analysis max ~41.2 mm). Does the tail exist?
+#   3. rmse/mae/bias LAST, and do not treat them as the criterion. These are scores of a SINGLE
+#      STOCHASTIC DRAW, so they carry the usual double penalty and are structurally worse than
+#      a regression arm's conditional mean even when the field is better.
+#
+# WHAT THE IN-RUN DIAGNOSTIC ALREADY SAYS (kt8g6wey_train_metrics.json, the first time
+# log_bin_ratios actually executed -- it was silently dropped in g1ydywu2, see
+# config/cerra_sharpness/config_ft_flowmatch_generic.yml). S_pred/S_target per bin:
+#
+#     bin          ens MEAN   MEMBERS
+#     10- 25 km      0.986      2.253
+#     25- 50 km      0.116      0.217
+#     50-100 km      0.150      0.283
+#    100-200 km      0.214      0.231
+#
+# DO NOT over-read these. They are a 4-SAMPLE estimate at ens_size 2 and they do NOT replicate.
+# The same model family, measured in-loop at 32 validation samples (run o3jjkqb7, epoch 1),
+# reads 3.619 / 0.685 / 0.474 / 0.440 -- the 25-200 km bins are 2-3x BETTER than the table
+# above. Trust the 32-sample in-loop series, not this.
+#
+# Nor is a low 25-200 km ratio specific to flow matching. It is campaign-wide: the latent
+# upsampling regression runs recorded .14/.15/.09/.30 and .22/.09/.09/.29 across the same bins
+# (playground/docs/soft_blend_decode.md:213), i.e. WORSE at 25-100 km than this arm. And whether
+# that band is a real target-variance deficit or an ESTIMATOR ARTIFACT has never been settled --
+# `playground/scripts/sf_target_spectrum.py` exists to answer it, target-only, minutes to run.
+# Settle that before treating any 25-50 km number as a model verdict.
+#
+# What IS robust across every measurement: over-dispersion at 10-25 km (1.4-3.6) beside
+# under-dispersion at 25-200 km -- a spectral SLOPE error, fine speckle on a field too smooth at
+# meso scales. Note a slope error is not fixable by classifier-free guidance, which rescales the
+# whole deviation from the unconditional mean and is not scale-selective. Confirm or refute the
+# speckle by eye in the single-member maps; that is what this config is for.
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1          # 5.5 km grid — small markers or maps saturate
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3h; the tail matters more than the map range
+    2t:
+      vmin: 250
+      vmax: 310             # K
+    10si:
+      vmin: 0.0
+      vmax: 25.0            # m/s
+    10wdir:
+      vmin: 0.0
+      vmax: 360.0           # deg; circular
+
+max_workers: 16
+
+evaluation:
+  # grad_amplitude/psd do NOT work on scattered WeatherGen output (they need gridded lat/lon);
+  # sharpness is judged from maps/histograms + the structure-function metrics above.
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/flowmatch_kt8g6wey/"
+  plot_ensemble: true       # ens_size 2 — draw MEMBERS, not just the mean; see note above
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    channels: ["tp", "2t", "10si", "10wdir"]
+    evaluation:
+      forecast_step: "all"  # verified: exactly one step exists, index 1 (not 0) — "all" is safe
+      sample: "0-3"         # verified: 4 ranks x 1 sample each, merged to global {0,1,2,3}
+      ensemble: "all"       # verified: 2 members, [0, 1]
+    plotting:
+      sample: [0, 1, 2, 3]  # only 4 exist — plot them all
+      forecast_step: "all"
+      plot_maps: true
+      plot_bias: false
+      plot_target: true     # CERRA analysis beside the prediction — the visual sharpness check
+      plot_histograms: true # tp tail: real extremes or speckle
+      plot_animations: false
+
+run_ids:
+  kt8g6wey:
+    label: "Flow matching (g1ydywu2, euler-24, ens2)"
+    color: "darkorange"
+    # results_base_dir omitted on purpose: resolved from the private/HPC config.
+    # rank omitted on purpose: defaults to "all" and merges the four rank zips.
+
+# ------------------------------------------------------------------------------------------
+# To turn this into a cross-decoder comparison, uncomment below AND narrow `sample` to "0-3"
+# (already the case) — those runs have 16 samples each, so the intersection is the 4 here.
+# VERIFY DATE ALIGNMENT FIRST: comparability relies on shuffle=False giving the same date at
+# the same global sample index, and kt8g6wey was written by 4 ranks while these were written by
+# 1, so the index->date mapping is NOT guaranteed to match. Check the sample datetimes before
+# reading any A/B difference as a model difference.
+#
+  t9h5oja1:
+    label: "Multiband fourier"
+    color: "steelblue"
+  hf4kop5d:
+    label: "Multistage decoder"
+    color: "crimson"
+  wf47on0l:
+    label: "Multiscale decoder"
+    color: "seagreen"

@@ -44,11 +44,42 @@ ae_aggregation_att_dense_rate: 1.0
 ae_aggregation_block_factor: 64
 ae_aggregation_mlp_hidden_factor: 2
 
-decoder_type: PerceiverIOCoordConditioning #  Main options PerceiverIOCoordConditioning or Linear
+decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, FlowMatching, Linear
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
 pred_mlp_adaln: True
+
+# Conditional flow-matching decoder (decoder_type: FlowMatching, see FlowMatchingPointDecoder).
+# Training regresses the velocity of the linear probability path; evaluation integrates it with
+# flow_num_steps steps and draws pred_head.ens_size independent samples. flow_dim_time is the
+# width of the sinusoidal embedding of the flow time (must be even), concatenated to the
+# coordinate frame in the AdaLN conditioning.
+flow_num_steps: 24
+flow_dim_time: 32
+
+# Flow-matching stage-2 levers. All default to the plain behaviour above.
+#   flow_solver          euler | heun. Heun is a 2nd-order predictor/corrector: half the O(dt)
+#                        discretisation error at 2x evaluations per step, so compare at matched
+#                        NFE (heun at N vs euler at 2N).
+#   flow_time_sampling   uniform | logit_normal. logit_normal (Esser et al. 2024, SD3) puts
+#                        training where the velocity is hardest to predict instead of spreading
+#                        it evenly over a path whose two ends are nearly trivial. Free at
+#                        inference.
+#   flow_cond_dropout    TRAINING knob: probability of replacing the latent KV with a learned
+#                        null token, which is what makes classifier-free guidance possible.
+#                        ~0.1 is the standard recipe. 0 = off.
+#   flow_guidance        SAMPLING knob: v = v_uncond + w*(v_cond - v_uncond). Costs 2x
+#                        evaluations when != 1. Only meaningful for a model trained with
+#                        flow_cond_dropout > 0, otherwise the null token is untrained noise.
+#                        NOTE w rescales the deviation from the unconditional mean uniformly; it
+#                        is NOT scale-selective and so cannot correct a spectral SLOPE error.
+flow_solver: euler
+flow_time_sampling: uniform
+flow_time_logit_mean: 0.0
+flow_time_logit_std: 1.0
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder

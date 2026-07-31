@@ -58,6 +58,15 @@ logger = logging.getLogger(__name__)
 # cfg_keys_to_filter = ["losses", "model_input", "target_input"]
 
 
+def _model_requires_targets(model) -> bool:
+    """Does this model need target values inside forward? (flow-matching decoder only)
+
+    Unwraps DDP / compile wrappers, which hide model attributes behind `.module`.
+    """
+    inner = getattr(model, "module", model)
+    return bool(getattr(inner, "requires_targets_in_forward", False))
+
+
 class Trainer(TrainerBase):
     def __init__(self, train_logging: Config):
         TrainerBase.__init__(self)
@@ -77,6 +86,8 @@ class Trainer(TrainerBase):
         self.lr_scheduler: LearningRateScheduler | None = None
         self.model = None
         self.model_params = None
+        # set once the model exists; see Model.requires_targets_in_forward
+        self._model_requires_targets = False
         self.optimizer: torch.optim.Optimizer | None = None
         self.t_start: float = 0
         self.target_and_aux_calculators = None
@@ -232,6 +243,7 @@ class Trainer(TrainerBase):
             cf.with_ddp,
             cf.with_fsdp,
         )
+        self._model_requires_targets = _model_requires_targets(self.model)
 
         # get target_aux calculators for different loss terms
         self.target_and_aux_calculators_val = self.get_target_aux_calculators(self.test_cfg)
@@ -283,6 +295,7 @@ class Trainer(TrainerBase):
             cf.with_ddp,
             cf.with_fsdp,
         )
+        self._model_requires_targets = _model_requires_targets(self.model)
 
         validate_with_ema_cfg = self.validation_cfg.get("validate_with_ema")
         if validate_with_ema_cfg is not None:
@@ -463,6 +476,10 @@ class Trainer(TrainerBase):
                     preds = self.model(
                         model_params=self.model_params,
                         batch=batch.get_source_samples(),
+                        # Only a generative decoder needs the target inside the forward (to put
+                        # it on the probability path). Everything else keeps the usual strict
+                        # separation and gets None.
+                        target_batch=batch if self._model_requires_targets else None,
                     )
 
                     targets_and_auxs = {}

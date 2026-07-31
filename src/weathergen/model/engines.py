@@ -982,6 +982,300 @@ class TargetPredictionEngine(nn.Module):
         return output
 
 
+def sample_flow_time(
+    n: int,
+    device,
+    dtype,
+    mode: str = "uniform",
+    logit_mean: float = 0.0,
+    logit_std: float = 1.0,
+) -> torch.Tensor:
+    """Draw the flow time ``t`` for conditional flow-matching training -> ``[n, 1]`` in (0, 1).
+
+    ``uniform`` is the textbook choice and the default. ``logit_normal`` --
+    ``t = sigmoid(N(mean, std))``, Esser et al. 2024 (SD3) -- concentrates training on the middle
+    of the path, where the velocity is hardest to predict and where sample quality is decided,
+    and spends less on the two ends where the task is nearly trivial. It is one of the
+    best-established quality wins in the flow-matching literature and costs nothing at inference.
+    """
+    if mode == "uniform":
+        return torch.rand((n, 1), device=device, dtype=dtype)
+    if mode == "logit_normal":
+        z = torch.randn((n, 1), device=device, dtype=dtype) * logit_std + logit_mean
+        return torch.sigmoid(z)
+    raise ValueError(f"unknown flow_time_sampling '{mode}' (use 'uniform' or 'logit_normal')")
+
+
+class FlowNullConditioning(torch.nn.Module):
+    """Learned null conditioning token for classifier-free guidance.
+
+    Its own module for the its own module so warm starts work: ``load_model_state``
+    re-initialises missing checkpoint keys by calling ``to_empty()`` + ``reset_parameters()`` on
+    the highest-level module covering them. A bare parameter on the decoder would make that root
+    the whole decoder and discard the inherited weights.
+    """
+
+    def __init__(self, dim_kv: int):
+        super().__init__()
+        self.null_latent = torch.nn.Parameter(torch.empty(1, dim_kv))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        torch.nn.init.normal_(self.null_latent, std=1.0 / self.null_latent.shape[-1])
+
+    def expand_to(self, latent: torch.Tensor) -> torch.Tensor:
+        """Null KV with the same row count as ``latent``, so varlen lens are unchanged."""
+        return self.null_latent.to(latent.dtype).expand(latent.shape[0], -1)
+
+
+def flow_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+    """Sinusoidal embedding of the flow time ``t`` in [0, 1].
+
+    Args:
+        t   : ``[N, 1]`` flow time per point.
+        dim : embedding width (even).
+
+    Returns:
+        ``[N, dim]``
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(half, device=t.device, dtype=torch.float32) / half
+    )
+    ang = t.float() * freqs.unsqueeze(0) * 1000.0
+    return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1).to(t.dtype)
+
+
+class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
+    """
+    Conditional flow-matching readout: emits jointly sampled fields instead of a regression.
+
+    Every other decoder on this branch factorises ``p(y | latent)`` over target points, so it can
+    only ever produce correct one-point statistics. Pinball quantile heads make that concrete: the
+    tau=0.97 map is "the 97th percentile everywhere at once", which is not a realization of
+    anything. This decoder learns a velocity field that transports noise to data and integrates it
+    at inference, so each forward pass is one coherent draw.
+
+    **Why it is not vulnerable to the failure that sank the quantile arm.** A noise-conditioned
+    regressor scored by a proper loss keeps a degenerate optimum available -- ignore the noise,
+    emit the conditional mean. Flow matching removes that option: the noise *is* the state being
+    transported, so at small ``t`` the network's input is essentially pure noise and being a
+    function of it is unavoidable.
+
+    **Where the spatial coherence comes from.** Not from correlated base noise -- the base is iid
+    Gaussian per point. It comes from the inherited block stack, which already self-attends over
+    the target points grouped by cell (``pred_self_attention``, varlen over ``tcs_lens``). That
+    makes the model ``p(y_cell | latent)`` jointly over the ~750 points of a cell rather than
+    point-by-point, which is exactly what pointwise quantiles structurally cannot do. Set
+    ``pred_self_attention: True`` or this decoder degenerates into an expensive per-point sampler.
+
+    Training (conditional flow matching, Lipman et al. 2023). With ``y1`` the target and
+    ``y0 ~ N(0, I)``, on the linear path ``y_t = (1-t) y0 + t y1`` the target velocity is
+    ``u = y1 - y0``. The module returns ``y0 + v_theta`` rather than ``v_theta``, so the ordinary
+    ``mse`` term of ``LossPhysical`` computes ``||y1 - (y0 + v)||^2 = ||u - v||^2`` -- the flow
+    matching objective exactly, with the existing channel/point weighting and NaN masking, and
+    with no new loss function or plumbing.
+
+    Evaluation. Integrates ``dy/dt = v_theta`` from ``t=0`` to ``1`` with ``flow_num_steps`` Euler
+    steps, drawing ``pred_head.ens_size`` independent samples. Validation MSE is therefore a
+    *sample* MSE and is expected to sit above a regression arm's by construction -- read the
+    structure function instead, and specifically member-SF against mean-SF: a coherent generator
+    has member-SF close to the target while mean-SF collapses.
+
+    Config consumed:
+        - ``cf.flow_num_steps`` : ODE steps at inference (default 24).
+        - ``cf.flow_dim_time``  : width of the sinusoidal time embedding (default 32).
+        - ``pred_head.ens_size``: number of samples drawn at evaluation.
+        - everything ``TargetPredictionEngineClassic`` consumes.
+
+    Stage-2 sharpening levers (all default to the plain behaviour above):
+        - ``cf.flow_solver``        : ``euler`` | ``heun``.
+        - ``cf.flow_time_sampling`` : ``uniform`` | ``logit_normal`` (+ ``_logit_mean/_std``).
+        - ``cf.flow_cond_dropout``  : training-time conditioning dropout, enables guidance.
+        - ``cf.flow_guidance``      : sampling-time guidance weight ``w``.
+
+    The intended use of the last two: an over-dispersed generator (members carrying *more*
+    fine-scale variance than their own ensemble mean) is concentrated by fine-tuning with
+    ``flow_cond_dropout: 0.1`` and then sampling with ``w > 1``. Because ``w`` is a sampling
+    knob, one fine-tune yields the whole diversity/fidelity curve.
+    """
+
+    def __init__(
+        self,
+        cf,
+        dims_embed,
+        dim_coord_in,
+        tr_dim_head_proj,
+        tr_mlp_hidden_factor,
+        softcap,
+        stream_config: dict,
+        num_channels: int,
+    ):
+        dim_time = int(cf.get("flow_dim_time", 32))
+        assert dim_time % 2 == 0, f"flow_dim_time must be even, got {dim_time}"
+        # the time embedding rides along with the coordinate frame in the AdaLN conditioning,
+        # so the inherited stack must be built for the widened aux vector
+        super(FlowMatchingPointDecoder, self).__init__(
+            cf,
+            dims_embed,
+            dim_coord_in + dim_time,
+            tr_dim_head_proj,
+            tr_mlp_hidden_factor,
+            softcap,
+            stream_config=stream_config,
+        )
+        self.name = f"FlowMatchingPointDecoder_{stream_config['name']}"
+
+        self.dim_time = dim_time
+        self.num_channels = num_channels
+        self.num_steps = int(cf.get("flow_num_steps", 24))
+
+        # --- stage-2 sharpening levers. All default to the original behaviour exactly.
+        self.time_sampling = str(cf.get("flow_time_sampling", "uniform"))
+        self.time_logit_mean = float(cf.get("flow_time_logit_mean", 0.0))
+        self.time_logit_std = float(cf.get("flow_time_logit_std", 1.0))
+        self.solver = str(cf.get("flow_solver", "euler"))
+        assert self.solver in ("euler", "heun"), f"unknown flow_solver '{self.solver}'"
+        # classifier-free guidance: dropout is a TRAINING knob, guidance a SAMPLING knob
+        self.cond_dropout = float(cf.get("flow_cond_dropout", 0.0))
+        self.guidance = float(cf.get("flow_guidance", 1.0))
+        # always constructed (2048 floats) so checkpoints stay interchangeable whether or not
+        # guidance is in use; it is simply never exercised when both knobs are at their defaults
+        self.null_cond = FlowNullConditioning(cf.ae_global_dim_embed)
+
+        # current ODE state -> query token, and decoded token -> velocity
+        self.embed_state = torch.nn.Linear(num_channels, dims_embed[0])
+        # Default init on purpose. Zero-initialising an output head is the usual trick for a
+        # *gated residual* branch, but here the head is the only path from the block stack to
+        # the loss: with zero weights the gradient w.r.t. the decoded tokens is exactly zero, so
+        # the whole stack and embed_state would receive no gradient at all on the first step.
+        self.vel_head = torch.nn.Linear(dims_embed[-1], num_channels)
+
+    def velocity(self, y_t, t, latent, output, latent_lens, output_lens, coordinates):
+        """One evaluation of ``v_theta(y_t, t, token, coords)`` -> ``[N, num_channels]``."""
+        q = output + self.embed_state(y_t.to(output.dtype))
+        aux = torch.cat([coordinates, flow_time_embedding(t, self.dim_time)], dim=-1)
+        tokens = super().forward(latent, q, latent_lens, output_lens, aux)
+        return self.vel_head(tokens)
+
+    def guided_velocity(self, y_t, t, latent, output, latent_lens, output_lens, coordinates):
+        """Velocity with classifier-free guidance applied (sampling only).
+
+        ``v = v_uncond + w * (v_cond - v_uncond)``. ``w > 1`` extrapolates away from the
+        unconditional field, concentrating the sampler toward the conditional mode -- i.e. it
+        trades diversity for fidelity, which is the direct remedy for an over-dispersed
+        generator. ``w == 1`` is plain conditional sampling and costs one evaluation, not two.
+
+        Only meaningful if the model was trained with ``flow_cond_dropout > 0``; otherwise the
+        null token never received gradient and ``v_uncond`` is noise.
+        """
+        v_c = self.velocity(y_t, t, latent, output, latent_lens, output_lens, coordinates)
+        if self.guidance == 1.0:
+            return v_c
+        v_u = self.velocity(
+            y_t,
+            t,
+            self.null_cond.expand_to(latent),
+            output,
+            latent_lens,
+            output_lens,
+            coordinates,
+        )
+        return v_u + self.guidance * (v_c - v_u)
+
+    def sample(self, latent, output, latent_lens, output_lens, coordinates, ens_size):
+        """Integrate the probability flow ODE; returns ``[ens_size, N, num_channels]``."""
+        n = output.shape[0]
+        dt = 1.0 / self.num_steps
+        preds = []
+        # never needed with gradients: an unrolled 24-step ODE would hold 24x the activations
+        with torch.no_grad():
+            for _ in range(ens_size):
+                y = torch.randn((n, self.num_channels), device=output.device, dtype=torch.float32)
+                for i_step in range(self.num_steps):
+                    t = torch.full((n, 1), i_step * dt, device=output.device, dtype=torch.float32)
+                    v1 = self.guided_velocity(
+                        y, t, latent, output, latent_lens, output_lens, coordinates
+                    ).float()
+                    if self.solver == "heun":
+                        # 2nd-order predictor/corrector: halves the O(dt) discretisation error of
+                        # Euler at 2x the evaluations per step. Compare at matched NFE, i.e.
+                        # heun with num_steps N against euler with 2N.
+                        t_next = torch.full(
+                            (n, 1), (i_step + 1) * dt, device=output.device, dtype=torch.float32
+                        )
+                        v2 = self.guided_velocity(
+                            y + dt * v1,
+                            t_next,
+                            latent,
+                            output,
+                            latent_lens,
+                            output_lens,
+                            coordinates,
+                        ).float()
+                        y = y + dt * 0.5 * (v1 + v2)
+                    else:
+                        y = y + dt * v1
+                preds.append(y)
+        return torch.stack(preds, 0)
+
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        target=None,
+        ens_size=1,
+    ):
+        """
+        Args beyond the TargetPredictionEngineClassic contract:
+            target   : ``[N, num_channels]`` ground truth, required in training mode and ignored
+                in eval. Must be in the decoder's point order (it is: ``LossPhysical`` pairs
+                prediction and target by a plain reshape, with no permutation).
+            ens_size : samples to draw in eval mode.
+
+        Returns:
+            ``[1, N, num_channels]`` in training (``y0 + v``, so plain mse is the flow-matching
+            loss) or ``[ens_size, N, num_channels]`` in eval (integrated samples).
+        """
+        if not self.training:
+            return self.sample(latent, output, latent_lens, output_lens, coordinates, ens_size)
+
+        assert target is not None, (
+            "FlowMatchingPointDecoder needs the target during training to build the "
+            "probability path; predict_decoders must pass it."
+        )
+        y1 = target.float()
+        y0 = torch.randn_like(y1)
+        # masked / spoofed targets are NaN. Substituting y0 gives them zero velocity instead of
+        # poisoning y_t; the loss masks these points anyway, so they contribute no gradient.
+        y1 = torch.where(torch.isfinite(y1), y1, y0)
+
+        t = sample_flow_time(
+            y1.shape[0],
+            y1.device,
+            y1.dtype,
+            mode=self.time_sampling,
+            logit_mean=self.time_logit_mean,
+            logit_std=self.time_logit_std,
+        )
+        y_t = (1.0 - t) * y0 + t * y1
+
+        # Conditioning dropout for classifier-free guidance. Written as a blend rather than an
+        # if/else on purpose: DDP runs with _set_static_graph(), which requires the same set of
+        # participating parameters every iteration. A branch would leave null_latent unused on
+        # ~90% of steps and trip that. With mask == 0 the expression is exactly `latent`.
+        lat = latent
+        if self.cond_dropout > 0.0:
+            mask = (torch.rand((), device=latent.device) < self.cond_dropout).to(latent.dtype)
+            lat = (1.0 - mask) * latent + mask * self.null_cond.expand_to(latent)
+
+        v = self.velocity(y_t, t, lat, output, latent_lens, output_lens, coordinates)
+        return (y0 + v.float()).unsqueeze(0)
+
+
 @dataclasses.dataclass
 class LatentState:
     """
