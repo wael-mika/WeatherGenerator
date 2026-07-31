@@ -1009,10 +1009,10 @@ def sample_flow_time(
 class FlowNullConditioning(torch.nn.Module):
     """Learned null conditioning token for classifier-free guidance.
 
-    Its own module for the its own module so warm starts work: ``load_model_state``
-    re-initialises missing checkpoint keys by calling ``to_empty()`` + ``reset_parameters()`` on
-    the highest-level module covering them. A bare parameter on the decoder would make that root
-    the whole decoder and discard the inherited weights.
+    It is its own module so that warm starts keep working: ``load_model_state`` re-initialises
+    missing checkpoint keys by calling ``to_empty()`` + ``reset_parameters()`` on the
+    highest-level module covering them. A bare parameter on the decoder would make that root the
+    whole decoder and discard every inherited weight.
     """
 
     def __init__(self, dim_kv: int):
