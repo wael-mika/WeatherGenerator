@@ -35,6 +35,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
+from weathergen.utils.utils import is_stream_forcing
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -606,9 +607,23 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         for timestep_idx in range(self.output_offset, num_output_steps):
             step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
 
-            rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
+            # Skip target collection for forcing streams (they never produce
+            # predictions) and for streams with no target channels. Collecting the
+            # target is pointless in both cases -- it always comes back empty and is
+            # spoofed below anyway. Happens e.g. when a forcing stream (ERA5_in)
+            # declares `target:` channels in its config but its zarr does not cover
+            # the full run time range (imerg spans 1998-2024 while the ERA5_in v6
+            # zarr is 2016-2023).
+            stream_has_targets = stream_ds[0].get_target_num_channels() > 0 and (
+                not is_stream_forcing(stream_ds[0].stream_info)
+            )
 
-            if rdata.is_empty():
+            if stream_has_targets:
+                rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
+            else:
+                rdata = None
+
+            if rdata is None or rdata.is_empty():
                 # work around for https://github.com/pytorch/pytorch/issues/158719
                 # create non-empty mean data instead of empty tensor
                 time_win = self.time_window_handler.window(step_forecast_dt)
