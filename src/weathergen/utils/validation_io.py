@@ -56,8 +56,16 @@ def write_output(
     # ODE denoising step (the trajectory). The batch only has the original physical
     # forecast indices, so synthesize a contiguous run of indices starting at the
     # original first index to cover every entry in model_output / target_aux_out.
+    #
+    # Both `physical` lists are pre-allocated as [{} for _ in range(output_len)] and written at
+    # ABSOLUTE step indices (see ModelOutput.__init__ / TargetAuxOutput.__init__), so their length
+    # is output_len -- NOT the number of forecast steps. With output_offset > 0 the leading slots
+    # stay empty and len(physical) exceeds len(timestep_idxs) for perfectly ordinary runs, e.g.
+    # offset 1 + 2 steps gives len 3 vs idxs [1, 2]. Comparing those two directly made this fire
+    # spuriously and synthesize [1, 2, 3], indexing one past the end. Compare against the highest
+    # absolute index the batch already covers so it only triggers on genuine trajectory inflation.
     n_pred_steps = len(model_output.physical)
-    if n_pred_steps > len(timestep_idxs):
+    if n_pred_steps > timestep_idxs[-1] + 1:
         timestep_idxs = list(range(forecast_offset, forecast_offset + n_pred_steps))
 
     targets_lens = []
