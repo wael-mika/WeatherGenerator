@@ -131,6 +131,20 @@ class DataReaderAnemoi(DataReaderTimestep):
         if stream_info.get("geoinfo_channels") is None:
             self.geoinfo_idx = self.select_geoinfo_channels(ds)
             self.geoinfo_channels = [ds.variables[i] for i in self.geoinfo_idx]
+        elif stream_info.get("geoinfo_channels_store_order", False):
+            # Opt-in for JEPA-lineage checkpoints (srdrwfy6/af90zz71 and the branch's own
+            # jepa_* stream dirs). The code that trained them had the strict-lookup branch below
+            # commented out, so geoinfo always came from select_geoinfo_channels: the request
+            # INTERSECTED with the store, ordered by store index. Two things break without this:
+            #  - "noise_time" is a sentinel, not a store variable -- it tells the sampler to switch
+            #    on add_geoinfo_noise, and a strict index() lookup raises ValueError at reader init;
+            #  - store-index order differs completely from config order for the o96 store, so the
+            #    strict path would hand the pretrained model a permuted geoinfo block. That does not
+            #    crash; it silently corrupts the representation.
+            # Default stays False so checkpoints trained through the strict path (c71eo6pu,
+            # gkm6as6m, rck9wgm7 and everything on develop) keep config order.
+            self.geoinfo_idx = self.select_geoinfo_channels(ds)
+            self.geoinfo_channels = [ds.variables[i] for i in self.geoinfo_idx]
         else:
             self.geoinfo_channels = stream_info.get("geoinfo_channels")
             self.geoinfo_idx = [ds.variables.index(ch) for ch in self.geoinfo_channels]
