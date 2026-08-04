@@ -343,7 +343,9 @@ class Trainer(TrainerBase):
             "num_workers": cf.data_loading.num_workers,
         }
         self.data_loader = torch.utils.data.DataLoader(self.dataset, **loader_params, sampler=None)
-        # loader_params["num_workers"]=  0
+        loader_params["num_workers"] = cf.data_loading.get(
+            "num_workers_validation", cf.data_loading.num_workers
+        )
         self.data_loader_validation = torch.utils.data.DataLoader(
             self.dataset_val, **loader_params, sampler=None
         )
@@ -1227,7 +1229,7 @@ class Trainer(TrainerBase):
             skip_flag = torch.tensor(
                 [int(should_skip)], dtype=torch.int32, device=self.device or torch.device("cpu")
             )
-            torch.distributed.broadcast(skip_flag, src=0)
+            torch.distributed.all_reduce(skip_flag, op=torch.distributed.ReduceOp.MAX)
             should_skip = bool(skip_flag.item())
 
         return should_skip
@@ -1242,10 +1244,11 @@ class Trainer(TrainerBase):
         if not self.loss_spike_cfg.enabled:
             return False
 
+        # each rank checks its local loss; the skip decision is then all-reduced (OR) so
+        # that a spike / non-finite loss on any rank skips the batch on all ranks
         should_skip = False
-        if not is_root():
-            return self._sync_loss_spike_skip(should_skip)
-
+        local_anomaly = False
+        baseline, ratio = float("nan"), float("nan")
         is_finite = np.isfinite(loss_value)
         min_history = int(self.loss_spike_cfg.min_history)
         if len(self.loss_spike_history) >= min_history:
@@ -1253,14 +1256,19 @@ class Trainer(TrainerBase):
             ratio = loss_value / baseline if baseline > 0 else np.inf
             is_large_enough = loss_value >= float(self.loss_spike_cfg.loss_threshold)
             is_spike = ratio >= float(self.loss_spike_cfg.ratio_threshold)
-            if (is_finite and is_large_enough and is_spike) or not is_finite:
-                self._write_loss_spike_record(loss_value, baseline, ratio, batch, mini_epoch, bidx)
-                should_skip = bool(self.loss_spike_cfg.skip_batch)
+            local_anomaly = (is_finite and is_large_enough and is_spike) or not is_finite
+            should_skip = local_anomaly and bool(self.loss_spike_cfg.skip_batch)
+
+        should_skip = self._sync_loss_spike_skip(should_skip)
+
+        # logging stays rank-0-only; record fields are rank 0's local values
+        if is_root() and (local_anomaly or should_skip):
+            self._write_loss_spike_record(loss_value, baseline, ratio, batch, mini_epoch, bidx)
 
         if is_finite and not should_skip:
             self.loss_spike_history.append(float(loss_value))
 
-        return self._sync_loss_spike_skip(should_skip)
+        return should_skip
 
     def _log_instant_grad_norms(self, stage: Stage):
         """
@@ -1291,8 +1299,8 @@ class Trainer(TrainerBase):
             if is_root():
                 if stage == VAL:
                     logger.info(
-                        f"""validation{stage_suffix} ({self.cf.general.run_id}) : {mini_epoch:03d} : 
-                        {np.nanmean(avg_loss)}"""
+                        f"""validation{stage_suffix} ({self.cf.general.run_id}) : 
+                        {mini_epoch:03d} : {np.nanmean(avg_loss)}"""
                     )
 
                 elif stage == TRAIN:
