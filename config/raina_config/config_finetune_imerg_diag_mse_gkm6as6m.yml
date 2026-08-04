@@ -1,0 +1,129 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run gkm6as6m (ERA5 + georing/AVHRR obs, HIGHRES
+# h512 obs set) -- MSE variant. Same recipe as config_finetune_imerg_diag_mse_rck9wgm7.yml.
+#
+# Stream set: the pretraining INPUT (forcing) streams (ERA5_in + IASI PC + AVHRR + geo IR/VIS)
+# reproduced verbatim from the saved checkpoint config, plus IMERG as the ONLY diagnostic/
+# output stream. The pretraining output stream (ERA5) is intentionally dropped: the model is
+# trained exclusively on predicting IMERG from the frozen pretrained representation.
+#
+# gkm6as6m is the HIGHRES arm (h512 SEVIRI/GOES/HIMAWARI + GOES_ABI_VIS_HIRES); c71eo6pu is
+# the matching o256 LOWRES arm. Their obs stream sets differ, hence separate stream dirs.
+#
+# Compatibility with the checkpoint (verified against model_gkm6as6m_latest.json):
+#   - ae_local_num_queries 1, decoder_type PerceiverIOCoordConditioning, healpix_level 5,
+#     no class/register tokens -> builds cleanly under this branch's code.
+#   - the pretraining forecast block (6h / offset 1 / 2 steps / fixed), training_mode
+#     ["masking"] and the forecasting masker below are what the checkpoint already used.
+#   - ERA5_in is the aifs-ea n320 1h zarr (1979-2024), NOT the deleted aifs-od o96 v6.
+#
+# MUST launch from gkm6as6m_raina, not gkm6as6m: launch-slurm ships CODE from the
+# --from-run-id run's snapshot, and gkm6as6m's snapshot predates this branch's CRPS /
+# geoinfo-synthesis / forcing-target-skip fixes.
+#
+# Run:
+#   uv run train_continue --from-run-id gkm6as6m_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_mse_gkm6as6m.yml
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_gkm6as6m/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# No decoder latent-perturbation ensemble in the MSE variant.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_mse_from_gkm6as6m"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# HOST-RAM bound, NOT a comparability knob. Run c4hua7ig (2 nodes, workers 10) was OOM-killed
+# in mini_epoch 0 train before a single loss line: trainer.py builds a train AND a validation
+# DataLoader, both with data_loading.num_workers, so 4 ranks/node = 40 worker processes/node
+# during training and up to 80 when validation spawns its own set. Each worker buffers all 9
+# streams, and this HIGHRES arm carries h512 obs (token_size 1536 on five geo streams) -- ~4x
+# the o256 data of the c71eo6pu arm, which survived training at 10 and only died at validation.
+# 4 here vs 6 for c71eo6pu: the highres obs need the extra headroom. Raise only with evidence.
+data_loading:
+  num_workers: 4
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # The aifs-ea zarr spans 1979-2024 and IMERG 1998-2024, so earlier starts are possible here,
+  # but 2016-01-01 is kept to match every other IMERG-diag arm (rck9wgm7/ipnpqow8 were bounded
+  # by their 2016-2023 ERA5_in zarr). End 2022-12-31 = the pretraining end date.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Plain MSE on the only output stream (IMERG). Restated explicitly (this is also what the
+  # checkpoint config carries) so the MSE-vs-CRPS difference is visible in the config diff.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Pinned to match the other IMERG-diag arms (gkm6as6m pretrained with 128); val dates are
+# already identical (Oct-Dec 2023) across all arms.
+validation_config:
+  samples_per_mini_epoch: 256
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse
+  grid: null

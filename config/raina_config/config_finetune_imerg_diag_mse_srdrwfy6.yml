@@ -1,0 +1,166 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run srdrwfy6 (JEPA pretrain n0t6ejuo followed by a
+# 2-step 6h ERA5 forecast finetune; trained forecast engine, 16 blocks) -- MSE variant.
+#
+# NOTE this checkpoint's architecture (use_xsa, with_step_conditioning, swiglu, register
+# tokens, deep_ssl) is NOT supported by the current raina branch code. The run therefore
+# ships the srdrwfy6 code snapshot: slurm_weathergen_srdrwfy6_raina_dir/WeatherGenerator is a
+# copy of slurm_weathergen_srdrwfy6_dir/WeatherGenerator. Configs (this file + the streams
+# dir) are overlaid from the home clone at submit time by launch-slurm.py, so they only need
+# to exist here.
+#
+# Stream set (config/streams/imerg_diag_jepa/): the 8 pretraining input streams (ERA5_in
+# analysis + IASI + 5 geostationary + SurfaceCombined) copied VERBATIM from the srdrwfy6
+# snapshot's jepa_forecast_multi_data_all_years dir (all already `forcing: true`), with the
+# diagnostic ERA5 output stream REPLACED by IMERG as the only output stream.
+#
+# JEPA-specific conversion (recipe taken from srdrwfy6's own finetune config and the team's
+# config_decoder_surfacecombined_n0t6ejuo.yml template):
+#   - losses.student-teacher: {enabled: False, type: Disabled} -- the latent JEPA loss is
+#     filtered out by filter_config_by_enabled before instantiation; the physical loss block
+#     keeps srdrwfy6's name "forecast" so the merge is idempotent for this checkpoint.
+#   - model_input.random_easy / target_input.random_easy_target disabled; "forecasting"
+#     masker active (already the case in this checkpoint -- pinned for identity with the
+#     n0t6ejuo config).
+#   - deep_ssl disabled (already disabled here; pinned).
+#
+# COMPARABILITY: training setup matches the ipnpqow8/rck9wgm7/atmofs03 IMERG finetunes
+# (budget 64x4096, lr schedule, dates 2016-2022, fsteps 2, logging, optimizer pins, val 256 +
+# EMA 600, workers 10). time_window_step stays at this checkpoint's native 6h (accepted
+# deviation, same as the atmofs03 finetune).
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id srdrwfy6_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_mse_srdrwfy6.yml --nodes N
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_jepa/"
+
+# Freeze options -- keep exactly ONE active. Module tree of this architecture:
+# encoder (embeds+local+global+aggregation), forecast_engine, and per-stream decoder modules
+# (target_token_engines.*, pred_heads.*, embed_target_coords.*) which are all IMERG-fresh
+# here and must stay trainable. Regex follows the team's decoder-finetune template.
+# (a) pure decoder probe: encoder AND (pretrained, 16-block) forecast engine frozen.
+freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+# (b) forecast engine left trainable:
+# freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers;
+  # srdrwfy6 itself trained with spawn.
+  multiprocessing_method: "spawn"
+
+  desc: "imerg_diag_mse_from_srdrwfy6"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off (already off in this checkpoint; pinned for identity with the
+  # n0t6ejuo finetune config).
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # time_window_step/len NOT overridden: native 6h/6h of this checkpoint. Accepted
+  # deviation vs the 1h window step of the ipnpqow8/rck9wgm7 finetunes.
+
+  # Kept identical to the other IMERG finetunes for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Match the other IMERG finetunes (this checkpoint carries grad_clip 1.0,
+  # beta1 0.9875, beta2 0.994, eps 1e-08).
+  optimizer:
+    grad_clip: 0.8
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Latent JEPA loss OFF (filtered out by the enabled-flag); plain MSE on the only output
+  # stream (IMERG). The physical block keeps the name "forecast" this checkpoint already
+  # uses so both JEPA finetune configs produce the identical effective losses dict.
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Match the other IMERG finetunes (256 val samples, EMA halflife 600).
+validation_config:
+  samples_per_mini_epoch: 256
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Match the other IMERG finetunes (this checkpoint carries 6).
+data_loading:
+  num_workers: 10
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse
+  grid: null
