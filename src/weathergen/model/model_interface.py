@@ -315,10 +315,42 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
 
             # Get all modules for quick lookup and initialize the new ones
             all_modules = dict(model.named_modules())
-            for path in root_new_modules:
+            for path in sorted(root_new_modules):
+                module_to_init = all_modules.get(path)
+
+                if module_to_init is None:
+                    # `named_modules()` DEDUPLICATES shared submodules, so a module registered
+                    # under two names is listed only under the first one. MLP does exactly this:
+                    # it registers its norm as both `.lnorm` and `.layers.0`. `state_dict()` does
+                    # not deduplicate, so it emits both names -- and a checkpoint saved without
+                    # the alias reports `.lnorm.*` as "missing" even though those tensors were
+                    # already loaded under `.layers.0.*`. Re-initializing such a path would WIPE
+                    # pretrained weights, since it is the very same module object.
+                    # Attribute lookup (unlike named_modules) is not deduplicated, so resolve it
+                    # and decide from whether its parameters actually got materialized.
+                    try:
+                        aliased = model.get_submodule(path)
+                    except AttributeError:
+                        raise RuntimeError(
+                            f"Cannot resolve module '{path}' derived from missing checkpoint "
+                            f"keys; it is neither a named module nor reachable by attribute."
+                        ) from None
+
+                    still_meta = any(
+                        p.device.type == "meta" for p in aliased.parameters(recurse=True)
+                    )
+                    if not still_meta:
+                        # Already loaded under its other name -- nothing to do.
+                        if is_root():
+                            logger.info(
+                                f"Skipping {path}: alias of an already-loaded shared module"
+                            )
+                        continue
+                    # Genuinely uninitialized despite the aliasing -- fall through and init.
+                    module_to_init = aliased
+
                 if is_root():
                     logger.info(f"Initializing new module not found in checkpoint: {path}")
-                module_to_init = all_modules[path]
                 module_to_init.to_empty(device="cuda")
                 module_to_init.reset_parameters()
 
