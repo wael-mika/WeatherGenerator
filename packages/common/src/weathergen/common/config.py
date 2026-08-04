@@ -441,6 +441,12 @@ def load_merge_configs(
             base_config.pop("reset_modules", None)
     with open_dict(base_config):
         base_config.from_run_id = from_run_id
+        # streams from an overwrite's streams_directory replace inherited streams.
+        # `streams` is a dict keyed by stream name, so OmegaConf.merge would UNION it with the
+        # inherited one and silently resurrect streams the new directory deliberately omits
+        # (e.g. an IMERG-only decoder finetune would get the pretraining ERA5 output stream back).
+        if any(o.get("streams_directory") is not None for o in overwrite_configs):
+            base_config.streams = None
     # use OmegaConf.unsafe_merge if too slow
     c = OmegaConf.merge(base_config, private_config, *overwrite_configs)
     assert isinstance(c, Config)
