@@ -68,13 +68,30 @@ def init_model_and_shard(
         model.encoder.q_cells.requires_grad = False
 
     if with_ddp and not with_fsdp:
-        # create DDP model if running without FSDP
+        # `ddp_static_graph` is off by default, so existing runs are unchanged.
+        #
+        # Turn it on when DDP raises "Parameter ... has been marked as ready twice". That happens
+        # when one module is legitimately used more than once per iteration -- e.g. a stream's
+        # decoder runs at every output step, and `_get_output_length` is `offset + num_steps`, so
+        # a forecast config with offset 1 and num_steps 1 decodes twice. torch tolerated this
+        # until ~2.9 and now errors; the flow-matching pretrain l4m31jbd trained fine on an older
+        # torch with a byte-identical config.
+        #
+        # static_graph is the documented fix for both listed causes (reuse across checkpointed
+        # sub-graphs, and unused parameters), and it subsumes find_unused_parameters as long as
+        # the set of unused parameters is the SAME every iteration. That holds here: the flow
+        # decoder owns its velocity head and leaves `pred_heads` permanently unused. It would NOT
+        # hold for a model that varies which parameters participate from step to step.
+        static_graph = bool(cf.get("ddp_static_graph", False))
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             broadcast_buffers=True,
-            find_unused_parameters=cf.get("ddp_find_unused_parameters", True),
+            find_unused_parameters=(
+                False if static_graph else cf.get("ddp_find_unused_parameters", True)
+            ),
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
+            static_graph=static_graph,
         )
 
     elif with_ddp and with_fsdp:
