@@ -1,0 +1,112 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# 8-step rollout finetune continuing from hmpa42d2 (IMERG diagnostic decoder, MSE).
+#
+# WHY THE FORECAST ENGINE IS UNFROZEN HERE.
+# Verified from the saved model configs: the ENTIRE lineage trained at num_steps 2 with
+# policy "fixed" -- perrjey5 (2) -> c71eo6pu (2, istep 84122, freeze_modules "") ->
+# hmpa42d2 (2, istep 16300). The forecast engine has therefore NEVER been rolled out
+# past 2 steps. hmpa42d2 additionally froze it: its freeze regex ended in `.*forecast.*`,
+# leaving only 61 of 1846 params trainable (embed_target_coords + target_token_engines +
+# pred_heads). Asking that frozen engine for an 8-step rollout would compound 6 unseen
+# autoregressive steps through weights that cannot adapt. Dropping `.*forecast.*` below
+# unfreezes exactly the 192 forecast_engine params -- checked against the checkpoint's
+# key list, and none of them are also caught by `.*latent.*` -- taking trainable params
+# from 61 to 253. The encoder (1593 params) stays frozen.
+#
+# STREAMS ARE INHERITED, NOT REDECLARED. streams_directory is deliberately absent so the
+# 9 streams stored in hmpa42d2's config carry over. Setting it would blank the inherited
+# `streams` dict (see load_merge_configs) and force a full redeclaration.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id hmpa42d2 --config config/raina_config/config_finetune_imerg_diag_mse_hmpa42d2_8step.yml --nodes N
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#####################################
+
+# hmpa42d2's regex minus `.*forecast.*`: encoder frozen, forecast engine + IMERG decoder train.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+general:
+  desc: "imerg_diag_mse_from_hmpa42d2_8step"
+
+training_config:
+
+  # ABSOLUTE stop point, not "16 more": the loop is range(mini_epoch_base, num_mini_epochs) and
+  # mini_epoch_base is recovered from the inherited istep. hmpa42d2 ended at istep 16300, which
+  # resolves to base 32 (it completed its own 32 mini epochs), so 48 = 32 + 16.
+  # Setting 16 here would make range(32,16) empty and train nothing -- that is exactly how run
+  # re0jivry failed on the rxssbn0v config.
+  num_mini_epochs: 48
+  samples_per_mini_epoch: 4096
+
+  # Rollout curriculum, ramping 2 -> 8 instead of jumping straight to a depth the engine has
+  # never seen. "sequential_random" then draws each batch's depth uniformly from
+  # [min(list), current_max], which keeps short-horizon skill from decaying while the long
+  # horizons are learned. Use "sequential" for a strict ramp with no depth mixing.
+  #
+  # THE LIST IS INDEXED BY *ABSOLUTE* mini_epoch, NOT BY POSITION WITHIN THIS RUN:
+  #     idx = min(mini_epoch, len(num_steps) - 1);  fsm = num_steps[idx]
+  # This run executes mini epochs 32..47, so a bare 16-entry ramp would be indexed at
+  # min(32..47, 15) = 15 every time -- i.e. it would silently collapse to a constant 8 and the
+  # curriculum would not happen at all. The list is therefore 48 long: entries 0-31 are padding
+  # that is never reached (kept at 2), and the real 2->8 ramp occupies indices 32-47.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 8, 8]
+    policy: "sequential_random"
+
+  # Lower peak LR than hmpa42d2's 1e-4: that value was tuned for a 61-param decoder probe,
+  # whereas this run also moves a forecast engine carrying ~100k steps of pretraining.
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 3e-5
+    lr_final_decay: 1e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Tighter clip than hmpa42d2's 1.0: gradients now backprop through up to 8 autoregressive
+  # steps, so the spike risk is materially higher.
+  optimizer:
+    grad_clip: 0.8
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+# Validate at the FULL target depth every mini epoch, not at the curriculum's current depth
+# (validation_config is merged on top of training_config, so without this it would inherit
+# the ramping list and the score would not be comparable across mini epochs).
+validation_config:
+  samples_per_mini_epoch: 256
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_8step
+  grid: null

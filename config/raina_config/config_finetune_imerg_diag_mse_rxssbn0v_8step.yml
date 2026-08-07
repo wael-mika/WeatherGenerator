@@ -1,0 +1,91 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# 8-step IMERG rollout finetune continuing from rxssbn0v (IMERG diagnostic decoder, MSE).
+#
+# WHY THE FORECAST ENGINE STAYS FROZEN HERE -- UNLIKE THE hmpa42d2 8-STEP CONFIGS.
+# Verified from the saved model configs, this lineage is the opposite case to c71eo6pu's:
+#
+#     af90zz71 : forecast.num_steps 8, policy "fixed", istep 5072, and its freeze regex
+#                ('.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*')
+#                does NOT contain a forecast-engine term -- so the engine was TRAINABLE and
+#                was trained at the full 8-step rollout depth.
+#     rxssbn0v : run_history [[af90zz71_ssl,0],[nescpnb2,7640]], istep 18090, num_steps 2,
+#                freeze regex contains '.*forecast_engine.*' -- the engine has been frozen
+#                ever since, so its weights are still exactly af90zz71's 8-step-trained ones.
+#
+# The engine therefore already does 8 steps; nothing about it needs to adapt. What has never
+# seen steps 3-8 is the IMERG decoder, which was only ever trained against 2-step latents.
+# Keeping the engine frozen makes this a clean decoder-adaptation run and preserves af90zz71's
+# 8-step rollout exactly. Contrast hmpa42d2, whose whole lineage (perrjey5 -> c71eo6pu) topped
+# out at 2 steps and therefore did need the engine unfrozen.
+#
+# Frozen/trainable split checked against rxssbn0v_latest.chkpt: encoder 1350 + forecast_engine
+# 224 frozen, 69 trainable (embed_target_coords 1 + target_token_engines 64 + pred_heads 4).
+# IF YOU WANT THE ABLATION, delete '.*forecast_engine.*' from the regex below -- that unfreezes
+# exactly those 224 params (none are also caught by '.*latent.*'), giving 293 trainable. Lower
+# lr_max to ~3e-5 if you do, since 1e-4 was tuned for the 69-param decoder probe.
+#
+# NO CURRICULUM. num_steps is the scalar 8 with policy "fixed": every batch trains at 8 steps.
+# The 2->8 ramp used in the hmpa42d2 configs existed to protect an engine that had never rolled
+# out that far; that rationale does not apply here.
+#
+# STREAMS ARE INHERITED, NOT REDECLARED. streams_directory is deliberately absent so the 9
+# streams stored in rxssbn0v's config carry over (ERA5_in, IMERG_ANEMOI, SurfaceCombined,
+# METOP_ABC_AVHRR_IASI + 5 geostationary). Setting it would blank the inherited `streams` dict
+# (see load_merge_configs) and force a full redeclaration.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id rxssbn0v --config config/raina_config/config_finetune_imerg_diag_mse_rxssbn0v_8step.yml --nodes N
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#####################################
+
+# rxssbn0v's own regex, restated verbatim so the freeze intent is explicit rather than inherited.
+freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+general:
+  desc: "imerg_diag_mse_from_rxssbn0v_8step"
+
+training_config:
+
+  # num_mini_epochs is an ABSOLUTE stop point, not "16 more epochs":
+  #     for mini_epoch in range(mini_epoch_base, num_mini_epochs)
+  # and mini_epoch_base is recovered from the inherited istep (18090 here). Run re0jivry set
+  # this to 16, the base resolved to ~36, so range(36,16) was EMPTY -- it trained nothing, went
+  # straight to the final save_model(16) and wrote re0jivry_chkpt00016.chkpt. Zero "Mini_epoch"
+  # lines in that log confirm it.
+  #
+  # rxssbn0v itself resumed at mini_epoch 15 and reached 35 before its allocation ended, so this
+  # continuation resumes at 35-36. 52 therefore buys 16 (base 36) or 17 (base 35) epochs.
+  # CHECK THE FIRST "Mini_epoch N of 52: train." LINE and, if you need exactly 16, resubmit with
+  # num_mini_epochs = N + 16.
+  num_mini_epochs: 52
+  samples_per_mini_epoch: 4096
+
+  # The only substantive change from rxssbn0v: rollout depth 2 -> 8.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# Validate at the training depth, matching rxssbn0v's 256-sample budget.
+validation_config:
+  samples_per_mini_epoch: 256
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_8step
+  grid: null
