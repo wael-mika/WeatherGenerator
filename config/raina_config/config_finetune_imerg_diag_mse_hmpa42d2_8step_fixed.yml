@@ -50,6 +50,38 @@ freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*late
 general:
   desc: "imerg_diag_mse_from_hmpa42d2_8step_fixed"
 
+# OOM FIX. Runs x5k0r6z0 (2026-08-07, nodes jpbo-015-22/31) and yj9x1jhj (2026-08-09, nodes
+# jpbo-032-28/29) both died at Mini_epoch 32 with all 8 ranks at ~92.4 of 95 GiB, the identical
+# traceback (model.predict_decoders -> engines.py:959 -> attention.py:439) and the identical
+# "Tried to allocate 1.04 GiB". Two different allocations, two days apart, same failure => this
+# is deterministic, not a bad node.
+#
+# Why THIS arm and not the others: with the forecast engine unfrozen the autograd graph for all
+# 8 rollout steps is retained, and the decoder then adds every one of the 542080 N320 IMERG
+# points at each of those steps (inherited max_num_targets is -1). The rxssbn0v 8-step run
+# survives at the same depth precisely because its engine is frozen and retains no graph.
+#
+# Levers that do NOT work here: expandable_segments is already exported by
+# hpc/jupiter/weathergen_slurm.sh:62, and only ~0.4 GiB was reserved-but-unallocated, so
+# fragmentation is not the gap; batch_size_per_gpu is already 1 (derived from
+# model_input.num_samples); and more nodes leaves per-GPU memory unchanged under DDP.
+#
+# 131072 restores roughly the 2-step target budget that fitted (8 x 131072 = 1.05M points per
+# sample, vs 2 x 542080 = 1.08M before), a 4.1x cut against a 1.04 GiB shortfall. TRAINING ONLY:
+# trainer.inference() forces max_num_targets back to -1, so evaluation still scores full maps.
+# The obs streams in this same set already use 262144, and targets are resampled every step, so
+# all points are still seen over an epoch.
+#
+# Safe to set individual stream keys here BECAUSE streams_directory is absent: load_merge_configs
+# only blanks the inherited `streams` dict when an overwrite carries a streams_directory, so this
+# merges into hmpa42d2's inherited stream set rather than replacing it.
+#
+# Kept IDENTICAL in the curriculum arm -- a different cap between the two would confound the
+# depth-schedule comparison.
+streams:
+  IMERG_ANEMOI:
+    max_num_targets: 131072
+
 training_config:
 
   # ABSOLUTE stop point, not "16 more": the loop is range(mini_epoch_base, num_mini_epochs) and

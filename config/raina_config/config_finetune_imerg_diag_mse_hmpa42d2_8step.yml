@@ -36,6 +36,23 @@ freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*late
 general:
   desc: "imerg_diag_mse_from_hmpa42d2_8step"
 
+# SAME OOM FIX AS THE STRAIGHT-8 ARM -- needed here too, just later.
+# This arm has not OOM'd yet only because its curriculum is still at depth 2; it reaches depth 8
+# at mini epoch 44 and would then hit exactly what killed x5k0r6z0 and yj9x1jhj (all 8 ranks at
+# ~92.4 of 95 GiB inside model.predict_decoders, on two different node sets two days apart --
+# deterministic, not a bad node). With the forecast engine unfrozen the graph for all 8 rollout
+# steps is retained while the decoder adds all 542080 N320 points at every step.
+#
+# 131072 restores roughly the 2-step target budget that fitted (8 x 131072 = 1.05M points per
+# sample). TRAINING ONLY: trainer.inference() forces max_num_targets back to -1, so evaluation
+# still scores full maps. Targets are resampled every step, so all points are seen over an epoch.
+#
+# Kept IDENTICAL to the straight-8 arm: a different cap between the two would confound the
+# depth-schedule comparison this pair exists to make.
+streams:
+  IMERG_ANEMOI:
+    max_num_targets: 131072
+
 training_config:
 
   # ABSOLUTE stop point, not "16 more": the loop is range(mini_epoch_base, num_mini_epochs) and
