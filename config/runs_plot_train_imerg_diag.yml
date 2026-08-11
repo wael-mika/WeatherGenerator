@@ -1,0 +1,24 @@
+# Training/validation loss curves for the IMERG diagnostic-decoder MSE finetunes.
+# Descriptions double as legend entries (legend shows "R|X : run_id : description").
+#
+# Run (IMERG loss only, train + val):
+#   uv run plot_train -fy config/runs_plot_train_imerg_diag.yml \
+#     --streams IMERG_ANEMOI --channels avg --metrics mse \
+#     -o ./plots/imerg_diag_losses/ --legend-outside
+#
+# Notes:
+# - channels avg = mean over the tp forecast steps; use `--channels tp
+#   --forecast-steps 1 2` instead for per-step curves (zwx1z9hs has steps 1-4).
+# - IMERG is the only supervised stream in all four runs, so the additional
+#   *_train_avg.png (loss_avg) plot is identical to the IMERG curve.
+
+train:
+  plot:
+    nescpnb2:
+      description: "Jepa:af90zz71 on develop-ssl-diffusion-v1"
+    hmpa42d2:
+      description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1"
+    bpqbn9u5:
+      description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1, 8 steps"
+    # xv255s42:
+    #   description: "baseline atmofs03"

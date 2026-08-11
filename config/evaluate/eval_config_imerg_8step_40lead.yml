@@ -1,0 +1,154 @@
+# Evaluation: 8-step-trained IMERG diagnostic decoders probed out to 40 forecast steps.
+#
+#   yz3h0kyn  Forecast:c71eo6pu on develop-ssl-diffusion-v1, 8 steps
+#   z71y2ik8  Jepa:af90zz71    on develop-ssl-diffusion-v1, 8 steps
+#
+# Both stores carry forecast steps 1..40 at 6h => lead times +6h .. +240h (10 days). Both were
+# trained at 8 steps (+48h), so everything beyond fstep 8 is extrapolation well outside the
+# trained regime -- which is the point of the exercise.
+#
+# Run:
+#   uv run --offline evaluation --config config/evaluate/eval_config_imerg_8step_40lead.yml
+#
+# ---------------------------------------------------------------------------------------------
+# SAMPLE INDICES ARE NOT COMPARABLE BETWEEN THE TWO RUNS. Verified by reading the target `times`
+# out of both zarr stores: the two inference runs emitted their initialisation times in a
+# DIFFERENT ORDER, so plain `sample: "0-9"` on both would silently compare different forecasts.
+#
+#     init time      yz3h0kyn   z71y2ik8
+#     2023-06-01T12     0          0
+#     2023-06-01T18     6          1
+#     2023-06-02T00     1          2
+#     2023-06-02T06     7          3
+#     2023-06-02T12     2          4
+#     2023-06-02T18     8          5
+#     2023-06-03T00     3          6
+#     2023-06-03T06     9          7
+#     2023-06-03T12     4          8
+#     2023-06-03T18    10          9
+#
+# Each run therefore carries its OWN `streams:` block with the index list that selects those same
+# 10 initialisations. Note run_evaluation REPLACES default_streams wholesale when a run defines
+# `streams` (it does not deep-merge), so each block below has to be complete.
+# yz3h0kyn also holds inits 2023-06-04T00 (idx 5) and T06 (idx 11), which z71y2ik8 lacks; they
+# are excluded so both runs average over an identical set of 10 forecasts.
+#
+# PLOTTING SAMPLE: 2023-06-02T00, i.e. idx 1 for yz3h0kyn and idx 2 for z71y2ik8 -- one sample,
+# 40 lead times, and deliberately NOT the first initialisation as requested.
+# ---------------------------------------------------------------------------------------------
+
+max_workers: 16
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precip histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres/6h: 0.1 mm ... 20 mm
+      # BoundaryNorm uses extend="both": needs len(levels)+1 colors (6 bins + 2 extensions)
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"
+        - "#BEDAE5"
+        - "#80B5CC"
+        - "#5691B3"
+        - "#4B6E9C"
+        - "#424B83"
+        - "#45596D"
+        - "#5B9E4C"
+
+evaluation:
+  metrics:
+    - seeps              # PRIMARY. Equitable precip score; needs the IMERG climatology below.
+    - rmse
+    - mae
+    - bias               # is the model drying out / wetting up as lead time grows?
+    # ACTIVITY: fact/tact/acc are NOT usable for this stream and are deliberately absent.
+    # They all need a climatological MEAN (_calc_act does c.sel(statistic="mean")), but BOTH
+    # IMERG climatologies on this system carry only statistic = [prob_dry,
+    # light_heavy_threshold] -- the two SEEPS parameters. Requesting fact raised
+    # KeyError: "not all values found in index 'statistic'" and aborted the whole run.
+    #
+    # froct/troct are the climatology-free stand-in for the same question. They are the mean
+    # absolute change between consecutive forecast steps (calc_change_rate), so:
+    #   froct decaying toward 0 while troct stays flat == the forecast going static and
+    #   over-smoothed with lead time, i.e. the same collapse-to-climatology signature that
+    #   an activity plot would have shown.
+    - froct              # forecast rate of change vs lead time
+    - troct              # target rate of change -- the reference line for froct
+    - ets:
+        thresh: 0.001    # 1 mm/6h event detection skill
+    - fbi:
+        thresh: 0.001    # 1 mm/6h frequency bias (>1 wet, <1 dry)
+  summary_plots: true            # the key output: every metric vs lead time, both runs overlaid
+  plot_score_init_timeseries: true
+  ratio_plots: false
+  heat_maps: false
+  score_cards: false
+  bar_plots: false
+  # Spatial score maps are off: 40 fsteps x 3 regions x 9 metrics x 2 runs is a lot of PNGs for
+  # little extra insight here. Flip to true if you want to see WHERE skill is lost.
+  plot_score_maps: false
+  plot_score_animations: false
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  summary_dir: "./plots/imerg_8step_40lead/"
+  plot_ensemble: "members"
+
+run_ids:
+
+  yz3h0kyn:
+    label: "Forecast:c71eo6pu on develop-ssl-diffusion-v1, 8 steps"
+    results_base_dir: "/e/scratch/weatherai/shared_work/results/yz3h0kyn"
+    runplot_base_dir: "./plots/imerg_8step_40lead/score_maps/yz3h0kyn/"
+    streams:
+      IMERG_ANEMOI:
+        # IMERG only covers 60S-60N, so nhem/shem are effectively 0-60N and 60S-0.
+        regions: ["global", "nhem", "shem"]
+        channels: ["tp"]
+        # Pinned explicitly: SEEPS (and acc/fact/tact) need this, and auto-resolution from a
+        # run's stored data_path_aux has previously returned None and left SEEPS silently NaN.
+        climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"                 # 1..40
+          sample: [0, 6, 1, 7, 2, 8, 3, 9, 4, 10]   # the 10 inits shared with z71y2ik8
+          ensemble: "mean"                     # ens_size is 1, so this is a no-op
+        # plotting:
+        #   sample: [1]                          # 2023-06-02T00
+        #   forecast_step: "all"                 # all 40 lead times for that one init
+        #   ensemble: "mean"
+        #   plot_maps: true
+        #   plot_target: true                    # IMERG truth alongside, for eyeball verification
+        #   plot_bias: false
+        #   plot_histograms: true                # distribution drift as lead time grows
+        #   plot_animations: false
+        #   plot_timeseries: false
+
+  z71y2ik8:
+    label: "Jepa:af90zz71 on develop-ssl-diffusion-v1, 8 steps"
+    results_base_dir: "/e/scratch/weatherai/shared_work/results/z71y2ik8"
+    runplot_base_dir: "./plots/imerg_8step_40lead/score_maps/z71y2ik8/"
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"                 # 1..40
+          sample: "0-9"                        # same 10 inits as yz3h0kyn's list above
+          ensemble: "mean"
+        plotting:
+          sample: [2]                          # 2023-06-02T00 -- same forecast as yz3h0kyn idx 1
+          forecast_step: "all"
+          ensemble: "mean"
+          plot_maps: true
+          plot_target: true
+          plot_bias: false
+          plot_histograms: true
+          plot_animations: false
+          plot_timeseries: false
