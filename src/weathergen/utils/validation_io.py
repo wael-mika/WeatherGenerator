@@ -21,6 +21,41 @@ from weathergen.utils.utils import is_stream_reconstructed
 _logger = logging.getLogger(__name__)
 
 
+def _apply_output_clamp(data: torch.Tensor, stream_info) -> torch.Tensor:
+    """
+    Clamp denormalized predictions to a physically admissible range.
+
+    Configured per stream, e.g. for precipitation::
+
+        IMERG_ANEMOI:
+          output_clamp:
+            min: 0.0
+
+    Both bounds are optional; omitting the key entirely (the default) is a no-op.
+
+    This deliberately runs AFTER denormalization and is applied to predictions only.
+    A non-negativity constraint cannot be expressed as a `pred_head.final_activation`,
+    because the head emits normalized values and normalization is (x - mean) / stdev:
+    for IMERG tp (mean 0.676 mm/6h, stdev 3.26 mm/6h) physical zero sits at normalized
+    -0.2074, so a relu/softplus head would floor predictions at the mean and make it
+    impossible to predict dry -- which is ~69% of the field. Clamping in physical units
+    after denormalization applies the constraint where it is actually meaningful, and
+    leaves the training loss (computed in normalized space) untouched.
+
+    Targets are never clamped: they are the verification truth and must be written as read.
+    """
+    clamp_cfg = stream_info.get("output_clamp") if stream_info is not None else None
+    if clamp_cfg is None:
+        return data
+
+    c_min = clamp_cfg.get("min")
+    c_max = clamp_cfg.get("max")
+    if c_min is None and c_max is None:
+        return data
+
+    return data.clamp(min=c_min, max=c_max)
+
+
 def write_output(
     cf,
     val_cfg,
@@ -119,8 +154,11 @@ def write_output(
                         t_coords = t_coords[idxs_inv]
                         t_times = t_times[idxs_inv]
 
-                    # denormalize data if requested and map to storage format
-                    preds_s += [dn_data(sname, pred.to(fp32)).detach().cpu().numpy()]
+                    # denormalize data if requested and map to storage format.
+                    # Predictions are clamped to the stream's admissible physical range (no-op
+                    # unless `output_clamp` is configured); targets are left untouched.
+                    pred_dn = _apply_output_clamp(dn_data(sname, pred.to(fp32)), cf.streams[sname])
+                    preds_s += [pred_dn.detach().cpu().numpy()]
                     targets_s += [dn_data(sname, target.to(fp32)).detach().cpu().numpy()]
 
                     # extract original target coords and times from target data
