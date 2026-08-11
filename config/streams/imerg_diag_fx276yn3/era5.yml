@@ -1,0 +1,130 @@
+# fx276yn3's diagnostic ERA5 OUTPUT stream, carried over VERBATIM from its own stream dir
+# (gjl6a0kb_reproduction_n320_new_channels_forecast_mnt_cw/era5.yml) except for the single
+# `reconstruct: false` line added at the end.
+#
+# WHY THIS FILE EXISTS AT ALL. Leaving era5.yml out of this directory does NOT remove the stream:
+# `streams` is a dict, so the merge with the inherited checkpoint config UNIONS it and ERA5 comes
+# straight back. That is how runs zk8jugvb and x5uptfho ended up with a LossPhysical.ERA5.mse
+# term alongside IMERG. This branch's config.py guards against it (base_config.streams = None),
+# but --from-run-id runs the PARENT SNAPSHOT's code, which predates the guard.
+#
+# Putting `streams: {ERA5: {reconstruct: false}}` in the finetune config does NOT work either:
+# _load_streams_in_config does `config.streams = load_streams(streams_directory)`, an ASSIGNMENT
+# that overwrites any explicit streams block in the same file before the merge happens. The
+# override has to live in the streams DIRECTORY, i.e. here.
+#
+# `reconstruct: false` removes the stream's physical decoder (model.py consults
+# utils.is_stream_reconstructed at decoder construction), so there is no pred_heads.ERA5, no ERA5
+# loss term, and ctr_streams drops back to 1 so IMERG's gradient is no longer halved. It is NOT
+# marked forcing: that would feed these 81 channels to the encoder as input, which this
+# checkpoint never saw (ERA5 was output-only, and ERA5_in already supplies the input).
+
+ERA5 :
+  type : anemoi
+  filenames : ['aifs-ea-an-oper-0001-mars-n320-1979-2024-1h-v2-with-era51.zarr']
+  stream_id : 1
+  source : ['10u', '10v', '2d', '2t', 'lcc', 'mcc', 'hcc', 'tcc', 'msl', 'skt', 'sp', 'ssrd', 'strd', 'q_10', 'q_1000', 'q_150', 'q_200', 'q_250', 'q_300', 'q_400', 'q_500', 'q_600', 'q_700', 'q_850', 'q_925', 't_10', 't_100', 't_1000', 't_150', 't_200', 't_250', 't_300', 't_400', 't_50', 't_500', 't_600', 't_700', 't_850', 't_925', 'u_10', 'u_100', 'u_1000', 'u_150', 'u_200', 'u_250', 'u_300', 'u_400', 'u_50', 'u_500', 'u_600', 'u_700', 'u_850', 'u_925', 'v_10', 'v_100', 'v_1000', 'v_150', 'v_200', 'v_250', 'v_300', 'v_400', 'v_50', 'v_500', 'v_600', 'v_700', 'v_850', 'v_925', 'z_10', 'z_100', 'z_1000', 'z_150', 'z_200', 'z_250', 'z_300', 'z_400', 'z_50', 'z_500', 'z_600', 'z_700', 'z_850', 'z_925']
+  # Targets emptied: with reconstruct:false this stream has no decoder and no loss
+  # term, so reading its 81 channels only burns host RAM. At 8 forecast steps that is
+  # 81 ch x 542080 pts x 4B x 8 steps = 1.41 GB per sample, ~11 GB across 8 dataloader
+  # workers -- all of it discarded. That is what SIGKILLed a worker in run h4rw3fa7.
+  target : []
+  geoinfo_channels : ['z', 'lsm', 'slor', 'sdor', 'insolation', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'cos_latitude', 'sin_latitude', 'cos_longitude', 'sin_longitude']
+  loss_weight : 1.
+  location_weight : cosine_latitude
+  token_size : 32
+  tokenize_spacetime : False
+  max_num_targets: 108416
+  diagnostic: True
+  embed : 
+    net : transformer
+    num_tokens : 1
+    num_heads : 4
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 4
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
+  channel_weights :
+    2t : 10.0
+    10u : 2.0
+    10v : 2.0
+    q_10: 1.0
+    q_50: 1.0
+    q_100: 1.0
+    q_150: 1.0
+    q_200: 1.0
+    q_250: 1.0
+    q_300: 1.0
+    q_400: 1.0
+    q_500: 1.0
+    q_600: 1.0
+    q_700: 1.0
+    q_850: 1.0
+    q_925: 1.0
+    q_1000: 1.0
+    t_10: 5.0
+    t_50: 5.0
+    t_100: 5.0
+    t_150: 5.0
+    t_200: 5.0
+    t_250: 5.0
+    t_300: 5.0
+    t_400: 5.0
+    t_500: 5.0
+    t_600: 5.0
+    t_700: 5.0
+    t_850: 5.0
+    t_925: 5.0
+    t_1000: 5.0
+    u_10: 1.0
+    u_50: 1.0
+    u_100: 1.0
+    u_150: 1.0
+    u_200: 1.0
+    u_250: 1.0
+    u_300: 1.0
+    u_400: 1.0
+    u_500: 1.0
+    u_600: 1.0
+    u_700: 1.0
+    u_850: 1.0
+    u_925: 1.0
+    u_1000: 1.0
+    v_10: 1.0
+    v_50: 1.0
+    v_100: 1.0
+    v_150: 1.0
+    v_200: 1.0
+    v_250: 1.0
+    v_300: 1.0
+    v_400: 1.0
+    v_500: 1.0
+    v_600: 1.0
+    v_700: 1.0
+    v_850: 1.0
+    v_925: 1.0
+    v_1000: 1.0
+    z_10: 10.0
+    z_50: 10.0
+    z_100: 10.0
+    z_150: 10.0
+    z_200: 10.0
+    z_250: 10.0
+    z_300: 10.0
+    z_400: 10.0
+    z_500: 10.0
+    z_600: 10.0
+    z_700: 10.0
+    z_850: 10.0
+    z_925: 10.0
+    z_1000: 10.0
+
+  # See header: disables the physical decoder for this stream.
+  reconstruct: false

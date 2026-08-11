@@ -1,0 +1,66 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder finetune
+# from pretrained run fx276yn3. This dir is fx276yn3's own stream set
+# (config/streams/gjl6a0kb_reproduction_n320_new_channels_forecast_mnt_cw/, taken from its code
+# snapshot) with the 9 forcing INPUT streams kept verbatim and the diagnostic ERA5 OUTPUT stream
+# (era5.yml, stream_id 1) replaced by this file. The zarr has a single variable named 'tp'.
+#
+# stream_id 40 follows the rest of the IMERG-diagnostic family rather than reusing ERA5's freed
+# id 1; it collides with none of the inputs (0, 10-14, 21, 22, 30).
+#
+# DECODER SHAPE IS COPIED FROM THE ERA5 OUTPUT STREAM IT REPLACES, not from the o96 IMERG configs
+# (imerg_diag_jepa/): embed_target_coords dim_embed 512, target_readout 4 layers / 4 heads,
+# pred_head 1 layer. Those are the decoder hyperparameters fx276yn3's now-FROZEN encoder and
+# forecast engine were trained to be read by, so keeping them avoids changing the latent ->
+# decoder interface at the same time as swapping the target variable.
+#
+# max_num_targets 108416 is likewise ERA5's own value. That matters: with an N320 grid (542080
+# points) an uncapped diagnostic decoder at 8 forecast steps is exactly what OOM'd runs x5k0r6z0
+# and yj9x1jhj at ~92.4 of 95 GiB. Inheriting ERA5's cap keeps per-step decoder load identical to
+# what this checkpoint already ran with. Training-only: trainer.inference() forces it back to -1,
+# so evaluation still scores full maps.
+#
+# The loss (mse) is set globally in the finetune config, not here -- IMERG is the only stream
+# with targets, so the global physical loss applies to it alone.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: -1
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Precipitation cannot be negative. Applied to PREDICTIONS ONLY, in physical units, after
+  # denormalization (validation_io._apply_output_clamp) -- so it affects written validation and
+  # inference output and leaves the training loss, which is computed in normalized space,
+  # completely untouched. Targets are never clamped: they are the verification truth.
+  #
+  # This must NOT be done as pred_head.final_activation. The head emits NORMALIZED values and
+  # normalization is (x - mean) / stdev; for this store mean = 0.676 mm/6h and stdev =
+  # 3.26 mm/6h, so physical zero sits at normalized -0.2074. A relu/softplus head would floor
+  # the output at normalized 0, i.e. 0.676 mm/6h everywhere, making it impossible to predict
+  # dry -- and 68.8% of IMERG is exactly dry, 88.1% below that floor (sampled over 1.6M points).
+  #
+  # `max` is available too; omit either bound to leave that side unbounded.
+  output_clamp:
+    min: 0.0
