@@ -11,7 +11,7 @@
 # one is training an auto-encoder
 fe_num_blocks: 16
 fe_num_heads: 16
-fe_dropout_rate: 0.1
+fe_dropout_rate: 0.2
 fe_with_qk_lnorm: True
 fe_layer_norm_after_blocks: [7]  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
 fe_impute_latent_noise_std: 0
@@ -37,7 +37,7 @@ latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True
 
-freeze_modules: ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*"
+freeze_modules: "" # ".*encoder.*|.*latent_pre_norm.*|.*latent_heads.*"
 
 norm_type: "LayerNorm"
 
@@ -46,7 +46,7 @@ zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 
 #####################################
 
-streams_directory: "./config/streams/jepa_forecast_multi_data_all_years/"
+streams_directory: "./config/streams/era5_georing_avhrr_synop_lowres_sjepa_fc/"
 streams: ???
 
 general:
@@ -71,23 +71,24 @@ general:
 
 # logging frequency in the training loop (in number of batches)
 train_logging:
-  terminal: 50
+  terminal: 100
   metrics: 20
   checkpoint: 500
-  log_grad_norms: False
+  log_grad_norms: True
 
 # parameters for data loading
 data_loading :
 
-  num_workers: 6
+  num_workers: 10
   rng_seed: ???
   repeat_data_in_mini_epoch : False
-  persistent_workers: True
+  persistent_workers: False
+  prefetch_factor: 1
 
   # pin GPU memory for faster transfer; it is possible that enabling memory_pinning with 
   # FSDP2 + DINOv2 can cause the job to hang and trigger a PyTorch timeout error.
   # If this happens, you can disable the flag, but performance will drop on GH200.
-  memory_pinning: True
+  memory_pinning: False
 
 
 # config for training
@@ -107,23 +108,23 @@ training_config:
     enabled: false
 
 
-  num_mini_epochs: 24
+  num_mini_epochs: 32
   samples_per_mini_epoch: 8192
   shuffle: True
 
   start_date: 1980-01-01T00:00
   end_date: 2022-12-31T00:00
 
-  time_window_step: 01:00:00
+  time_window_step: 06:00:00
   time_window_len: 06:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
-    lr_max: 8e-5
+    lr_max: 5e-5
     lr_final_decay: 2e-6
     lr_final: 0.0
     num_steps_warmup: 256
-    num_steps_cooldown: 512
+    num_steps_cooldown: 2048
     policy_warmup: "cosine"
     policy_decay: "constant"
     policy_cooldown: "linear"
@@ -144,10 +145,10 @@ training_config:
         enabled: False,
         type: Disabled,
         },
-    # "physical": {
-    #     enabled: False,
-    #     type: Disabled,
-    #     },
+    "physical": {
+        enabled: False,
+        type: Disabled,
+        },
     "forecast": {
         type: LossPhysical,
         loss_fcts: { "mse": { }, },
@@ -173,9 +174,10 @@ training_config:
 
   forecast :
       time_step: 06:00:00
-      num_steps: 3
+      num_steps: 2
       offset: 1
       policy: "fixed"
+
 
 # validation config; full validation config is merge of training and validation config
 validation_config: 
