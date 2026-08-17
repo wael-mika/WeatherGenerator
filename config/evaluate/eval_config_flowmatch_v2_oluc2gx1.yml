@@ -1,0 +1,135 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# FastEval for cdzn86wf -- the v2 flow-matching FORECAST arm (CERRA in + out, 8 channels).
+# All eight target variables, all four ensemble members.
+#
+# *** mini_epoch IS MANDATORY HERE. ***
+# `WeGenReader` defaults it to 0 (io/wegen_reader.py:48) and reads
+# `validation_chkpt{mini_epoch:05d}_rank*.zip`. NOTE: oluc2gx1 is an INFERENCE run, so chkpt00000 IS its only output and mini_epoch 0 is
+# correct here. The warning below applies to TRAINING runs, which are the ones with
+# `validate_before_training: True`, so chkpt00000 is the RANDOMLY-INITIALISED model -- the
+# default would silently plot noise. This differs from an inference run (e.g. kt8g6wey), where
+# chkpt00000 is the only and correct output. 27 is the last checkpoint cdzn86wf validated.
+#
+# Read the maps knowing this is a GENERATIVE arm:
+#   * plot MEMBERS, not just the ensemble mean -- the mean of 4 ODE draws is deliberately
+#     smoother than any member, and judging sharpness on it understates the arm.
+#   * validation MSE/RMSE is a SAMPLE error and sits above a regression arm by construction.
+#     Do not rank arms on it. Sharpness lives in the histograms and the member maps.
+#   * this arm FORECASTS CERRA (it is also an input), so it is not comparable with any
+#     pre-v2 CERRA arm, and persistence is strong at +6 h for 2t / t_850 / z_850.
+#
+# Fields are written at max_num_targets: 500000 (~13 km spacing), not the native 5.5 km grid,
+# so maps are a scatter of ~250k points per time slice. marker_size is set accordingly.
+#
+# RUN (CPU only, no GPU needed):
+#   uv run evaluation --config config/evaluate/eval_config_flowmatch_v2_cdzn86wf.yml
+# ===========================================================================================
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1          # native 5.5 km grid (~1.14M pts/slice), as used for kt8g6wey
+    # ranges from the 0.5/99.5 percentiles of this run's own target fields
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3 h; the tail matters more than the map range
+    2t:
+      vmin: 230
+      vmax: 300             # K
+    10si:
+      vmin: 0.0
+      vmax: 20.0            # m/s
+    r_850:
+      vmin: 5
+      vmax: 105             # %
+    t_850:
+      vmin: 245
+      vmax: 290             # K
+    u_850:
+      vmin: -20
+      vmax: 30              # m/s
+    v_850:
+      vmin: -15
+      vmax: 20              # m/s
+    z_850:
+      vmin: 10500
+      vmax: 16000           # m^2/s^2
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/cerra_flowmatching/oluc2gx1_fullres_ep27/"
+  plot_ensemble: true       # ens_size 4 -- draw MEMBERS; the mean understates a generative arm
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    # all eight targets. 10wdir is absent from this arm by design (circular; a squared error
+    # mis-penalises the 0/360 wrap), so it is not listed.
+    channels: ["tp", "2t", "10si", "r_850", "t_850", "u_850", "v_850", "z_850"]
+    evaluation:
+      forecast_step: [1]     # fstep 0 is source-only; 1 is the prediction step
+      sample: "all"
+      ensemble: "all"       # 4 ODE draws
+    plotting:
+      # inference auto-bumped samples 2 -> 4 (floor: world_size x batch_size), so cap the
+      # PLOTTING at the two requested samples; scoring above still uses all four.
+      sample: [0, 1]
+      # ONLY the first forecast step -- see the note at the foot of this file.
+      forecast_step: [1]
+      plot_maps: true
+      plot_bias: false
+      plot_target: true     # CERRA analysis beside the prediction -- the visual sharpness check
+      plot_histograms: true # tp tail: real extremes or speckle
+      plot_animations: false
+
+run_ids:
+  oluc2gx1:
+    # *** mini_epoch belongs HERE, in the per-run block -- not under `evaluation:`. ***
+    # run_evaluation.py:167 passes this block straight to WeatherGenZarrReader, which reads
+    # `eval_cfg.get("mini_epoch", 0)` (io/wegen_reader.py:48). Putting it under `evaluation:`
+    # is silently ignored and the reader falls back to 0 -- i.e. chkpt00000, the UNTRAINED
+    # model, because this run has validate_before_training: True. Verify in the log:
+    #   "Loading config from specified run_id and mini_epoch: ..._chkpt00027.json"
+    mini_epoch: 0
+    # `summary_dir` under `evaluation:` only controls the SUMMARY plots. Map and histogram
+    # output defaults to the run's own results directory (wegen_reader.py:60), i.e. it would
+    # land in results/cdzn86wf/plots/. These two keys redirect them; score jsons follow
+    # metrics_base_dir.
+    runplot_base_dir: "./plots/cerra_flowmatching/oluc2gx1_fullres_ep27"
+    metrics_base_dir: "./plots/cerra_flowmatching/oluc2gx1_fullres_ep27"
+    label: "v2 flow matching @ FULL 5.5 km resolution (from cdzn86wf ep27, ens4)"
+    color: "darkorange"
+
+# ---------------------------------------------------------------------------------------------
+# LEAD TIMES -- what "first forecast step" can and cannot select.
+#
+# The zarr holds exactly TWO fsteps: 0 = source only, 1 = target + prediction. `[1]` above is
+# therefore the one and only prediction step. What it does NOT collapse is the two TIMESTAMPS
+# inside that step: CERRA is 3-hourly in a 6 h window, so each sample carries two lead times
+# (e.g. T12:00 and T15:00) and the plotter writes one map per timestamp. There is no config
+# selector for that -- `forecast_step` maps to the zarr fstep, not to time. To get exactly one
+# map per variable per member, filter the written files by timestamp afterwards.
+# ---------------------------------------------------------------------------------------------

@@ -1,0 +1,123 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# FastEval for `li8s2voq` -- a 16-sample INFERENCE run of `ofyn3v5c` at NATIVE density.
+#
+# Produced by:
+#   uv run --offline --no-sync inference --from-run-id ofyn3v5c \
+#     --options streams.CERRA.max_num_targets=-1 \
+#              test_config.samples_per_mini_epoch=16 test_config.output.num_samples=16
+# `run_history: [['ofyn3v5c', 15860]]` confirms the lineage; `ofyn3v5c_latest.chkpt` (mini-epoch
+# 30) was loaded with all weights matching.
+#
+# *** decode_soft_blend_k IS DELIBERATELY ABSENT AND MUST STAY ABSENT. ***
+# `ofyn3v5c` is FlowMatching, and model.py:474 asserts the blend is off for it: blending averages
+# INDEPENDENT SAMPLES inside the transition band, re-smoothing exactly the fine structure a
+# generator exists to produce. It is valid only for a deterministic arm.
+#
+# *** LEAVE `mini_epoch` UNSET. *** This is an INFERENCE run, so it writes exactly one set,
+# `validation_chkpt00000_rank*.zip`, and `WeGenReader` defaults `mini_epoch` to 0 -- which is
+# correct HERE. That is the opposite of a TRAINING run (e.g. ofyn3v5c itself), where chkpt00000
+# is the model before the first gradient step and the default would silently plot noise.
+# Setting mini_epoch: 30 here would look right and find nothing.
+#
+# RUN (CPU only, no GPU):
+#   uv run --offline --no-sync evaluation --config config/evaluate/eval_config_li8s2voq_ofyn3v5c_infer.yml
+#
+# READ IN THIS ORDER -- this is a GENERATIVE arm and the usual order is misleading:
+#   1. MEMBER maps (plot_ensemble: true below). The ensemble mean of 4 ODE draws is smoother than
+#      any member BY CONSTRUCTION, so judging sharpness on the mean measures the averaging, not
+#      the decoder. Measured on this arm: member amplitude at 5.5 km was 4.87x the target's while
+#      the 4-member mean read 2.36x -- averaging halves it.
+#   2. The tp HISTOGRAM against the target. Does the tail exist, or is the sharpness speckle?
+#   3. rmse / mae / bias LAST, and never as the criterion. These score a SINGLE STOCHASTIC DRAW
+#      and carry the usual double penalty, so they sit above a regression arm's even when the
+#      field is better. See playground/docs/decode_verification_metric.md.
+# ===========================================================================================
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    # NATIVE density here (max_num_targets: -1 -> ~1.14 M CERRA points per time slice, 5.5 km),
+    # not the ~13 km of a 500k-target validation dump. Small markers or the scatter blots out
+    # the very fine structure this run exists to show.
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3 h; the tail matters more than the map range
+    2t:
+      vmin: 230
+      vmax: 300             # K
+    10si:
+      vmin: 0.0
+      vmax: 20.0            # m/s
+    r_850:
+      vmin: 5
+      vmax: 105             # %
+    t_850:
+      vmin: 245
+      vmax: 290             # K
+    u_850:
+      vmin: -20
+      vmax: 30              # m/s
+    v_850:
+      vmin: -15
+      vmax: 20              # m/s
+    z_850:
+      vmin: 10500
+      vmax: 16000           # m^2/s^2
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/cerra_flowmatching/li8s2voq_ofyn3v5c_infer16/"
+  plot_ensemble: true       # ens_size 4 -- draw the MEMBERS; the mean understates this arm
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    # all eight targets. 10wdir is absent from this arm by design (circular; a squared error
+    # mis-penalises the 0/360 wrap), so it is not listed.
+    channels: ["tp", "2t", "10si", "r_850", "t_850", "u_850", "v_850", "z_850"]
+    evaluation:
+      forecast_step: "all"
+      sample: "all"
+      ensemble: "all"       # 4 ODE draws
+    plotting:
+      # "all" rather than an index: samples are merged from every rank to global indices, and a
+      # literal [0] has produced "No sample in the selection" on runs sharded across ranks.
+      sample: "all"
+      forecast_step: "all"
+      plot_maps: true
+      plot_bias: false
+      plot_target: true     # CERRA analysis beside the prediction -- the visual sharpness check
+      plot_histograms: true # tp tail: real extremes or speckle
+      plot_animations: false
+
+run_ids:
+  li8s2voq:
+    # NO mini_epoch key -- see the header. The default of 0 is correct for an inference run.
+    runplot_base_dir: "./plots/cerra_flowmatching/li8s2voq_ofyn3v5c_infer16"
+    metrics_base_dir: "./plots/cerra_flowmatching/li8s2voq_ofyn3v5c_infer16"
+    label: "ofyn3v5c inference, 16 samples, native density, ens4"
+    color: "darkorange"

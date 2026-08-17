@@ -1,0 +1,231 @@
+# Evaluation: IMERG diagnostic decoder at 2 forecast steps — JEPA vs Forecast backbone
+#
+#   xfaps4wq  Forecast backbone (c71eo6pu_ssl -> hmpa42d2), 2-step decoder finetune
+#   r15j90ns  JEPA/SSL backbone (af90zz71_ssl -> nescpnb2), 2-step decoder finetune
+#
+# Both stores carry forecast steps 1..2 => lead times +6 h and +12 h, over June 2023.
+#
+# Run:
+#   uv run --offline evaluation --config config/evaluate/eval_config_imerg_2step_matched.yml
+#
+# ==============================================================================================
+# SAMPLE INDICES ARE NOT COMPARABLE BETWEEN THE TWO RUNS — this is the whole point of the file.
+#
+# The two inference runs emitted their initialisation times in a DIFFERENT ORDER, so equal
+# sample indices are DIFFERENT forecasts. Verified by reading `<sample>/IMERG_ANEMOI/1/target/
+# times[0]` out of both zarr stores:
+#
+#     init time          xfaps4wq   r15j90ns
+#     2023-06-01T12         0          0
+#     2023-06-01T18         6         10
+#     2023-06-02T00        12         20
+#     2023-06-02T06        18         30
+#     ...
+#
+# The previously circulated comparison used `sample: "0-63"` on both runs and therefore averaged
+# them over different sets of forecasts. Of those first 64 initialisations only 37 are shared;
+# the two index lists below select exactly those 37, in the same order, so run A's element k and
+# run B's element k are the same forecast.
+#
+# Regenerate / re-check the lists with:
+#   uv run --offline python scripts/imerg_presentation_figures.py --verify-matched-inits
+#
+# NOTE run_evaluation REPLACES default_streams wholesale when a run defines `streams` (it does
+# not deep-merge), so each per-run block below is complete rather than an override.
+# ==============================================================================================
+
+max_workers: 16
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precipitation histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres per 6 h window: 0.1 mm ... 20 mm
+      # BoundaryNorm uses extend="both": needs len(levels)+1 colours (6 interior bins + 2
+      # extensions). "none" is RGBA alpha 0, so dry renders as the page, not as a white blob.
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"
+        - "#BEDAE5"
+        - "#80B5CC"
+        - "#5691B3"
+        - "#4B6E9C"
+        - "#424B83"
+        - "#45596D"
+        - "#5B9E4C"
+
+evaluation:
+
+  # ------------------------------------------------------------------------------------------
+  # Metrics. Everything in Scores.det_metrics_dict that is valid for this stream is switched on;
+  # the exclusions at the bottom of this block say why the rest are not.
+  # ------------------------------------------------------------------------------------------
+  metrics:
+
+    # --- continuous error ---------------------------------------------------------------
+    - rmse:
+        latitude_weighting: true   # N320 is a reduced Gaussian grid: weight by cos(lat)
+    - mae
+    - mse
+    - l1                           # mean absolute error without latitude weighting
+    - l2                           # mean squared error without latitude weighting
+    - bias                         # is the decoder drying out or wetting up?
+    - vrmse                        # variance-normalised RMSE — scale-free error
+    - nse                          # Nash-Sutcliffe efficiency: 1 = perfect, 0 = climatology
+    - psnr:
+        # PSNR needs a peak value; the default of 1.0 would be 1 m/6 h. 0.05 m = 50 mm/6 h is a
+        # realistic extreme for this field, so the numbers stay on a meaningful scale.
+        pixel_max: 0.05
+
+    # --- categorical: rain / no-rain skill at 1 mm/6 h -----------------------------------
+    # tp is in METRES per 6 h window, so thresh 0.001 = 1 mm/6 h.
+    # For a threshold sweep, copy this file, change the three thresholds together and point
+    # summary_dir somewhere else — a metric name can appear only once per config.
+    - ets:
+        thresh: 0.001              # equitable threat score
+    - pss:
+        thresh: 0.001              # Peirce skill score = hit rate - false alarm rate
+    - fbi:
+        thresh: 0.001              # frequency bias: >1 over-forecasts rain, <1 under-forecasts
+
+    # --- precipitation-specific ----------------------------------------------------------
+    - seeps                        # PRIMARY. Equitable precip score; uses the climatology below.
+                                   # NOTE calc_seeps returns 1 - SEEPS_error (score.py:1393),
+                                   # so the plotted value is a SKILL: higher is better.
+
+    # --- distribution / activity ---------------------------------------------------------
+    - qq_analysis                  # quantile-quantile: does the model reproduce the rain-rate
+                                   # distribution, including the tail? Drives quantile_plots.
+    - froct                        # forecast rate of change between consecutive steps
+    - troct                        # observed rate of change — the reference line for froct
+
+    # --- deliberately NOT requested, and why ---------------------------------------------
+    # acc, fact, tact : all need a climatological MEAN (_calc_act does c.sel(statistic="mean")).
+    #                   BOTH IMERG climatologies on this system carry only
+    #                   statistic = [prob_dry, light_heavy_threshold] — the two SEEPS
+    #                   parameters. Requesting them raises
+    #                   KeyError: "not all values found in index 'statistic'" and aborts the
+    #                   whole evaluation AFTER the plots have been written. froct/troct are the
+    #                   climatology-free stand-in for the same question.
+    # rps, rpss       : need q20/q40/q60/q80 in the climatology's `statistic` dimension. Same
+    #                   store, same problem.
+    # grad_amplitude  : calc_spatial_variability requires a regular lat/lon grid; this output is
+    #                   scattered ipoints.
+    # psd             : the SHT path cannot identify this grid. detect_grid_type recognises only
+    #                   "octahedral" and "regular"; N320 is REDUCED Gaussian, so it returns None
+    #                   and sht_psd raises ValueError: Unknown grid_type: None. calc_psd swallows
+    #                   that ("PSD computation failed, returning NaN") but then leaves no
+    #                   per-region entry, and the run dies later in metric_list_to_json with
+    #                   KeyError: 'global'. Verified on job 1370458. grid_type="reduced" exists
+    #                   but needs anemoi.transform AND is not reachable from the config —
+    #                   calc_psd takes psd_method / psd_regrid_resolution / psd_sht_truncation /
+    #                   lat_range, not grid_type. psd_method: "fft" is not an escape either: it
+    #                   requires a regular lat/lon grid by construction.
+    # crps, ssr,      : probabilistic scores. These runs have ens_size = 1, so Scores.get_score
+    # spread,           logs a warning and returns None for all of them.
+    # rank_histogram
+
+  # ------------------------------------------------------------------------------------------
+  # Plots. The list form is authoritative: when `score_plots` is present the legacy booleans
+  # (summary_plots, ratio_plots, heat_maps, score_cards, bar_plots, plot_score_maps,
+  # plot_score_init_timeseries) are IGNORED entirely (config_compat.parse_score_plots).
+  #
+  # Supported values: lead_time, ratio, heatmap, scorecard, bar, qq, rank_histogram,
+  #                   score_map, score_animation, timeseries
+  # ------------------------------------------------------------------------------------------
+  score_plots:
+    - lead_time        # score vs lead time, both runs overlaid. ALSO gates the qq_analysis
+                       # quantile plots — without it they are not produced.
+    - bar              # per-metric bar comparison, easiest to read for a 2-lead run
+    - scorecard        # run x lead grid, one card per metric
+    - ratio            # run / run ratio — the clearest view of a ~1% difference
+    - heatmap          # metric x lead heat map
+    - score_map        # WHERE the skill sits, per run (see runplot_base_dir below)
+    - timeseries       # score vs initialisation time: is the ranking stable through June?
+
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  summary_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_2step_matched/"
+  plot_ensemble: "members"     # ens_size is 1, so this is a no-op here
+
+default_streams:
+  IMERG_ANEMOI:
+    # RegionLibrary keys (regions.py). "NH"/"SH" are not registered and raise.
+    # IMERG's native observing range is 60S-60N, so nhem/shem lean on filled data at high
+    # latitudes; `tropics` (30S-30N) is where the precipitation signal actually lives.
+    regions: ["global", "tropics", "nhem", "shem"]
+    channels: ["tp"]
+    # Pinned explicitly. Auto-resolution from a run's stored data_path_aux has previously
+    # returned None and left SEEPS silently NaN.
+    climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+
+run_ids:
+
+  xfaps4wq:
+    label: "Forecast backbone (hmpa42d2), 2 steps"
+    results_base_dir: "/e/scratch/weatherai/shared_work/results/xfaps4wq"
+    # Per-run and local: score-map filenames do NOT include the run id, so without this the two
+    # runs' maps overwrite each other. Defaults to results_base_dir (the shared store) if unset.
+    runplot_base_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_2step_matched/score_maps/xfaps4wq/"
+    # Scores are written HERE, not into the shared results store's evaluation/ directory.
+    # This is required, not just hygiene: metrics already cached in that directory are skipped
+    # per-region by load_scores, so only the missing ones get recomputed — and
+    # metric_list_to_json then iterates every metric over EVERY region and dies with
+    # KeyError: '<region>' on the first metric that was cached for some regions but not others.
+    # A private, initially-empty metrics_dir makes every metric cover every region.
+    # Delete this directory to force a clean recomputation.
+    metrics_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_2step_matched/scores/xfaps4wq/"
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "tropics", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"     # 1, 2
+          ensemble: "mean"
+          # The 37 initialisations shared with r15j90ns, 2023-06-01T12 .. 2023-06-29T18.
+          # Element k here and element k in r15j90ns's list are the SAME forecast.
+          sample: [0, 6, 12, 18, 24, 30, 36, 19, 25, 31, 37, 43, 49, 55, 2, 38, 44, 50, 56,
+                   62, 3, 9, 15, 57, 63, 4, 10, 16, 22, 28, 34, 23, 29, 35, 41, 47, 53]
+        plotting:
+          # Three case studies: 2023-06-02T00, 2023-06-14T00, 2023-06-29T18.
+          sample: [12, 50, 53]
+          forecast_step: [1, 2]
+          ensemble: "mean"
+          data_plots: ["maps", "target", "histograms"]
+
+  r15j90ns:
+    label: "JEPA backbone (nescpnb2), 2 steps"
+    results_base_dir: "/e/scratch/weatherai/shared_work/results/r15j90ns"
+    runplot_base_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_2step_matched/score_maps/r15j90ns/"
+    # Scores are written HERE, not into the shared results store's evaluation/ directory.
+    # This is required, not just hygiene: metrics already cached in that directory are skipped
+    # per-region by load_scores, so only the missing ones get recomputed — and
+    # metric_list_to_json then iterates every metric over EVERY region and dies with
+    # KeyError: '<region>' on the first metric that was cached for some regions but not others.
+    # A private, initially-empty metrics_dir makes every metric cover every region.
+    # Delete this directory to force a clean recomputation.
+    metrics_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_2step_matched/scores/r15j90ns/"
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "tropics", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"
+          ensemble: "mean"
+          # Same 37 initialisations, this run's own indexing.
+          sample: [0, 10, 20, 30, 40, 50, 60, 2, 12, 22, 32, 42, 52, 62, 63, 4, 14, 24, 34,
+                   44, 35, 45, 55, 6, 16, 7, 17, 27, 37, 47, 57, 9, 19, 29, 39, 49, 59]
+        plotting:
+          # The same three initialisations as xfaps4wq above, in this run's indexing.
+          sample: [20, 24, 59]
+          forecast_step: [1, 2]
+          ensemble: "mean"
+          data_plots: ["maps", "target", "histograms"]

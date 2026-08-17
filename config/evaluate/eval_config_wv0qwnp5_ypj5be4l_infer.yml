@@ -1,0 +1,137 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# FastEval for `wv0qwnp5` -- a 16-sample INFERENCE run of `ypj5be4l` at NATIVE density.
+#
+# THE MATCHED COUNTERPART TO `eval_config_li8s2voq_ofyn3v5c_infer.yml`. Verified from the
+# checkpoint json, not from the run name:
+#
+#   |                  | wv0qwnp5 (this)          | li8s2voq                   |
+#   |------------------|--------------------------|----------------------------|
+#   | parent           | ypj5be4l @ istep 15610   | ofyn3v5c @ istep 15860     |
+#   | decoder_type     | PerceiverIOCoordCond.    | FlowMatching               |
+#   | healpix_level    | 5                        | 5                          |
+#   | ae_global_dim    | 2048                     | 2048                       |
+#   | CERRA targets    | -1 (native)              | -1 (native)               |
+#   | pred shape       | [2285522, 8, 4]          | [2285522, 8, 4]            |
+#
+# So: same level, same width, same density, same 16 samples, same 4 members. The ONE concept
+# that differs is the decoder type -- which is exactly the axis under test.
+#
+# *** THE PLOT RANGES BELOW ARE COPIED VERBATIM FROM THE li8s2voq CONFIG AND MUST STAY THAT
+# WAY. *** The whole point is a side-by-side visual comparison; a different vmin/vmax silently
+# turns a colour-scale difference into an apparent sharpness difference.
+#
+# *** LEAVE `mini_epoch` UNSET. *** This is an INFERENCE run, so it writes exactly one set,
+# `validation_chkpt00000_rank*.zip`, and `WeGenReader` defaults `mini_epoch` to 0 -- correct
+# HERE. That is the opposite of a TRAINING run, where chkpt00000 is the model before the first
+# gradient step and the default would silently plot noise.
+#
+# *** rmse/mae/bias ACROSS THE TWO ARMS ARE NOT A FAIR RANKING. ***
+# A deterministic MSE decoder IS a conditional-mean estimator, so it minimises RMSE and
+# maximises correlation BY CONSTRUCTION, while a generative arm pays the usual double penalty
+# on a single stochastic draw. Comparing the two on RMSE measures the decoder type, not the
+# decoder quality -- this exact error already cost the campaign one retracted conclusion
+# (`80ea37f27`). Use these scores WITHIN an arm, across checkpoints. Across arms, read the
+# member maps, the histogram tail, and amplitude/rho from decoder_forensics instead.
+#
+# ONE REAL CONFOUND, recorded so it is not rediscovered: ERA5 is `forcing: True` in the
+# ofyn3v5c lineage (dropped as a decode target after `rowrc97d` hit the k-NN superset guard)
+# and a normal target in the ypj5be4l lineage. It changes what each model was asked to decode.
+# CERRA -- the stream scored here -- is a target in both, so the CERRA comparison stands.
+#
+# RUN (CPU only, no GPU):
+#   uv run --offline --no-sync evaluation --config config/evaluate/eval_config_wv0qwnp5_ypj5be4l_infer.yml
+#
+# READ IN THIS ORDER:
+#   1. MEMBER maps, against the li8s2voq members at the same sample/time. The question is
+#      whether the HEALPix diamonds visible in the flow arm's members are also present here.
+#   2. The tp HISTOGRAM against the target -- specifically the Pred/Target ratio above ~3 mm,
+#      where the flow arm's tail collapses to 0.0-0.3.
+#   3. rmse / mae / bias LAST, and only within-arm. See the warning above.
+# ===========================================================================================
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    # NATIVE density (max_num_targets: -1 -> ~1.14 M CERRA points per time slice, 5.5 km).
+    # Small markers or the scatter blots out the fine structure this run exists to show.
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0            # mm per 3 h; the tail matters more than the map range
+    2t:
+      vmin: 230
+      vmax: 300             # K
+    10si:
+      vmin: 0.0
+      vmax: 20.0            # m/s
+    r_850:
+      vmin: 5
+      vmax: 105             # %
+    t_850:
+      vmin: 245
+      vmax: 290             # K
+    u_850:
+      vmin: -20
+      vmax: 30              # m/s
+    v_850:
+      vmin: -15
+      vmax: 20              # m/s
+    z_850:
+      vmin: 10500
+      vmax: 16000           # m^2/s^2
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/cerra_flowmatching/wv0qwnp5_ypj5be4l_infer16/"
+  plot_ensemble: true       # 4 members here too (latent-noise draws, not ODE draws)
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    # all eight targets, same list and same order as the li8s2voq config.
+    channels: ["tp", "2t", "10si", "r_850", "t_850", "u_850", "v_850", "z_850"]
+    evaluation:
+      forecast_step: "all"
+      sample: "all"
+      ensemble: "all"       # 4 members
+    plotting:
+      # "all" rather than an index: samples are merged from every rank to global indices, and a
+      # literal [0] has produced "No sample in the selection" on runs sharded across ranks.
+      sample: "all"
+      forecast_step: "all"
+      plot_maps: true
+      plot_bias: false
+      plot_target: true     # CERRA analysis beside the prediction -- the visual sharpness check
+      plot_histograms: true # tp tail: real extremes or speckle
+      plot_animations: false
+
+run_ids:
+  wv0qwnp5:
+    # NO mini_epoch key -- see the header. The default of 0 is correct for an inference run.
+    runplot_base_dir: "./plots/cerra_flowmatching/wv0qwnp5_ypj5be4l_infer16"
+    metrics_base_dir: "./plots/cerra_flowmatching/wv0qwnp5_ypj5be4l_infer16"
+    label: "ypj5be4l inference, 16 samples, native density, ens4"
+    color: "steelblue"

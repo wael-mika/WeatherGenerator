@@ -1,0 +1,209 @@
+# Evaluation: IMERG diagnostic decoder trained at 8 steps, probed out to 40 steps
+#
+#   z71y2ik8  JEPA/SSL backbone (af90zz71_ssl -> ... -> v3gs9fwn), 8-step decoder finetune
+#
+# The store carries forecast steps 1..40 at 6 h => lead times +6 h .. +240 h (10 days). The
+# decoder was trained at 8 steps (+48 h), so everything beyond fstep 8 is extrapolation well
+# outside the trained regime — which is the point of the exercise.
+#
+# Run:
+#   uv run --offline evaluation --config config/evaluate/eval_config_imerg_8step_rollout.yml
+#
+# ==============================================================================================
+# WHAT THIS RUN IS EXPECTED TO SHOW
+#
+# Skill decays close to linearly out to +144 h (day 6, three times the trained horizon) while
+# frequency bias holds a stable ~1.15-1.45 band, then collapses to a dry, static field between
+# +144 h and +180 h. The metrics that make that visible, in order of usefulness:
+#
+#   ets / pss / seeps   graceful decay, then a cliff
+#   fbi                 stable band, then -> 0: the field stops raining
+#   froct vs troct      forecast activity decaying against flat observed activity: the field
+#                       stops evolving. This is the collapse-to-static signature.
+#   qq_analysis / psd   the distribution and the spectrum surviving, then not
+#
+# Sample size caveat: 10 initialisations spanning 2.25 days (2023-06-01T12 .. 2023-06-03T18).
+# Enough to establish the decay shape, not enough for a seasonal skill claim.
+# ==============================================================================================
+
+max_workers: 8      # 16 contributed to the host OOM on the 40-lead run
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precipitation histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres per 6 h window: 0.1 mm ... 20 mm
+      # BoundaryNorm uses extend="both": needs len(levels)+1 colours (6 interior bins + 2
+      # extensions). "none" is RGBA alpha 0, so dry renders as the page, not as a white blob.
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"
+        - "#BEDAE5"
+        - "#80B5CC"
+        - "#5691B3"
+        - "#4B6E9C"
+        - "#424B83"
+        - "#45596D"
+        - "#5B9E4C"
+
+evaluation:
+
+  # ------------------------------------------------------------------------------------------
+  # Metrics — same set as the 2-step config so the two are directly comparable at +6 h/+12 h.
+  # See eval_config_imerg_2step_matched.yml for the full reasoning on each exclusion.
+  # ------------------------------------------------------------------------------------------
+  metrics:
+
+    # --- continuous error ---------------------------------------------------------------
+    - rmse:
+        latitude_weighting: true   # N320 is a reduced Gaussian grid: weight by cos(lat)
+    - mae
+    - mse
+    - l1
+    - l2
+    - bias                         # goes strongly negative as the field dries out
+    - vrmse
+    - nse                          # crosses 0 when the forecast stops beating climatology
+    - psnr:
+        pixel_max: 0.05            # 50 mm/6 h peak; the 1.0 default would be 1 m/6 h
+
+    # --- categorical: rain / no-rain skill at 1 mm/6 h -----------------------------------
+    # tp is in METRES per 6 h window, so thresh 0.001 = 1 mm/6 h.
+    - ets:
+        thresh: 0.001
+    - pss:
+        thresh: 0.001
+    - fbi:
+        thresh: 0.001              # the collapse indicator: stable band, then -> 0
+
+    # --- precipitation-specific ----------------------------------------------------------
+    - seeps                        # calc_seeps returns 1 - SEEPS_error, so this is a SKILL:
+                                   # higher is better, and it should FALL with lead time.
+
+    # --- distribution / activity ---------------------------------------------------------
+    - qq_analysis                  # does the rain-rate distribution survive the rollout?
+    - froct                        # forecast activity — decays toward zero at collapse
+    - troct                        # observed activity — flat, the reference line for froct
+
+    # --- deliberately NOT requested -------------------------------------------------------
+    # acc / fact / tact : need a climatological MEAN; both IMERG climatologies here carry only
+    #                     statistic = [prob_dry, light_heavy_threshold]. Requesting them aborts
+    #                     the run AFTER the plots are written. froct/troct replace them.
+    # rps / rpss        : need q20/q40/q60/q80 in the climatology. Same store, same problem.
+    # grad_amplitude    : requires a regular lat/lon grid; this output is scattered ipoints.
+    # psd               : detect_grid_type knows only "octahedral" and "regular"; N320 is REDUCED
+    #                     Gaussian, so it returns None, sht_psd raises, and the run later dies in
+    #                     metric_list_to_json with KeyError: 'global'. Not reachable from config.
+    #                     See eval_config_imerg_2step_matched.yml for the full note.
+    # crps / ssr /      : probabilistic; ens_size = 1, so they return None.
+    # spread / rank_histogram
+
+  # ------------------------------------------------------------------------------------------
+  # Plots. When `score_plots` is present the legacy booleans are IGNORED entirely
+  # (config_compat.parse_score_plots), so this list is the only switch that matters.
+  # ------------------------------------------------------------------------------------------
+  score_plots:
+    - lead_time        # THE key output: every metric across 40 lead times. Also gates the
+                       # qq_analysis quantile plots.
+    - bar
+    - scorecard
+    - heatmap          # metric x lead time — the collapse shows as a hard edge around +150 h
+    - timeseries       # score vs initialisation time, per lead
+    - score_map        # WHERE skill is lost. Restricted to `global` by score_map_regions below:
+                       # 40 fsteps x 4 regions x 16 metrics is ~2560 full-resolution maps, which
+                       # OOM-killed job 1372152. Everything else is still scored over all four
+                       # regions.
+    # - ratio          # needs a second run to divide by — uncomment together with yz3h0kyn below
+    # - score_animation
+
+  # Spatial score maps only for these regions; every other plot still uses the full region list
+  # from the stream block. Omit the key to map every scored region (the default).
+  score_map_regions: ["global"]
+
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  summary_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_8step_rollout/"
+  plot_ensemble: "members"     # ens_size is 1, so this is a no-op here
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global", "tropics", "nhem", "shem"]
+    channels: ["tp"]
+    climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+
+run_ids:
+
+  z71y2ik8:
+    label: "JEPA backbone (v3gs9fwn), trained 8 steps, probed to 40"
+    results_base_dir: "/e/scratch/weatherai/shared_work/results/z71y2ik8"
+    # Worker cap for THIS run. The top-level `max_workers` does not reach the score-map and
+    # I/O pipelines: they read `reader.eval_cfg.get("max_workers")`, and eval_cfg is this
+    # per-run block (wegen_reader.py:432, plot_orchestration.py:296). Without it the pipeline
+    # falls back to the Slurm CPU count and 40 fsteps x 16 metrics of 542080-point fields in
+    # flight OOM-killed jobs 1372152 and 1373549.
+    max_workers: 4
+    runplot_base_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_8step_rollout/score_maps/z71y2ik8/"
+    # Scores are written HERE, not into the shared results store's evaluation/ directory.
+    # This is required, not just hygiene: metrics already cached in that directory are skipped
+    # per-region by load_scores, so only the missing ones get recomputed — and
+    # metric_list_to_json then iterates every metric over EVERY region and dies with
+    # KeyError: '<region>' on the first metric that was cached for some regions but not others.
+    # A private, initially-empty metrics_dir makes every metric cover every region.
+    # Delete this directory to force a clean recomputation.
+    metrics_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_8step_rollout/scores/z71y2ik8/"
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "tropics", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"       # 1..40 => +6 h .. +240 h
+          sample: "0-9"              # all 10 initialisations in the store
+          ensemble: "mean"
+        plotting:
+          # 2023-06-02T00 — deliberately not the first initialisation, so the maps are not a
+          # special case of "the model has just been initialised".
+          sample: [2]
+          forecast_step: "all"       # all 40 lead times for that one initialisation
+          ensemble: "mean"
+          # "animations" is deliberately absent. _build_single_animation renders each lead
+          # time as its own figure and then hands the frames to imageio; the figures come out
+          # at different pixel sizes (seen resizing from (1773, 437) and (1544, 915) in the same
+          # movie), so ffmpeg raises
+          #   ValueError: All images in a movie should have same size
+          # and takes the whole evaluation down with it — after the maps and histograms have
+          # already been written. Verified on job 1370729. Fixing it means patching
+          # plot_orchestration to pin a figure size, not changing this config.
+          # The rollout is covered statically by F10/F11 in plots/imerg_presentation/, and older
+          # mp4s exist in plots/imerg_8step_40lead/animations/.
+          data_plots: ["maps", "target", "histograms"]
+
+  # ------------------------------------------------------------------------------------------
+  # Baseline, currently off. yz3h0kyn is the Forecast-backbone 8-step run over the SAME 10
+  # initialisations and the same 40 leads, and it is the natural answer to "stable compared to
+  # what?" — its ETS at +144 h is 0.093 against z71y2ik8's 0.204.
+  #
+  # Uncomment this block (and `- ratio` above) to get a two-run comparison. The sample list is
+  # NOT 0-9: yz3h0kyn emitted its initialisations in a different order and holds two extra ones
+  # (2023-06-04T00 and T06) that z71y2ik8 lacks. The list below selects the same 10 forecasts as
+  # z71y2ik8's "0-9", in the same order.
+  # ------------------------------------------------------------------------------------------
+  # yz3h0kyn:
+  #   label: "Forecast backbone (bpqbn9u5), trained 8 steps, probed to 40"
+  #   results_base_dir: "/e/scratch/weatherai/shared_work/results/yz3h0kyn"
+  #   runplot_base_dir: "/e/project1/e-ext-2025e01-128/almikaeel1/WeatherGenerator/plots/imerg_8step_rollout/score_maps/yz3h0kyn/"
+  #   streams:
+  #     IMERG_ANEMOI:
+  #       regions: ["global", "tropics", "nhem", "shem"]
+  #       channels: ["tp"]
+  #       climatology_path: "/e/scratch/weatherai/shared_work/assets/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+  #       evaluation:
+  #         forecast_step: "all"
+  #         sample: [0, 6, 1, 7, 2, 8, 3, 9, 4, 10]
+  #         ensemble: "mean"
