@@ -7,10 +7,10 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 #
-# IMERG decoder finetune from pretrained run fx276yn3 -- MSE variant, 8 forecast steps.
+# IMERG decoder finetune from pretrained run cw6a4szu -- MSE variant, 8 forecast steps.
 #
-# LINEAGE: run_history [si0krkxk -> ci2t558k -> wejf33qv -> fx276yn3], istep 2048, 8 mini epochs
-# x 8192. fx276yn3 is itself an 8-step/6h multi-stream forecast finetune: forecast.num_steps 8,
+# LINEAGE: run_history [wduc34ev -> rrvj7vjv -> cw6a4szu], istep 2048, 8 mini epochs
+# x 8192. cw6a4szu is itself an 8-step/6h multi-stream forecast finetune: forecast.num_steps 8,
 # policy "fixed", and its freeze regex
 # ('.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*') contains NO
 # forecast-engine term, so its forecast engine WAS trainable and was trained at full 8-step depth.
@@ -21,36 +21,42 @@
 # with_fsdp False. Note this lineage is N320 (aifs-ea-an-oper-0001-mars-n320-...), NOT the o96
 # grid used by the af90zz71/srdrwfy6 IMERG finetunes.
 #
-# FREEZE: forecast engine FROZEN, decoder only. Verified against fx276yn3_chkpt00008.chkpt:
-# encoder 1836 + forecast_engine 224 frozen => 131 trainable (embed_target_coords 1 +
+# FREEZE: forecast engine FROZEN, decoder only. Verified against cw6a4szu_chkpt00008.chkpt:
+# encoder 1064 + forecast_engine 224 frozen => 131 trainable (embed_target_coords 1 +
 # target_token_engines 128 + pred_heads 2).
-# The `.*ERA5.*` term from fx276yn3's own regex is deliberately DROPPED: in this checkpoint every
+# The `.*ERA5.*` term from cw6a4szu's own regex is deliberately DROPPED: in this checkpoint every
 # decoder module is owned by the ERA5 diagnostic output stream (target_token_engines.ERA5,
 # pred_heads.ERA5, embed_target_coords.ERA5), so keeping `.*ERA5.*` would freeze the decoder too
-# and leave 0 of 2191 params trainable -- checked, it really does resolve to zero. After the
+# and leave 0 of 1419 params trainable -- checked, it really does resolve to zero. After the
 # stream swap those modules are owned by IMERG_ANEMOI and are freshly initialised; ERA5_in (the
 # forcing input) lives under `encoder` and stays frozen via `.*encoder.*`.
 #
-# STREAM SET (config/streams/imerg_diag_fx276yn3/): fx276yn3's own 9 forcing inputs copied
+# STREAM SET (config/streams/imerg_diag_cw6a4szu/): cw6a4szu's own 9 forcing inputs copied
 # verbatim from its code snapshot -- ERA5_in (0), METEOSAT_SEVIRI_IR (10), GOES_ABI_IR (11),
-# HIMAWARI_AHI_IR (12), GOES_ABI_VIS (13), HIMAWARI_AHI_VIS (14), METOP_IASI_PC (21), AVHRR (22),
-# SurfaceCombined (30) -- with the diagnostic ERA5 output stream replaced by IMERG (40).
+# HIMAWARI_AHI_IR (12), GOES_ABI_VIS (13), HIMAWARI_AHI_VIS (14), METOP_ABC_IASI (21), AVHRR (22),
+# SurfaceCombined (30) -- with the diagnostic ERA5 output stream neutralised (see
+# streams/imerg_diag_cw6a4szu/era5.yml) and IMERG (40) added as the only output.
+#
+# DIFFERENCE FROM THE fx276yn3 TWIN: stream 21 here is METOP_ABC_IASI (metop-a/b/c IASI
+# radiances, ea-ofb) rather than METOP_IASI_PC (od-ai PC bufr) -- cw6a4szu was trained from the
+# *_iasi_channels_* stream dir. Everything else about the two checkpoints matches: 8-step
+# native depth, use_xsa, step conditioning, N320, healpix L5, fe 16 blocks, with_fsdp False.
 #
 # Run:
-#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id fx276yn3 --config config/raina_config/config_finetune_imerg_diag_mse_fx276yn3_8step.yml --mini-epoch 8 --nodes N
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id cw6a4szu --config config/raina_config/config_finetune_imerg_diag_mse_cw6a4szu_8step.yml --mini-epoch 8 --nodes N
 #   (paste as ONE line -- literal backslash continuations break parse_known_args)
 #
 # --mini-epoch 8 IS REQUIRED. It defaults to -1, which resolves to <run>_latest.chkpt,
-# and fx276yn3 has NO _latest: it only ever wrote numbered checkpoints chkpt00000..08.
+# and cw6a4szu has NO _latest: it only ever wrote numbered checkpoints chkpt00000..08.
 # Omitting it fails immediately on every rank with
-#   FileNotFoundError: .../fx276yn3_latest.chkpt
+#   FileNotFoundError: .../cw6a4szu_latest.chkpt
 # (that is how run vsosleus died). 8 is the last one it wrote.
 #####################################
 
-streams_directory: "./config/streams/imerg_diag_fx276yn3/"
+streams_directory: "./config/streams/imerg_diag_cw6a4szu/"
 
 # The inherited ERA5 output stream is suppressed in the streams DIRECTORY, not here:
-# config/streams/imerg_diag_fx276yn3/era5.yml carries `reconstruct: false`.
+# config/streams/imerg_diag_cw6a4szu/era5.yml carries `reconstruct: false`.
 # It cannot be done from this file -- _load_streams_in_config does
 # `config.streams = load_streams(streams_directory)`, an assignment that overwrites any
 # `streams:` block declared here before the merge with the checkpoint config happens.
@@ -66,10 +72,10 @@ general:
   world_size: ???
 
   # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
-  # This is also fx276yn3's own setting.
+  # This is also cw6a4szu's own setting.
   multiprocessing_method: "spawn"
 
-  desc: "imerg_diag_mse_from_fx276yn3_8step"
+  desc: "imerg_diag_mse_from_cw6a4szu_8step"
   run_id: ???
   run_history: []
 
@@ -83,7 +89,7 @@ training_config:
 
   training_mode: ["masking"]
 
-  # JEPA leftovers off (fx276yn3 carries deep_ssl.enabled False already; pinned for identity
+  # JEPA leftovers off (cw6a4szu carries deep_ssl.enabled False already; pinned for identity
   # with the af90zz71/srdrwfy6 finetune configs).
   deep_ssl:
     enabled: False
@@ -101,7 +107,7 @@ training_config:
   # recovered from the parent's istep and this value becomes an absolute stop point, so a value
   # below the base trains nothing at all (run re0jivry did exactly that and still wrote a
   # checkpoint). The whole raina IMERG family resets istep for this reason.
-  num_mini_epochs: 8
+  num_mini_epochs: 4
   samples_per_mini_epoch: 4096
 
   # Kept identical to the other IMERG finetunes for comparability.
@@ -122,7 +128,7 @@ training_config:
     policy_cooldown: "linear"
     parallel_scaling_policy: "sqrt"
 
-  # grad_clip 1.0 is fx276yn3's native value.
+  # grad_clip 1.0 is cw6a4szu's native value.
   optimizer:
     grad_clip: 1.0
     weight_decay: 0.1
@@ -132,7 +138,7 @@ training_config:
       beta2: 0.9875
       eps: 2e-08
 
-  # Latent JEPA loss OFF; plain MSE on the only output stream (IMERG). fx276yn3 carries loss
+  # Latent JEPA loss OFF; plain MSE on the only output stream (IMERG). cw6a4szu carries loss
   # blocks named "physical", "student-teacher" and "forecast"; the physical block is renamed
   # here to the same "forecast" key the family uses so the merge stays idempotent.
   losses:
@@ -154,9 +160,9 @@ training_config:
     random_easy_target:
       enabled: False
 
-  # 8 steps -- fx276yn3's NATIVE rollout depth, so no curriculum and no unfreeze are needed here.
+  # 8 steps -- cw6a4szu's NATIVE rollout depth, so no curriculum and no unfreeze are needed here.
   # This is the same situation as the rxssbn0v 8-step config and the opposite of the hmpa42d2
-  # ones: fx276yn3's forecast engine was itself trained at num_steps 8 with the engine trainable,
+  # ones: cw6a4szu's forecast engine was itself trained at num_steps 8 with the engine trainable,
   # so asking it for 8 steps asks for nothing it has not already done. Only the IMERG decoder is
   # new, and only the IMERG decoder trains. Contrast hmpa42d2, whose lineage topped out at 2
   # steps and therefore needed both a 2->8 ramp and an unfrozen engine.
@@ -200,7 +206,7 @@ validation_config:
     ema_ramp_up_ratio: 0.09
     ema_halflife_in_thousands: 600
 
-# fx276yn3 carries 8. Host RAM is the binding constraint (the trainer builds a train AND a val
+# cw6a4szu carries 8. Host RAM is the binding constraint (the trainer builds a train AND a val
 # DataLoader, each with num_workers, per rank). If workers get OOM-killed, drop to 6 then 4 via
 # --options data_loading.num_workers=N rather than editing this file.
 data_loading:

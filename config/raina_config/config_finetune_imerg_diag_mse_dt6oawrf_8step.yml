@@ -1,0 +1,168 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Deepen dt6oawrf from 2 -> 8 IMERG forecast steps, 6 mini epochs.
+#
+# LINEAGE: fx276yn3 -> zk8jugvb -> dt6oawrf, istep 8668, previously 16 x 4096 at num_steps 2.
+# dt6oawrf is already an IMERG diagnostic-decoder finetune, so unlike the configs that start from
+# fx276yn3 itself this one continues an existing IMERG decoder rather than creating one.
+#
+# WHY 8 STEPS NEEDS NO CURRICULUM OR UNFREEZE: the forecast engine here is fx276yn3's, which was
+# itself trained at num_steps 8 with the engine trainable. It has been FROZEN throughout the
+# IMERG finetunes, so its weights still are fx276yn3's 8-step-trained ones. Going 2 -> 8 asks it
+# for nothing it has not already done; only the IMERG decoder has never seen steps 3-8.
+#
+# ERA5 IS DELIBERATELY KEPT AS A TARGET. That is the experiment: dt6oawrf trains the IMERG
+# decoder alongside an ERA5 one (physical loss = (ERA5 + IMERG) / 2), and h1mrni5n is the
+# matched IMERG-only control. Confirmed in the checkpoints: dt6oawrf carries decoder modules for
+# BOTH streams (ERA5 131 + IMERG 131 tensors, 2322 params) and its log reports
+# LossPhysical.ERA5.mse and LossPhysical.IMERG_ANEMOI.mse; h1mrni5n has only IMERG (2191
+# params, one loss term). So streams_directory points at imerg_diag_fx276yn3_era5tgt/, which is
+# the normal fx276yn3 stream set with ERA5 left intact -- NOT imerg_diag_fx276yn3/, whose
+# era5.yml neutralises it.
+#
+# Note the IMERG gradient is therefore HALVED relative to h1mrni5n (loss = loss / ctr_streams
+# with ctr_streams = 2). That is inherent to the comparison, not a bug.
+#
+# ERA5_in's targets ARE still emptied (analysis.yml). It is a forcing stream with no decoder, so
+# those 74 channels were only read and discarded; removing them changes no science.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id dt6oawrf --config config/raina_config/config_finetune_imerg_diag_mse_dt6oawrf_8step.yml --nodes N
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#   No --mini-epoch needed: dt6oawrf has a _latest checkpoint.
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_fx276yn3_era5tgt/"
+
+# dt6oawrf's own regex, unchanged: encoder + forecast engine frozen, IMERG decoder trainable.
+# It deliberately does NOT contain `.*ERA5.*` -- see the note above about ERA5's decoder.
+freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "spawn"
+  desc: "imerg_diag_mse_from_dt6oawrf_8step"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # Exactly 6 mini epochs, 0..5. A plain count, not an absolute stop point, because
+  # `general.istep: 0` resets the counter (loop is range(mini_epoch_base, num_mini_epochs) with
+  # base = int(istep / len(data_loader))). Without the reset, dt6oawrf's inherited istep 8668 would
+  # put the base near 16 and a value of 6 would train NOTHING -- the run re0jivry failure mode.
+  num_mini_epochs: 6
+  samples_per_mini_epoch: 4096
+
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Declared under `forecast`, matching this lineage: its `physical` and `student-teacher`
+  # blocks are both type Disabled, so `forecast` is the single live LossPhysical.
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  # 2 -> 8. This is the whole point of the run.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Validation window WIDENED from 3 to 6 months. The old window (2023-10-01 -> 2023-12-31) is
+  # contained in this one, so nothing that was scored before is dropped -- boreal summer and
+  # early autumn are added on top. Sample count is unchanged at 256, so validation costs the same;
+  # the 256 are simply drawn from twice as much time.
+  #
+  # shuffle: True is what makes that widening real. With shuffle False the sampler takes the
+  # FIRST contiguous 256 slots of the window, which after widening would still be July-August
+  # only -- a narrower period than before, not a wider one.
+  #
+  # This does NOT make the validation curve noisy. MultiStreamDataSampler.reset() reseeds from
+  # the constant self.data_loader_rng_seed at the top of every mini epoch
+  # (multi_stream_data_sampler.py:306) before permuting, so the SAME 256 samples are drawn every
+  # epoch and the curve stays epoch-to-epoch comparable. The seed mutation at :941 applies only
+  # inside the forked worker copies and never reaches this permutation.
+  #
+  # NOT comparable with runs validated on the old 3-month window (lf97ve7d, ti7k7l5s, vpj2sbpa,
+  # o8m370eh, w1flta02, bif4t205 and earlier).
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# 4, lower than h1mrni5n's 6. This is the heaviest configuration in the family: the fx276yn3
+# lineage already carries METOP_IASI_PC at 210 channels (12x the METOP_ABC_IASI used elsewhere),
+# and keeping ERA5 as a target adds 81 ch x 542080 pts x 4 B x 8 steps = 1.41 GB per sample that
+# the IMERG-only configs do not pay. On this lineage at 8 steps, 8 workers was OOM-killed three
+# times (h4rw3fa7, b88hm6ku, to4xs0gh) and 4 survived at 80.7 G/rank -- and those measurements
+# were taken WITHOUT the extra ERA5 target read. Raise to 6 only after checking
+#   sacct -j <jobid> --format=MaxRSS,AveRSS,NTasks --units=G
+data_loading:
+  num_workers: 4
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_8step
+  grid: null

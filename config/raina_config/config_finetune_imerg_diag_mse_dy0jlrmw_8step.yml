@@ -1,0 +1,155 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run dy0jlrmw -- MSE variant, 8 forecast steps.
+# Parent desc: "" (ERA5 initial condition per the experiment log).
+#
+# LINEAGE: skkbxfya -> dy0jlrmw, istep 5608 (24 x 16384).
+# dy0jlrmw is itself an 8-step/6h forecast finetune (forecast.num_steps 8, policy "fixed") and
+# its freeze regex contains NO forecast-engine term, so its forecast engine was trainable and
+# reached full 8-step depth. Asking for 8 steps here therefore asks it for nothing new.
+#
+# THIS FAMILY DIFFERS FROM THE fx276yn3 / cw6a4szu (JEPA) ONE IN FOUR WAYS THAT MATTER:
+#   1. losses = ['physical'] only -- there is NO 'student-teacher' block and NO 'forecast' block.
+#      The MSE loss below is therefore declared under the key `physical`. Declaring it as
+#      `forecast` would ADD a second LossPhysical next to the inherited one, and
+#      validation_io.write_output asserts len(LossPhysical blocks) == 1.
+#   2. `reconstruct: false` does not exist in this code -- see streams/imerg_diag_dy0jlrmw/era5.yml.
+#   3. with_fsdp True (the JEPA family is False) and multiprocessing_method "fork" (not spawn);
+#      both inherited, not restated.
+#   4. Architecture: ae_local 2048/2b, ae_global 2048/4b, fe 16 blocks, healpix L5,
+#      0 register tokens, no use_xsa, no step conditioning.
+#
+# FREEZE: forecast engine frozen, IMERG decoder only. Verified against dy0jlrmw_latest.chkpt:
+# the parent's own regex plus a forecast-engine term freezes all 758 existing params (encoder
+# 451 + forecast_engine 192 + the ERA5 decoder 115). IMERG's decoder does not
+# exist in the checkpoint and is created fresh, so it is the only trainable part.
+# NOTE `.*ERA5.*` is KEPT here, unlike the fx276yn3 configs. There the decoder to be TRAINED was
+# ERA5-owned so the term had to go; here IMERG is a new stream with its own modules, and keeping
+# the term is what freezes the leftover ERA5 decoder.
+#
+# TARGET IS IMERG ONLY: config/streams/imerg_diag_dy0jlrmw/ contains just imerg_anemoi.yml (the new
+# output) and era5.yml (which empties the inherited ERA5 output's channel lists). The 9 forcing
+# input streams are inherited from the checkpoint through the streams-dict union.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id dy0jlrmw_fix --config config/raina_config/config_finetune_imerg_diag_mse_dy0jlrmw_8step.yml --nodes N
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#   No --mini-epoch needed: dy0jlrmw has a _latest checkpoint, unlike fx276yn3/cw6a4szu.
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_dy0jlrmw/"
+# Parent's own regex + a forecast-engine term. See header for why `.*ERA5.*` stays.
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*|.*forecast_engine.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  desc: "imerg_diag_mse_from_dy0jlrmw_8step"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # Plain count, not an absolute stop point, because `general.istep: 0` resets the counter:
+  # the loop is range(mini_epoch_base, num_mini_epochs) with base = int(istep / len(data_loader)).
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+
+  # Kept identical to the rest of the IMERG diagnostic family for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Declared under `physical` -- this family's ONLY loss key. See header point 1.
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    forecasting:
+      masking_strategy: "forecast"
+
+  # 8 steps -- dy0jlrmw's native rollout depth, so no curriculum and no unfreeze are needed.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Validation window WIDENED from 3 to 6 months. The old window (2023-10-01 -> 2023-12-31) is
+  # contained in this one, so nothing that was scored before is dropped -- boreal summer and
+  # early autumn are added on top. Sample count is unchanged at 256, so validation costs the same;
+  # the 256 are simply drawn from twice as much time.
+  #
+  # shuffle: True is what makes that widening real. With shuffle False the sampler takes the
+  # FIRST contiguous 256 slots of the window, which after widening would still be July-August
+  # only -- a narrower period than before, not a wider one.
+  #
+  # This does NOT make the validation curve noisy. MultiStreamDataSampler.reset() reseeds from
+  # the constant self.data_loader_rng_seed at the top of every mini epoch
+  # (multi_stream_data_sampler.py:306) before permuting, so the SAME 256 samples are drawn every
+  # epoch and the curve stays epoch-to-epoch comparable. The seed mutation at :941 applies only
+  # inside the forked worker copies and never reaches this permutation.
+  #
+  # NOT comparable with runs validated on the old 3-month window (lf97ve7d, ti7k7l5s, vpj2sbpa,
+  # o8m370eh, w1flta02, bif4t205 and earlier).
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# 8 workers. This family's IASI stream is METOP_ABC_IASI (17 channels), the light one -- the same
+# stream set shape that sustained 8 workers in run r2iy7iko. The fx276yn3 family needs 6 because
+# its METOP_IASI_PC carries 210 channels.
+data_loading:
+  num_workers: 8
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_8step
+  grid: null
