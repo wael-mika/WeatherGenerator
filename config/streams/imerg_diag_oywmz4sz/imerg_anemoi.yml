@@ -1,0 +1,53 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG as the ONLY output stream for the MTM-family decoder finetunes (parents j6nb50v9 and
+# ra1xax01, which share an identical stream set). The zarr has a single variable named 'tp'.
+#
+# THIS DIRECTORY DECLARES EVERY STREAM. The run uses the oywmz4sz_fix snapshot (merged
+# branch code), which carries the `base_config.streams = None` guard, so streams_directory
+# REPLACES the checkpoint's stream set. The 9 forcing inputs are dumped verbatim into
+# analysis/geos/avhrr/synop.yml, and the inherited ERA5 output stream is removed simply by
+# not being present -- which is what makes IMERG the only target.
+#
+# stream_id 40 collides with none of the inherited ids (0, 1, 10-14, 20, 22, 30).
+#
+# DECODER SHAPE copied from the ERA5 output stream it replaces (embed_target_coords dim 512,
+# target_readout 4 layers / 4 heads, pred_head 1 layer): those are the hyperparameters this
+# family's now-frozen encoder and forecast engine were trained to be read by.
+#
+# max_num_targets 108416 is likewise ERA5's own value, so per-step decoder load matches what
+# these checkpoints already ran with. TRAINING-only: trainer.inference() forces it back to -1,
+# so evaluation still scores full N320 maps.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: 108416
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Precipitation cannot be negative. Applied to predictions only, in physical units, after
+  # denormalization (validation_io._apply_output_clamp). NOTE this is a CODE feature on
+  # develop-ssl-diffusion-v1; --from-run-id runs the PARENT snapshot's code, so for these MTM
+  # parents the key is simply ignored. Harmless, and correct if the run ever uses newer code.
+  output_clamp:
+    min: 0.0

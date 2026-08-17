@@ -1,23 +1,23 @@
-# fx276yn3's diagnostic ERA5 OUTPUT stream, carried over VERBATIM from its own stream dir
-# (gjl6a0kb_reproduction_n320_new_channels_forecast_mnt_cw/era5.yml) except for the single
-# `reconstruct: false` line added at the end.
+# cw6a4szu's diagnostic ERA5 OUTPUT stream, carried over VERBATIM from its own stream dir
+# (gjl6a0kb_reproduction_n320_new_channels_forecast_iasi_channels_mnt_cw/era5.yml) except for the
+# emptied `target` list and the `reconstruct: false` line at the end.
 #
 # WHY THIS FILE EXISTS AT ALL. Leaving era5.yml out of this directory does NOT remove the stream:
 # `streams` is a dict, so the merge with the inherited checkpoint config UNIONS it and ERA5 comes
-# straight back. That is how runs zk8jugvb and x5uptfho ended up with a LossPhysical.ERA5.mse
-# term alongside IMERG. This branch's config.py guards against it (base_config.streams = None),
-# but --from-run-id runs the PARENT SNAPSHOT's code, which predates the guard.
+# straight back with its decoder, adding a LossPhysical.ERA5.mse term next to IMERG and halving
+# IMERG's gradient (loss = loss / ctr_streams). This branch's config.py guards against that
+# (base_config.streams = None), but --from-run-id runs the PARENT SNAPSHOT's code, which predates
+# the guard. Diagnosed on the fx276yn3 twin in runs zk8jugvb and x5uptfho.
 #
 # Putting `streams: {ERA5: {reconstruct: false}}` in the finetune config does NOT work either:
 # _load_streams_in_config does `config.streams = load_streams(streams_directory)`, an ASSIGNMENT
 # that overwrites any explicit streams block in the same file before the merge happens. The
 # override has to live in the streams DIRECTORY, i.e. here.
 #
-# `reconstruct: false` removes the stream's physical decoder (model.py consults
-# utils.is_stream_reconstructed at decoder construction), so there is no pred_heads.ERA5, no ERA5
-# loss term, and ctr_streams drops back to 1 so IMERG's gradient is no longer halved. It is NOT
-# marked forcing: that would feed these 81 channels to the encoder as input, which this
-# checkpoint never saw (ERA5 was output-only, and ERA5_in already supplies the input).
+# `reconstruct: false` removes the physical decoder (model.py consults
+# utils.is_stream_reconstructed at decoder construction). It is NOT marked forcing: that would
+# feed these 81 channels to the encoder as input, which this checkpoint never saw (ERA5 was
+# output-only, and ERA5_in already supplies the input).
 
 ERA5 :
   type : anemoi
@@ -45,10 +45,10 @@ ERA5 :
   source : []
   train_source_channels : []
   val_source_channels : []
-  # Targets emptied: with reconstruct:false this stream has no decoder and no loss
-  # term, so reading its 81 channels only burns host RAM. At 8 forecast steps that is
-  # 81 ch x 542080 pts x 4B x 8 steps = 1.41 GB per sample, ~11 GB across 8 dataloader
-  # workers -- all of it discarded. That is what SIGKILLed a worker in run h4rw3fa7.
+  # Targets emptied: with reconstruct:false this stream has no decoder and no loss term, so
+  # reading its 81 channels only burns host RAM -- 81 ch x 542080 pts x 4B x 8 steps =
+  # 1.41 GB per sample, ~11 GB across the dataloader workers, all discarded. That is what
+  # SIGKILLed a worker in the fx276yn3 twin run h4rw3fa7.
   target : []
   # AND the pre-resolved channel lists, which are what the reader ACTUALLY consults:
   #     stream_info.get(str(stage) + "_target_channels")   (data_reader_anemoi.py:117-122)
@@ -79,6 +79,7 @@ ERA5 :
   pred_head :
     ens_size : 1
     num_layers : 1
+  target_channel_weights: null
   channel_weights :
     2t : 10.0
     10u : 2.0

@@ -1,0 +1,91 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Forcing INPUT stream, dumped verbatim from j6nb50v9's checkpoint config
+# (identical in ra1xax01 -- verified field-by-field, so one directory serves both).
+#
+# These files must exist here because this family's config.py DOES carry the
+# `base_config.streams = None` guard: a streams_directory REPLACES the inherited stream
+# set rather than unioning with it. Omitting a stream therefore deletes it, which is the
+# opposite of the fx276yn3/cw6a4szu family. It is also why ERA5 needs no neutraliser file
+# here -- simply not being present removes it, leaving IMERG as the only output.
+
+SurfaceCombined:
+  type: obs
+  stream_id: 30
+  filenames:
+  - observations-ea-ofb-0001-1979-2025-combined-surface-v5.zarr
+  source:
+  - obsvalue_tsts_0
+  - obsvalue_t2m_0
+  - obsvalue_td2m_0
+  - obsvalue_u10m_0
+  - obsvalue_v10m_0
+  - obsvalue_pmsl_0
+  - obsvalue_ps_0
+  target: []
+  geoinfo_channels:
+  - stalt
+  - lsm
+  - cos_sza
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  loss_weight: 1.0
+  token_size: 256
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config:
+        rate: 0.5
+  tokenize_spacetime: false
+  max_num_targets: -1
+  forcing: true
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 2
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 1
+    num_heads: 4
+    self_attention: false
+    mlp_hidden_factor: 1
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: SurfaceCombined
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_tsts_0
+  - obsvalue_t2m_0
+  - obsvalue_td2m_0
+  - obsvalue_u10m_0
+  - obsvalue_v10m_0
+  - obsvalue_pmsl_0
+  - obsvalue_ps_0
+  train_target_channels: []
+  target_channel_weights: []
+  val_source_channels:
+  - obsvalue_tsts_0
+  - obsvalue_t2m_0
+  - obsvalue_td2m_0
+  - obsvalue_u10m_0
+  - obsvalue_v10m_0
+  - obsvalue_pmsl_0
+  - obsvalue_ps_0
+  val_target_channels: []

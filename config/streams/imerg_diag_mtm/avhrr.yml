@@ -1,0 +1,240 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Forcing INPUT stream, dumped verbatim from j6nb50v9's checkpoint config
+# (identical in ra1xax01 -- verified field-by-field, so one directory serves both).
+#
+# These files must exist here because this family's config.py DOES carry the
+# `base_config.streams = None` guard: a streams_directory REPLACES the inherited stream
+# set rather than unioning with it. Omitting a stream therefore deletes it, which is the
+# opposite of the fx276yn3/cw6a4szu family. It is also why ERA5 needs no neutraliser file
+# here -- simply not being present removes it, leaving IMERG as the only output.
+
+AVHRR:
+  type: obs
+  stream_id: 22
+  filenames:
+  - observations-file-2001-2023-eumetsat-avhrr-o256-v4.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - cos_sza
+  coords_channels:
+  - latitude
+  - longitude
+  loss_weight: 1.0
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 256
+  forcing: true
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 2
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: AVHRR
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_1
+  - obsvalue_rawbt_2
+  - obsvalue_rawbt_3
+  - obsvalue_refl_1
+  - obsvalue_refl_2
+  train_target_channels:
+  - obsvalue_rawbt_1
+  - obsvalue_rawbt_2
+  - obsvalue_rawbt_3
+  - obsvalue_refl_1
+  - obsvalue_refl_2
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_1
+  - obsvalue_rawbt_2
+  - obsvalue_rawbt_3
+  - obsvalue_refl_1
+  - obsvalue_refl_2
+  val_target_channels:
+  - obsvalue_rawbt_1
+  - obsvalue_rawbt_2
+  - obsvalue_rawbt_3
+  - obsvalue_refl_1
+  - obsvalue_refl_2
+METOP_ABC_IASI:
+  type: obs
+  stream_id: 20
+  filenames:
+  - observations-ea-ofb-0001-2007-2021-metop-a-iasi-radiances-v1.zarr
+  - observations-ea-ofb-0001-2013-2023-metop-b-iasi-radiances-v1.zarr
+  - observations-ea-ofb-0001-2019-2023-metop-c-iasi-radiances-v1.zarr
+  source:
+  - obsvalue_rawbt_138
+  - obsvalue_rawbt_16
+  - obsvalue_rawbt_170
+  - obsvalue_rawbt_185
+  - obsvalue_rawbt_224
+  - obsvalue_rawbt_249
+  - obsvalue_rawbt_271
+  - obsvalue_rawbt_2907
+  - obsvalue_rawbt_2991
+  - obsvalue_rawbt_3093
+  - obsvalue_rawbt_3160
+  - obsvalue_rawbt_445
+  - obsvalue_rawbt_5383
+  - obsvalue_rawbt_63
+  - obsvalue_rawbt_756
+  - obsvalue_rawbt_867
+  - obsvalue_rawbt_921
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - cos_sza
+  loss_weight: 1.0
+  masking_override:
+    model_input:
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 512
+  forcing: true
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 2
+    dim_embed: 256
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 256
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: METOP_ABC_IASI
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_16
+  - obsvalue_rawbt_63
+  - obsvalue_rawbt_138
+  - obsvalue_rawbt_170
+  - obsvalue_rawbt_185
+  - obsvalue_rawbt_224
+  - obsvalue_rawbt_249
+  - obsvalue_rawbt_271
+  - obsvalue_rawbt_445
+  - obsvalue_rawbt_756
+  - obsvalue_rawbt_867
+  - obsvalue_rawbt_921
+  - obsvalue_rawbt_2907
+  - obsvalue_rawbt_2991
+  - obsvalue_rawbt_3093
+  - obsvalue_rawbt_3160
+  - obsvalue_rawbt_5383
+  train_target_channels:
+  - obsvalue_avhrr_mean_vis_0
+  - obsvalue_rawbt_16
+  - obsvalue_rawbt_63
+  - obsvalue_rawbt_138
+  - obsvalue_rawbt_170
+  - obsvalue_rawbt_185
+  - obsvalue_rawbt_224
+  - obsvalue_rawbt_249
+  - obsvalue_rawbt_271
+  - obsvalue_rawbt_445
+  - obsvalue_rawbt_756
+  - obsvalue_rawbt_867
+  - obsvalue_rawbt_921
+  - obsvalue_rawbt_2907
+  - obsvalue_rawbt_2991
+  - obsvalue_rawbt_3093
+  - obsvalue_rawbt_3160
+  - obsvalue_rawbt_5383
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_16
+  - obsvalue_rawbt_63
+  - obsvalue_rawbt_138
+  - obsvalue_rawbt_170
+  - obsvalue_rawbt_185
+  - obsvalue_rawbt_224
+  - obsvalue_rawbt_249
+  - obsvalue_rawbt_271
+  - obsvalue_rawbt_445
+  - obsvalue_rawbt_756
+  - obsvalue_rawbt_867
+  - obsvalue_rawbt_921
+  - obsvalue_rawbt_2907
+  - obsvalue_rawbt_2991
+  - obsvalue_rawbt_3093
+  - obsvalue_rawbt_3160
+  - obsvalue_rawbt_5383
+  val_target_channels:
+  - obsvalue_avhrr_mean_vis_0
+  - obsvalue_rawbt_16
+  - obsvalue_rawbt_63
+  - obsvalue_rawbt_138
+  - obsvalue_rawbt_170
+  - obsvalue_rawbt_185
+  - obsvalue_rawbt_224
+  - obsvalue_rawbt_249
+  - obsvalue_rawbt_271
+  - obsvalue_rawbt_445
+  - obsvalue_rawbt_756
+  - obsvalue_rawbt_867
+  - obsvalue_rawbt_921
+  - obsvalue_rawbt_2907
+  - obsvalue_rawbt_2991
+  - obsvalue_rawbt_3093
+  - obsvalue_rawbt_3160
+  - obsvalue_rawbt_5383

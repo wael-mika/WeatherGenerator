@@ -1,0 +1,392 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Forcing INPUT stream, dumped verbatim from j6nb50v9's checkpoint config
+# (identical in ra1xax01 -- verified field-by-field, so one directory serves both).
+#
+# These files must exist here because this family's config.py DOES carry the
+# `base_config.streams = None` guard: a streams_directory REPLACES the inherited stream
+# set rather than unioning with it. Omitting a stream therefore deletes it, which is the
+# opposite of the fx276yn3/cw6a4szu family. It is also why ERA5 needs no neutraliser file
+# here -- simply not being present removes it, leaving IMERG as the only output.
+
+METEOSAT_SEVIRI_IR:
+  type: obs
+  stream_id: 10
+  filenames:
+  - observations-file-2014-2024-seviri-o256-wegen-v3.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - zenith
+  - cos_sza
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed:
+    net: linear
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: METEOSAT_SEVIRI_IR
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_065
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  train_target_channels:
+  - obsvalue_rawbt_065
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_065
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  val_target_channels:
+  - obsvalue_rawbt_065
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+GOES_ABI_IR:
+  type: obs
+  stream_id: 11
+  filenames:
+  - observations-file-2017-2024-abi-goes16-IR-o256-v2.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - zenith
+  - cos_sza
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed:
+    net: linear
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: GOES_ABI_IR
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  train_target_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  val_target_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+HIMAWARI_AHI_IR:
+  type: obs
+  stream_id: 12
+  filenames:
+  - observations-file-2015-2022-himawari8-IR-o256-v1.zarr
+  - observations-file-2022-2024-himawari9-IR-o256-v1.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - zenith
+  - cos_sza
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed:
+    net: linear
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: HIMAWARI_AHI_IR
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  train_target_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+  val_target_channels:
+  - obsvalue_rawbt_380
+  - obsvalue_rawbt_620
+  - obsvalue_rawbt_730
+  - obsvalue_rawbt_850
+  - obsvalue_rawbt_960
+  - obsvalue_rawbt_105
+  - obsvalue_rawbt_120
+  - obsvalue_rawbt_133
+GOES_ABI_VIS:
+  type: obs
+  stream_id: 13
+  filenames:
+  - observations-file-2017-2024-abi-goes16-VIS-o256-v2.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - zenith
+  - cos_sza
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config:
+        rate: 1.0
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed:
+    net: linear
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: GOES_ABI_VIS
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  train_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  val_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+HIMAWARI_AHI_VIS:
+  type: obs
+  stream_id: 14
+  filenames:
+  - observations-file-2015-2022-himawari8-VIS-o256-v1.zarr
+  - observations-file-2022-2024-himawari9-VIS-o256-v3.zarr
+  geoinfo_channels:
+  - cos_local_time
+  - sin_local_time
+  - cos_julian_day
+  - sin_julian_day
+  - zenith
+  - cos_sza
+  - cos_latitude
+  - sin_latitude
+  - cos_longitude
+  - sin_longitude
+  loss_weight: 1.0
+  token_size: 1024
+  tokenize_spacetime: false
+  forcing: true
+  embed:
+    net: linear
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  name: HIMAWARI_AHI_VIS
+  data_paths:
+  - /e/data1/slmet/ml_training
+  - /p/project1/hclimrep/koldunovn1
+  - /p/scratch/hclimrep/shared/weather_generator_data/icon_art
+  train_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  train_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  val_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
