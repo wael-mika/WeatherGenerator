@@ -14,50 +14,50 @@
 
 train:
   plot:
-    nescpnb2:
-      description: "Jepa:af90zz71 on develop-ssl-diffusion-v1"
-    hmpa42d2:
-      description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1"
-    # bpqbn9u5:
-    #   description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1, 8 steps"
-    tn6389hh:
-        description: "Forecast: oywmz4sz - 2 steps"
-    c6liueoc:
-        description: "fx276yn3, 2 setps, IMERG p1"
-    h1mrni5n:
-        description: "fx276yn3, 2 setps, IMERG p2"    
-    zk8jugvb:
-        description: "fx276yn3, 2 setps, IMERG+ERA5 p1"
-    dt6oawrf:
-        description: "fx276yn3, 2 setps, IMERG+ERA5 p2"    
-    xqlk2nkf:
-        description: "cw6a4szu, 2 steps, IMERG"
-    sslfnnb4:
-        description: "MTM: ra1xax01 2 steps"
-    c7btwqpu:
-        description: "MTM: ra1xax01 2 steps 24 epochs"
+    # nescpnb2:
+    #   description: "Jepa:af90zz71 on develop-ssl-diffusion-v1"
+    # hmpa42d2:
+    #   description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1"
+    # # bpqbn9u5:
+    # #   description: "Forecast:c71eo6pu on develop-ssl-diffusion-v1, 8 steps"
+    # tn6389hh:
+    #     description: "Forecast: oywmz4sz - 2 steps"
+    # c6liueoc:
+    #     description: "fx276yn3, 2 setps, IMERG p1"
+    # h1mrni5n:
+    #     description: "fx276yn3, 2 setps, IMERG p2"    
+    # zk8jugvb:
+    #     description: "fx276yn3, 2 setps, IMERG+ERA5 p1"
+    # dt6oawrf:
+    #     description: "fx276yn3, 2 setps, IMERG+ERA5 p2"    
+    # xqlk2nkf:
+    #     description: "cw6a4szu, 2 steps, IMERG"
+    # sslfnnb4:
+    #     description: "MTM: ra1xax01 2 steps"
+    # c7btwqpu:
+    #     description: "MTM: ra1xax01 2 steps 24 epochs"
     # ## 8 STEPS
-    # r2iy7iko:
-    #     description: "cw6a4szu, 8 setps, IMERG p1"
-    # lf97ve7d:
-    #     description: "cw6a4szu, 8 setps, IMERG p2"
-    # ti7k7l5s:
-    #     description: "JEPA:cw6a4szu ->xqlk2nkf, 2 -> 8"
-    # w1flta02:
-    #     description: "fx276yn3 ->h1mrni5n, 8 steps, IMERG"
-    # o8m370eh:
-    #     description: "fx276yn3 ->dt6oawrf , 8 steps, IMERG + ERA5"
-    # vpj2sbpa:
-    #     description: "JEPA: fx276yn3 direct, 8 steps, IMERG"
-    # mq8y8qza:
-    #     description: "v3gs9fwn:baseline 8 steps, p1"
-    # v3gs9fwn:
-    #     description: "v3gs9fwn:baseline 8 steps"
-    # h1ndsjwb:
-    #     description: "Forecast: oywmz4sz → tn6389hh 8 steps, 4 epochs"
-    # il7h8ewz:
-    #     description: "Forecast:oywmz4sz 8 steps direct 16 epochs"
-    # smy9lnmw:
-    #     description: "MTM:ra1xax01 8 steps direct 16 epochs"
-    # e5k44gk1:
-    #     description: "MTM:ra1xax01 ->sslfnnb4 , 2 -> 8, 4 epochs"
+    r2iy7iko:
+        description: "cw6a4szu, 8 setps, IMERG p1"
+    lf97ve7d:
+        description: "cw6a4szu, 8 setps, IMERG p2"
+    ti7k7l5s:
+        description: "JEPA:cw6a4szu ->xqlk2nkf, 2 -> 8"
+    w1flta02:
+        description: "fx276yn3 ->h1mrni5n, 8 steps, IMERG"
+    o8m370eh:
+        description: "fx276yn3 ->dt6oawrf , 8 steps, IMERG + ERA5"
+    vpj2sbpa:
+        description: "JEPA: fx276yn3 direct, 8 steps, IMERG"
+    mq8y8qza:
+        description: "v3gs9fwn:baseline 8 steps, p1"
+    v3gs9fwn:
+        description: "v3gs9fwn:baseline 8 steps"
+    h1ndsjwb:
+        description: "Forecast: oywmz4sz → tn6389hh 8 steps, 4 epochs"
+    il7h8ewz:
+        description: "Forecast:oywmz4sz 8 steps direct 16 epochs"
+    smy9lnmw:
+        description: "MTM:ra1xax01 8 steps direct 16 epochs"
+    e5k44gk1:
+        description: "MTM:ra1xax01 ->sslfnnb4 , 2 -> 8, 4 epochs"
