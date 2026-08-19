@@ -1,0 +1,58 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder finetune
+# from pretrained run c71eo6pu. The zarr has a single variable named 'tp'.
+#
+# PROBABILITY-OF-PRECIPITATION variant (calibrated BY CONSTRUCTION). A SINGLE head (ens_size 1)
+# outputs a LOGIT trained with BCE (pop_bce, loss_functions.py) against the binary label
+# y = (tp_norm > threshold). BCE is a proper scoring rule, so sigmoid(head) is a calibrated
+# P(tp > 0.1 mm) -- no post-hoc isotonic/Platt fix needed (unlike the WTA vote-fraction, which
+# over-forecasts because a few heads carry a global wet bias; AUC 0.92 but BSS only +0.10).
+#
+# UNITS: the loss sees NORMALISED (z-scored) tp. IMERG tp stats (from the zarr): mean 0.676 mm,
+# stdev 3.26 mm. So the physical wet threshold maps to normalised units as:
+#     0.0 mm -> -0.2074 ,  0.1 mm -> -0.1768 ,  1.0 mm -> +0.0994
+# threshold below = -0.1768  ==  P(tp > 0.1 mm/6h).
+#
+# READING THE PROBABILITY AT INFERENCE: the head is a logit, so run inference with
+# `--options test_config.output.normalized_samples=True` (writes the raw head value, not the
+# denormalised affine-mangled one) and apply sigmoid() to the stored output.
+#
+# vs the MSE / WTA arms: pred_head.ens_size stays 1 (a probability needs no ensemble axis) and
+# max_num_targets stays -1 (ens_size 1 -> no decode multiplication -> full n320 grid fits and
+# gives the most signal for calibration). Only the stream-level loss_fcts changes.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: -1
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 2}
+
+  # Stream-specific loss: BCE probability-of-exceedance head. threshold is in NORMALISED units
+  # (-0.1768 == 0.1 mm/6h for IMERG tp). Overrides the global losses.physical.loss_fcts for this
+  # stream only and bypasses the global loss-name gate (loss_module_physical.py:310-315, 379-381).
+  loss_fcts:
+    "pop_bce":
+      weight: 1.0
+      args:
+        threshold: -0.1768

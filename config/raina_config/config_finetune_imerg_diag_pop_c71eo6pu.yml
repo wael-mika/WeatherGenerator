@@ -1,0 +1,124 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run c71eo6pu -- PROBABILITY-OF-PRECIPITATION variant,
+# a single BCE-trained head that is CALIBRATED BY CONSTRUCTION.
+#
+# WHY: the WTA-heads-as-ensemble PoP (fraction of 16 heads > 0.1 mm) discriminates well
+# (AUC 0.92) but is badly miscalibrated / over-confident (BSS +0.10; reliability curve sits far
+# below the diagonal) because a few heads carry a global wet/dry bias. BCE (log loss) is a proper
+# scoring rule, so a single sigmoid head trained on the wet label y=(tp>0.1mm) converges to the
+# true conditional P(tp>0.1mm) -- calibrated with no post-hoc isotonic/Platt step. See
+# playground/docs/imerg_tp_ensemble_loss_plan.md §3.1 (this is the hurdle head's rain-probability
+# branch, built on its own first).
+#
+# Same backbone / stream set / recipe as config_finetune_imerg_diag_mse_c71eo6pu.yml; the loss is
+# the only variable. The IMERG decoder + head are new in this finetune so they are freshly
+# initialised (does not break checkpoint loading).
+#
+# READING THE OUTPUT: the head is a LOGIT. Run inference with
+#   --options test_config.output.normalized_samples=True test_config.output.num_samples=<N>
+# so the writer stores the raw head value (not the denormalised, affine-mangled one), then apply
+# sigmoid() to the stored output to get the probability.
+#
+# MUST launch from c71eo6pu_raina, not c71eo6pu: launch-slurm ships CODE from the --from-run-id
+# run's snapshot, and c71eo6pu's snapshot predates this branch (and the pop_bce loss).
+#
+# Run:
+#   uv run train_continue --from-run-id c71eo6pu_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_pop_c71eo6pu.yml
+# or on SLURM (single line, no backslashes):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id c71eo6pu_raina --config config/raina_config/config_finetune_imerg_diag_pop_c71eo6pu.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_pop_c71eo6pu/"
+
+# Absolute target coordinates in the decoder queries -- MATCHES THE BACKBONE (c71eo6pu was
+# pretrained with the fixed-grid patch active). Stored in the run config, so inference inherits it.
+target_coords_absolute: True
+
+# Freeze option (a): backbone AND forecast engine frozen; only the IMERG decoder + head train.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+
+# No ensemble axis: a probability needs a single head.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_pop_bce_from_c71eo6pu"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# HOST-RAM bound (matches the mse c71eo6pu arm; this o256 arm is the lighter one).
+data_loading:
+  num_workers: 6
+
+# config for training
+training_config:
+
+  training_mode: ["masking"]
+
+  # 16 epochs. Step-based LR schedule, so the epoch count only sets the constant-LR stretch.
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Global loss block kept as plain MSE for parity; IMERG is the only stream with targets and it
+  # declares its own loss_fcts (pop_bce) in the stream config, which takes precedence, so this
+  # block is inert here.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Pinned to match the other IMERG-diag arms; val dates already identical (Oct-Dec 2023).
+validation_config:
+  samples_per_mini_epoch: 256
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_pop
+  grid: null
