@@ -1,0 +1,111 @@
+# Evaluation config: IMERG diagnostic-decoder finetunes of rck9wgm7_raina — LOSS comparison
+#
+# All three arms share the SAME pretrained backbone (rck9wgm7_raina) and the SAME finetune
+# recipe: only the IMERG diagnostic decoder is trained (feature extractor / forecast engine
+# FROZEN). The single variable is the decoder loss + prediction head, so this config isolates
+# the effect of the loss on precipitation (IMERG tp, 6h windows, fsteps 1-2 = +0-6h / +6-12h):
+#
+#   train run  inference   loss              head            config
+#   ---------  ---------   ----------------  --------------  ---------------------------------
+#   zwx1z9hs   n46jvepr    mse               ens 1 (det)     config_finetune_imerg_diag_mse_rck9wgm7.yml
+#   iz46mwgt   nfrp04kg    mse_ens           ens 16          config_finetune_imerg_diag_mse_ens16_rck9wgm7.yml
+#   pe041o6a   j0tk9gxn    quantile_pinball  ens 16 (quant)  config_finetune_imerg_diag_pinball_rck9wgm7.yml
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_rck9wgm7_loss_comparison.yml
+#
+# CAVEATS:
+# 1. ensemble: "mean" collapses the ensemble axis for deterministic scoring — a fair
+#    det comparison vs the ens-1 mse arm (probabilistic crps/spread/ssr are still disabled
+#    in Scores.get_score). No-op for n46jvepr (ens 1); true ensemble mean for nfrp04kg.
+#    For j0tk9gxn (pinball) the 16 heads are QUANTILES on a NON-equispaced, tail-weighted
+#    ladder (see config/streams/imerg_diag_pinball_rck9wgm7/imerg_anemoi.yml), so the plain
+#    mean over heads is NOT the conditional mean — it over-weights the tail and reads
+#    WET-BIASED. Treat the pinball arm's mean scores as indicative only; for its true central
+#    estimate reconstruct by trapezoidal integration over tau, or analyse per-quantile with a
+#    dedicated members config (ensemble: "all", cf. eval_config_rqwdc8hu_members.yml).
+# 2. results_base_dir is omitted so each run's store auto-resolves from the private config's
+#    results dir (results_base_dir/<inference_run_id>/). If a run was staged elsewhere, add an
+#    explicit results_base_dir under that run below.
+# 3. tp is in metres per 6h window (ets/fbi thresh 0.001 = 1 mm/6h).
+# 4. psd / grad_amplitude are omitted: they need gridded lat/lon and crash on the
+#    scattered-ipoint WeatherGen output.
+
+max_workers: 16
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precip histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres/6h: 0.1 mm ... 20 mm
+      # BoundaryNorm uses extend="both": needs len(levels)+1 colors (6 bins + 2 extensions)
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"
+        - "#BEDAE5"
+        - "#80B5CC"
+        - "#5691B3"
+        - "#4B6E9C"
+        - "#424B83"
+        - "#45596D"
+        - "#5B9E4C"
+
+evaluation:
+  metrics:
+    - rmse
+    - mae
+    - bias
+    - ets:
+        thresh: 0.001    # 1 mm/6h event detection skill
+    - fbi:
+        thresh: 0.001    # 1 mm/6h frequency bias (>1 wet, <1 dry)
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/rck9wgm7_loss_comparison/"
+  plot_ensemble: "members"
+  plot_score_maps: false
+  plot_score_animations: false
+  plot_score_init_timeseries: true
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  score_cards: false
+  bar_plots: false
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global", "tropics"]   # IMERG covers 60S-60N; tropics dominate precip skill
+    channels: ["tp"]
+    evaluation:
+      forecast_step: "all"           # fsteps 1, 2
+      sample: "0-63"                  # cap to a shared range (e.g. "0-N") if sample counts differ
+      ensemble: "mean"               # det scoring; see caveat 1 (pinball mean is wet-biased)
+    plotting:
+      sample: [0, 12, 40]            # case studies — adjust to the runs' sample count
+      forecast_step: [1, 2]
+      ensemble: "mean"
+      plot_maps: true
+      plot_bias: false
+      plot_target: true              # overlay IMERG obs for visual comparison
+      plot_histograms: true
+      plot_animations: false
+      plot_timeseries: false
+
+run_ids:
+  n46jvepr:
+    label: "rck9wgm7 MSE (ens 1, FE frozen)"
+    color: "#1b9e77"
+
+  nfrp04kg:
+    label: "rck9wgm7 MSE-ens 16 (FE frozen)"
+    color: "#d95f02"
+
+  j0tk9gxn:
+    label: "rck9wgm7 pinball 16q (FE frozen)"
+    color: "#7570b3"

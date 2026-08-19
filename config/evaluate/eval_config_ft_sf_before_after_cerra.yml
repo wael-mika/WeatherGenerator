@@ -1,0 +1,109 @@
+# SF fine-tune before/after — the full 6-cell table of the CERRA sharpness campaign.
+# Three pretrained models, each next to its structure-function fine-tune:
+#
+#   pretrain (before)                          fine-tune (after)
+#   w125yex0 = ixrvotpi  quantile pinball K16  | ogvjhulp = y2xyoazv  + members-SF ft (Step 3)
+#   ymnbchza = mnb4hkd7  pure MSE, K1 no ups.  | fbrl1igf = h5jupjyu  + SF ft (ft_structure_generic)
+#   pur2jxnp = fc7kn805  pure MSE, K16 deep4   | izfv3hsi = nomobcqx  + SF ft (ft_structure_generic)
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_ft_sf_before_after_cerra.yml
+#
+# Date matching: ALL six inferences are single-rank, 16 samples, 6h stride starting
+# 2023-01-01T12 — sample index i is the same date in every run, so no per-run streams
+# overrides are needed (unlike the pretrain-ablation config, which had to date-match the
+# 2-rank p9yamxb2). Evaluation over all 16 samples; maps/histograms on [0, 2, 4].
+#
+# Channels: quantile arms have only ['10si','2t','tp'] (10wdir dropped at pretrain);
+# the MSE arms have 4 but 10wdir is circular and mis-scored by MSE-family metrics
+# => score the common 3. Ensemble "mean": identity for the ens-1 MSE arms, quantile-mean
+# for the ens-16 arms (the established scoring convention; remember heads do NOT
+# self-order — per-member products come from the zarr directly, not this eval).
+#
+# What to expect (from the campaign so far):
+#   * RMSE: fine-tunes pay a small double-penalty (qeyws5sj-lineage showed +4-7%);
+#     quantile-mean arms should stay the RMSE leaders.
+#   * Sharpness: the eval package has NO scattered-point sharpness metric — read
+#     fine structure from the maps + histograms here (tp std / max / drizzle bin),
+#     and quantify with the companion scripts:
+#       uv run python playground/scripts/sf_target_spectrum.py <run_id> --channel tp
+#       uv run python playground/scripts/seam_metric.py <run_id> ...
+#     (SF-ft sharpening historically AMPLIFIES HEALPix seams — check seam scores, and
+#     consider rerunning the ft inferences with --options streams.CERRA.decode_soft_blend_k=3.)
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  CERRA:
+    marker_size: 1
+    tp:
+      vmin: 0.0
+      vmax: 10.0
+    2t:
+      vmin: 250
+      vmax: 310
+    10si:
+      vmin: 0.0
+      vmax: 25.0
+
+max_workers: 16
+
+evaluation:
+  metrics: ["rmse", "mae", "bias"]
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/ft_sf_before_after_cerra/"
+  plot_ensemble: false
+  plot_score_maps: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  bar_plots: false
+  num_processes: 8
+
+default_streams:
+  CERRA:
+    regions: ["europe"]
+    channels: ["tp", "2t", "10si"]
+    evaluation:
+      forecast_step: "all"
+      sample: "0-15"          # identical dates in all six runs (see header)
+      ensemble: "mean"        # identity for ens-1 MSE arms, quantile-mean for ens-16 arms
+    plotting:
+      sample: [0, 2, 4]
+      forecast_step: "all"
+      ensemble: [0]
+      plot_maps: true
+      plot_bias: true
+      plot_target: true
+      plot_histograms: true
+      plot_animations: false
+
+run_ids:
+  # w125yex0:
+  #   label: "quantile K16 pretrain (ixrvotpi)"
+  #   color: "steelblue"
+  # ogvjhulp:
+  #   label: "quantile + SF fine-tune (y2xyoazv)"
+  #   color: "navy"
+  ao65tcd4:
+    label: "MSE + SF + hl fix allatonce"
+  ymnbchza:
+    label: "MSE K1 pretrain (mnb4hkd7)"
+    color: "mediumseagreen"
+  fbrl1igf:
+    label: "MSE K1 + SF fine-tune (h5jupjyu)"
+    color: "darkgreen"
+  pur2jxnp:
+    label: "MSE Latent_up pretrain (fc7kn805)"
+    color: "sandybrown"
+  izfv3hsi:
+    label: "MSE Latent_up + SF fine-tune (nomobcqx)"
+    color: "darkorange"
+  z81npms5:
+    label: "MSE K16-deep4 + SF fine-tune + hl fix (nomobcqx)"
+  # ao65tcd4:
+  #   label: "MSE + SF + hl fix allatonce"

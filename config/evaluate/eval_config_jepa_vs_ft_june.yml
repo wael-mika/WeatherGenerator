@@ -1,0 +1,143 @@
+# =============================================================================
+# Three-way: azsw18eo (FT frozen enc) vs le3u2yik (FT full) vs jepajune (JEPA FT)
+# at the forecast horizon azsw18eo/le3u2yik were TRAINED on: 3 steps x 6 h = +6/12/18 h.
+#
+#   uv run evaluation --config config/evaluate/eval_config_jepa_vs_ft_june.yml
+#
+# -----------------------------------------------------------------------------
+# PREREQUISITE — jepajune must be produced first (see § LAUNCH below)
+# -----------------------------------------------------------------------------
+# The existing muly9d4v inference of af90zz71 CANNOT be used here: it covers
+# 2023-10-01 .. 2023-12-04, while azsw18eo/le3u2yik cover 2023-06-01 .. 06-17.
+# Zero overlapping dates -> any score difference would be season, not model.
+# Everything else about muly9d4v was compatible (6 h steps, same 241920-point ERA5
+# grid, ens_size 1, all 12 channels below present in its 68-channel subset), so the
+# only fix needed is a June re-run of the same checkpoint.
+#
+# § LAUNCH (single stage, ~64 samples, 4 ranks on 1 node):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --stage inference --from-run-id af90zz71 --run-id jepajune --nodes 1 \
+#     --options test_config.start_date=2023-06-01T00:00 \
+#               test_config.end_date=2023-08-31T00:00 \
+#               test_config.time_window_step=06:00:00 \
+#               test_config.samples_per_mini_epoch=64 \
+#               test_config.output.num_samples=64 \
+#               test_config.forecast.num_steps=3 \
+#               data_loading.num_workers=12 \
+#     --time=02:00:00
+# Notes:
+#   * --mini-epoch defaults to -1 = af90zz71's LATEST checkpoint, same as muly9d4v used.
+#   * launch-slurm stages af90zz71's own snapshot (JEPA-branch code), so no patching.
+#   * num_steps 3 = the trained horizon of the two FT runs. Raise it to compare
+#     further out; muly9d4v already showed a 24-step rollout runs fine.
+#   * azsw18eo/le3u2yik died on their time limit at 59/63 of 64 samples — hence the
+#     2 h request here and the sample lists below.
+#
+# § SAMPLE ALIGNMENT — already handled, but VERIFY once the run lands
+# Sample index -> date depends on world_size AND num_workers: perms are contiguous
+# (shuffle False), rank r owns [r*len, (r+1)*len), each worker a contiguous sub-chunk,
+# and the DataLoader emits worker round-robin. With the launch above the three runs
+# land on the SAME map, so a single `sample: "0-57"` is correct for all of them:
+#   * azsw18eo/le3u2yik: 1 rank, len 64, 12 workers -> 5 per worker, so emitted order
+#     scrambles (sample 1 = window 5), but BOTH runs scramble identically —
+#     verified: same date at every one of their 58 common indices.
+#   * jepajune: 4 ranks (--nodes 1), len 16, 12 workers -> 1 per worker (worker 11
+#     takes the 5-window tail) -> emission is the identity, and the reader's global
+#     offsets (16/32/48) restore window order -> sample i = window i.
+#   * The range below stops at 0-57, not 0-63: azsw18eo's time-limit kill left sample 58
+#     with forecast step 1 written but steps 2-3 missing (le3u2yik same at 62). The eval
+#     reader's "All checks passed" presence check does NOT catch a partially written
+#     sample — it dies mid-load with `KeyError: 58/ERA5/2/prediction/data` — so the last
+#     sample of any truncated run must be excluded by hand. 58 complete common samples,
+#     2023-06-01T12 .. 2023-06-15T18.
+# This is derived, not measured, so confirm before drawing conclusions:
+#   uv run python scripts/match_eval_samples.py azsw18eo le3u2yik jepajune
+# (the matcher counts a sample only when all of fsteps 1-3 have prediction AND target data)
+# Expected: `VERDICT: index-aligned and contiguous -> sample: "0-57"`. If it says
+# NOT index-aligned (a rank died early, or --nodes / samples were changed), paste the
+# per-run lists it prints into the per-run `sample:` keys below.
+# =============================================================================
+
+global_plotting_options:
+  image_format: "png"
+  animation_format: "gif"
+  dpi_val: 150
+  fps: 2
+  n_bins: 60
+  ERA5:
+    marker_size: 2
+    2t:
+      vmin: 250
+      vmax: 315
+    msl:
+      vmin: 98000
+      vmax: 104000
+
+max_workers: 16
+
+evaluation:
+  metrics:
+    - rmse
+    - mae
+    - bias
+    - mse
+
+  baseline: "jepajune"          # ratios/skill relative to the full fine-tune
+
+  summary_plots: true
+  ratio_plots: true
+  heat_maps: true
+  score_cards: true
+  bar_plots: true
+  plot_ensemble: false          # all three are ens_size 1 (deterministic)
+  plot_score_maps: true
+  plot_score_animations: true
+  plot_score_init_timeseries: true
+  print_summary: true
+  log_scale: false
+  add_grid: true
+  summary_dir: "./plots/eval_jepa_vs_ft_june/"
+  num_processes: 8
+
+# Channels common to all three runs. muly9d4v/af90zz71 output has 68 ERA5 channels
+# vs 81 for the FT runs; the 13 missing (hcc/lcc/mcc/tcc, skt, sp, ssrd, strd, *_10)
+# are deliberately not listed here.
+default_streams: &default_streams
+  ERA5:
+    regions: ["global"]
+    channels: ["2t", "10u", "10v", "msl", "2d",
+               "z_500", "z_850", "t_850", "t_500",
+               "u_850", "v_850", "q_850"]
+    evaluation:
+      forecast_step: "1-3"     # +6 h / +12 h / +18 h — the trained horizon
+      sample: "0-57"           # 58 date-aligned samples complete at fsteps 1-3 in both
+                               # FT runs (58/62 are truncated — see § SAMPLE ALIGNMENT)
+      ensemble: "all"
+    plotting:
+      sample: [0]              # 2023-06-01T12 valid time in all three runs
+      forecast_step: "1-3"
+      plot_maps: false
+      plot_bias: false
+      plot_target: false
+      plot_histograms: false
+      plot_animations: false
+      plot_timeseries: true
+
+run_ids:
+  azsw18eo:
+    label: "azsw18eo: MTM FT, frozen encoder"
+    color: "steelblue"
+    streams: *default_streams
+
+  le3u2yik:
+    label: "le3u2yik: MTM FT, full"
+    color: "darkorange"
+    streams: *default_streams
+
+  # A run entry's `streams:` REPLACES default_streams (run_evaluation.py:335) — the anchor
+  # keeps the three identical. If the matcher reports the runs are not index-aligned, expand
+  # one of these into a full block and give it its own `evaluation.sample:` list.
+  jepajune:
+    label: "jepajune: JEPA pretrain + 2/8-step ERA5 FT (af90zz71)"
+    color: "seagreen"
+    streams: *default_streams

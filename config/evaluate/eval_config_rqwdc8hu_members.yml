@@ -1,0 +1,103 @@
+# Supplementary evaluation: per-member analysis of the CRPS ensemble run rqwdc8hu
+# (ipnpqow8 backbone, FE frozen, decoder_ens_latent_perturbation num_members=4).
+#
+# Companion to eval_config_imerg_diag_comparison.yml, which scores this run on its
+# ensemble MEAN. Here `ensemble: "all"` keeps the ens dimension through scoring
+# (agg_dims="ipoint"), so every metric is computed for each of the 4 members
+# separately and plotted as separate lines/maps (plot_ensemble: "members").
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_rqwdc8hu_members.yml
+#
+# Notes:
+# - Store is the REPAIRED copy (samples 0-55; 56-63 lost to the truncated zip) staged
+#   at /iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/rqwdc8hu/. This is the ONLY
+#   run that still reads from that staging dir: the zip in the shared results dir is the
+#   truncated original (1398359190 B, no end-of-central-directory) and cannot be opened.
+#   Outputs are redirected back to the shared path via runplot_base_dir/metrics_base_dir,
+#   so plots and score JSONs land in results/rqwdc8hu/ like every other run. If the
+#   repaired zip is ever copied over the broken one in the shared dir, delete all three
+#   *_base_dir keys below and let them auto-resolve.
+# - Probabilistic scores (crps/spread/ssr/rank_histogram) are currently disabled in
+#   Scores.get_score (early `return None`), so member spread has to be read off the
+#   per-member det scores; the members are exchangeable draws from the latent
+#   perturbation (no member has a special role), so expect them to be statistically
+#   interchangeable — large member-to-member score gaps would indicate a problem.
+# - tp is in metres per 6h window (ets/fbi thresh 0.001 = 1 mm/6h).
+
+max_workers: 16
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+  n_bins: 60
+  log_y: true
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres/6h: 0.1 mm ... 20 mm
+      # BoundaryNorm uses extend="both": needs len(levels)+1 colors (6 bins + 2 extensions)
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"
+        - "#BEDAE5"
+        - "#80B5CC"
+        - "#5691B3"
+        - "#4B6E9C"
+        - "#424B83"
+        - "#45596D"
+        - "#5B9E4C"
+
+evaluation:
+  metrics:
+    - rmse
+    - mae
+    - bias
+    - ets:
+        thresh: 0.001    # 1 mm/6h event detection skill
+    - fbi:
+        thresh: 0.001    # 1 mm/6h frequency bias (>1 wet, <1 dry)
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/rqwdc8hu_members/"
+  plot_ensemble: "members"           # one line per member in summary plots
+  plot_score_maps: false
+  plot_score_animations: false
+  plot_score_init_timeseries: true
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  score_cards: false
+  bar_plots: false
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global", "tropics"]
+    channels: ["tp"]
+    evaluation:
+      forecast_step: "all"           # fsteps 1, 2
+      sample: "0-55"                 # full recovered store
+      ensemble: "all"                # score all 4 members individually
+    plotting:
+      sample: [0, 12, 40]            # same case studies as the comparison config
+      forecast_step: [1, 2]
+      ensemble: "all"                # per-member maps show the latent-perturbation spread
+      plot_maps: true
+      plot_bias: false
+      plot_target: true
+      plot_histograms: true          # per-member intensity distributions vs IMERG
+      plot_animations: false
+      plot_timeseries: false
+
+run_ids:
+  rqwdc8hu:
+    label: "ipnpqow8 CRPS (FE frozen)"
+    color: "#7570b3"
+    # READ the repaired store from the staging dir (the zip in the shared results dir is
+    # truncated and unreadable — see header note), but WRITE plots and score JSONs to the
+    # shared run dir so all outputs live under results/<run_id>/ like every other run.
+    results_base_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/rqwdc8hu"
+    runplot_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/rqwdc8hu"
+    metrics_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/rqwdc8hu"

@@ -16,8 +16,12 @@ train:
   plot:
     ybw9z1zs:
       description: "gkm6as6m, high res obs, N320"
+    a8s04j4h:
+      description: "gkm6as6m, high res obs, N320, abs coords"
     qljpw7sa:
       description: "c71eo6pu, low res obs, N320"
+    nfizpnv2:
+      description: "c71eo6pu, low res obs, N320, abs coords"
     zwx1z9hs:
       description: "rck9wgm7, low res-obs, O96"
     poi264qg:

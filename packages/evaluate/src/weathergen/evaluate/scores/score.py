@@ -1253,9 +1253,9 @@ class Scores:
         return ratio_spat_variability
 
     def calc_seeps(
-        self, 
-        p: xr.DataArray, 
-        gt: xr.DataArray, 
+        self,
+        p: xr.DataArray,
+        gt: xr.DataArray,
         c: xr.Dataset,
         minimum_dry_prob: float = 0.1,
         maximum_dry_prob: float = 0.85,
