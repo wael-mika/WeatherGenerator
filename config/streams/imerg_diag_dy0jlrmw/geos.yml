@@ -18,6 +18,12 @@
 # IMERG as the only target.
 
 METEOSAT_SEVIRI_IR:
+  # Explicit empty target: an ABSENT `target` means "select every channel"
+  # (data_reader_{anemoi,obs}.select_channels), so this stream would resolve target
+  # channels that are read from zarr every sample and discarded -- it is forcing, so it
+  # is never decoded and never enters the loss. Verified on run gckt1vzm, which resolved
+  # 54 such channels across 7 obs streams. Keeps IMERG the only target, explicitly.
+  target: []
   type: obs
   stream_id: 10
   filenames:
@@ -113,6 +119,12 @@ METEOSAT_SEVIRI_IR:
   - obsvalue_rawbt_120
   - obsvalue_rawbt_133
 GOES_ABI_IR:
+  # Explicit empty target: an ABSENT `target` means "select every channel"
+  # (data_reader_{anemoi,obs}.select_channels), so this stream would resolve target
+  # channels that are read from zarr every sample and discarded -- it is forcing, so it
+  # is never decoded and never enters the loss. Verified on run gckt1vzm, which resolved
+  # 54 such channels across 7 obs streams. Keeps IMERG the only target, explicitly.
+  target: []
   type: obs
   stream_id: 11
   filenames:
@@ -193,6 +205,12 @@ GOES_ABI_IR:
   - obsvalue_rawbt_120
   - obsvalue_rawbt_133
 HIMAWARI_AHI_IR:
+  # Explicit empty target: an ABSENT `target` means "select every channel"
+  # (data_reader_{anemoi,obs}.select_channels), so this stream would resolve target
+  # channels that are read from zarr every sample and discarded -- it is forcing, so it
+  # is never decoded and never enters the loss. Verified on run gckt1vzm, which resolved
+  # 54 such channels across 7 obs streams. Keeps IMERG the only target, explicitly.
+  target: []
   type: obs
   stream_id: 12
   filenames:
@@ -274,6 +292,12 @@ HIMAWARI_AHI_IR:
   - obsvalue_rawbt_120
   - obsvalue_rawbt_133
 GOES_ABI_VIS:
+  # Explicit empty target: an ABSENT `target` means "select every channel"
+  # (data_reader_{anemoi,obs}.select_channels), so this stream would resolve target
+  # channels that are read from zarr every sample and discarded -- it is forcing, so it
+  # is never decoded and never enters the loss. Verified on run gckt1vzm, which resolved
+  # 54 such channels across 7 obs streams. Keeps IMERG the only target, explicitly.
+  target: []
   type: obs
   stream_id: 13
   filenames:
@@ -324,6 +348,12 @@ GOES_ABI_VIS:
   - obsvalue_rawbt_086
   - obsvalue_rawbt_160
 HIMAWARI_AHI_VIS:
+  # Explicit empty target: an ABSENT `target` means "select every channel"
+  # (data_reader_{anemoi,obs}.select_channels), so this stream would resolve target
+  # channels that are read from zarr every sample and discarded -- it is forcing, so it
+  # is never decoded and never enters the loss. Verified on run gckt1vzm, which resolved
+  # 54 such channels across 7 obs streams. Keeps IMERG the only target, explicitly.
+  target: []
   type: obs
   stream_id: 14
   filenames:

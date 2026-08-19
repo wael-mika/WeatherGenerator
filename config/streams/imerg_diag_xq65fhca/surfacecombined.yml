@@ -1,0 +1,48 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# SurfaceCombined: input-only (forcing) stream reproduced VERBATIM from the
+# saved config of pretrained run xq65fhca
+# (/e/scratch/weatherai/shared_work/models/xq65fhca/model_xq65fhca_latest.json),
+# minus runtime-derived keys. Do not edit by hand -- regenerate from the
+# checkpoint config if the source run changes.
+
+SurfaceCombined:
+# IMERG-ONLY OVERRIDE (added after generation, do not drop when regenerating):
+# this parent RECONSTRUCTS its input streams -- the saved config resolves non-empty
+# train_target_channels/val_target_channels for 8-10 streams. gen_stream_dir.py strips those
+# runtime-derived keys, and an ABSENT `target` means "select every channel"
+# (data_reader_anemoi.select_channels: `... if channels is not None else True`;
+# data_reader_obs.select_channels is identical), so the stream would be reconstructed again.
+# An EXPLICIT empty list selects nothing -- np.array([]).any() is False -- which is what makes
+# IMERG the sole target. Emptying `target` alone is sufficient HERE only because these _fix
+# snapshots REPLACE the streams dict (config.py `base_config.streams = None`); under a union
+# merge the resolved lists survive from the checkpoint and must be emptied too.
+  target: []
+  target_exclude: []
+  type: obs
+  stream_id: 30
+  filenames: [observations-ea-ofb-0001-1979-2025-combined-surface-v5.zarr]
+  source: [obsvalue_tsts_0, obsvalue_t2m_0, obsvalue_td2m_0, obsvalue_u10m_0, obsvalue_v10m_0, obsvalue_pmsl_0,
+    obsvalue_ps_0]
+  geoinfo_channels: [stalt, lsm, cos_sza, cos_local_time, sin_local_time, cos_julian_day, sin_julian_day]
+  loss_weight: 1.0
+  token_size: 256
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config: {rate: 0.5}
+  tokenize_spacetime: false
+  max_num_targets: -1
+  forcing: true
+  embed: {net: transformer, num_tokens: 1, num_heads: 2, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {num_layers: 1, num_heads: 4, self_attention: false, mlp_hidden_factor: 1}
+  pred_head: {ens_size: 1, num_layers: 1}
+  target_channel_weights: []
