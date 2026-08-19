@@ -1,0 +1,141 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run rck9wgm7 (ERA5+Obs -> OperAn+obs)
+# -- QUANTILE / pinball variant, 16 quantile heads, EXTREME-TAIL ladder.
+#
+# TAIL VARIANT of config_finetune_imerg_diag_pinball_rck9wgm7.yml (run j0tk9gxn). Its 32-sample
+# PoP evaluation was well-calibrated at 0.1/1 mm but OVER-confident for P(tp>5mm) in the top
+# bins, because the quantile ladder stopped at tau=0.999 (~41 mm) so CDF inversion could not
+# reach the extreme tail. This arm reallocates the two REDUNDANT sub-atom levels (0.30, 0.55 --
+# both inside the 67.3% zero atom, so both pin q=0) to 0.9995 and 0.9999, adding extreme-tail
+# resolution with NO extra heads (ens_size stays 16, no extra decode memory). The loss is
+# otherwise identical. See the stream's imerg_anemoi.yml for the full ladder + rationale.
+#
+# Third arm of the ens16 family on the same checkpoint, so the loss is the only variable:
+#   config_finetune_imerg_diag_mse_rck9wgm7.yml        ens 1,  mse        (deterministic base)
+#   config_finetune_imerg_diag_mse_ens16_rck9wgm7.yml  ens 16, mse_ens    (capacity control)
+#   config_finetune_imerg_diag_crps_rck9wgm7.yml       ens 4,  kernel_crps (latent perturbation)
+#   THIS FILE                                          ens 16, quantile_pinball
+#
+# WHY PINBALL ALONE (no mse, no structure-function term):
+#   - Pinball is a proper scoring rule: CRPS = integral over tau of the pinball loss, so the
+#     16 heads are trained to be a calibrated conditional distribution without any stochastic
+#     source. It does NOT collapse to the conditional mean the way mse/mse_ens do.
+#   - Mixing in mse re-imposes exactly that conditional-mean pull on every head, i.e. it
+#     interpolates back toward the blur this arm exists to escape. The CERRA quantile run
+#     (ixrvotpi) already beat its MSE twins on RMSE with no mse term at all -- 16-head
+#     averaging is a free mini-ensemble.
+#   - A structure-function (sharpness) term is the proven complement, but SEQUENTIALLY, as a
+#     stage-2 finetune of this run -- joint-from-scratch is documented to fail
+#     (playground/docs/sf_weight_ramp.md), and on IMERG the SF term additionally needs
+#     quantile_levels or it games the loss with global drizzle (run ymlx3c4r post-mortem).
+#     Do that after this run lands, not inside it.
+#
+# WHY NON-EQUISPACED QUANTILE LEVELS: IMERG 6h tp is 67.3% exact zeros / 77.9% below 0.1 mm
+# (measured on this zarr), so the default tau_k = (k+0.5)/16 would waste eleven heads on the
+# zero atom and cap the wettest head near 5.9 mm/6h. The stream config carries an explicit
+# tail-weighted ladder instead -- full rationale and the measured quantile table are in
+# config/streams/imerg_diag_pinball_tail_rck9wgm7/imerg_anemoi.yml.
+#
+# Stream set: the pretraining INPUT (forcing) streams (ERA5_in + IASI + geo IR/VIS + surface)
+# reproduced verbatim from the saved checkpoint config, plus IMERG as the ONLY diagnostic/
+# output stream. The pretraining output stream (ERA5) is intentionally dropped: the model is
+# trained exclusively on predicting IMERG from the frozen pretrained representation.
+# The IMERG decoder + pred head are new in this finetune, so all 16 heads are freshly
+# initialised -- ens_size 16 does not break checkpoint loading.
+#
+# Run:
+#   uv run train_continue --from-run-id rck9wgm7_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_pinball_tail_rck9wgm7.yml
+# or, on SLURM (single line, no backslashes -- see the launch gotcha in branch memory):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id rck9wgm7_raina --config config/raina_config/config_finetune_imerg_diag_pinball_tail_rck9wgm7.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_pinball_tail_rck9wgm7/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# The ensemble axis is the 16 quantile heads (pred_head.ens_size), so no model-wide latent
+# perturbation -- the two ensemble axes would multiply and the quantile reading would be lost.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_pinball_tail_ens16_from_rck9wgm7"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  # 32 epochs, matching the ens16 mse_ens arm. The LR schedule is step-based (warmup 256 /
+  # cooldown 512 steps), so shortening to 24 only shortens the constant-LR stretch.
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5_in v6 zarr covers 2016-2023 and the checkpoint was pretrained on 2016-2022;
+  # earlier start dates would sample windows with no input data at all.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Global loss block kept as plain MSE for parity with the other arms; IMERG is the only
+  # stream with targets and it declares its own loss_fcts (quantile_pinball), which takes
+  # precedence, so this block is effectively inert here.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_pinball
+  grid: null
