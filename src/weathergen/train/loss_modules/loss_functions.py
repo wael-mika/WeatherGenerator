@@ -319,6 +319,62 @@ def mse_wta(
     return loss, loss_chs
 
 
+def pop_bce(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    threshold: float = 0.0,
+):
+    """
+    Binary cross-entropy for a probability-of-exceedance head (calibrated BY CONSTRUCTION).
+
+    The head output is interpreted as a LOGIT and trained against the binary label
+    ``y = (target > threshold)`` with BCE-with-logits. Because BCE (log loss) is a strictly
+    proper scoring rule, its population minimiser under a sigmoid link is the true conditional
+    probability ``P(target > threshold | inputs)`` -- so ``sigmoid(head)`` is a calibrated
+    probability, with no systematic bias like the WTA vote-fraction (which over-forecasts because
+    a few heads carry a global wet/dry bias). Finite data / capacity can still leave residual
+    miscalibration, but there is no built-in distortion to undo.
+
+    IMPORTANT -- units: the loss sees the NORMALISED (z-scored) target, so ``threshold`` is in
+    normalised units, NOT mm. For IMERG 6h tp (mean 0.676 mm, stdev 3.26 mm) the physical
+    thresholds map as:  0.0 mm -> -0.2074,  0.1 mm -> -0.1768,  1.0 mm -> +0.0994.
+    Set it via the stream's ``loss_fcts.pop_bce.args.threshold``.
+
+    Because the head is a logit (not tp), read the probability at inference with
+    ``sigmoid(output)`` and write the raw head value with ``output.normalized_samples: True``
+    (otherwise the writer denormalises it into an affine-mangled value).
+
+    Params:
+        target : shape (num_data_points, num_channels), z-scored
+        pred   : shape (ens_dim, num_data_points, num_channels); logits. ens>1 is averaged
+                 in logit space (ens_size 1 is the intended single calibrated head).
+        threshold : exceedance level in NORMALISED target units.
+        weights_channels : shape (num_channels,) or None
+        weights_points : shape (num_data_points,) or None
+
+    Return:
+        loss : (weighted) scalar BCE
+        loss_chs : per-channel BCE
+    """
+    mask_nan = ~torch.isnan(target)
+    logit = pred.mean(0)  # [num_data_points, num_channels]
+    y = torch.where(mask_nan, target > threshold, torch.zeros_like(target, dtype=torch.bool))
+    y = y.to(logit.dtype)
+
+    bce = F.binary_cross_entropy_with_logits(logit, y, reduction="none")
+    bce = torch.where(mask_nan, bce, torch.zeros_like(bce))
+
+    if weights_points is not None:
+        bce = (bce.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    # mean over valid (non-NaN) points per channel
+    loss_chs = bce.sum(0) / mask_nan.sum(0).clamp(min=1).to(bce.dtype)
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
 def lp_loss(
     target: torch.Tensor,
     pred: torch.Tensor,
