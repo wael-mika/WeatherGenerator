@@ -1,0 +1,144 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from rck9wgm7 -- CRPS + latent-noise ensemble, COLLAPSE-FIXED variant.
+#
+# !!! SHELVED 2026-07-24 -- DO NOT LAUNCH AS-IS. Two flaws found after this was written:
+#   (1) MIS-ATTRIBUTED DRY BIAS. rqwdc8hu's dry output is MEDIAN-SEEKING, not FE blur: collapsed
+#       kernel_crps degenerates to MAE, whose minimizer on a 67%-zero field is the median (~0).
+#       Verified: pred median ~0 (target mean 0.69), 52% of predicted tp NEGATIVE. Unfreezing the
+#       FE (below) cannot fix a median-seeking bias -- the FE gradient would fight the objective.
+#   (2) INTERNAL INCONSISTENCY. This unfreezes the FE to "shape a sharper latent", but the noise
+#       is injected at model.py:816-827 DOWNSTREAM of the FE, so the trainable FE never sees the
+#       noise and cannot shape the spread. freeze-(b)+downstream-noise fixes neither collapse nor
+#       shape; sigma_learnable:False just re-imposes wrong-SHAPE (symmetric, negative-at-dry)
+#       spread the objective already judged harmful -> a diagnostic, not a fix.
+#   Correct direction: fix the MARGINAL first (hurdle/two-part head + non-negative activation),
+#   then a JOINT objective (variogram/energy score) over conditioned-noise members. To make
+#   unconditioned noise skillful it must enter INTO/BEFORE the FE or sigma be input-conditioned.
+#   Kept only as a documented negative result. See .claude/branch_memory.md (2026-07-24).
+#
+# Motivation: the previous CRPS+latent-noise run (rqwdc8hu, from ipnpqow8) COLLAPSED --
+# 4 members correlated 0.95, per-point spread 0.5% of the target std, and blurry/dry
+# (member max 26 vs target 177 mm/6h). Two independent causes, each fixed here:
+#
+#   1. COLLAPSE (the ensemble): sigma was LEARNABLE. The latent Gaussian added at
+#      model.py:827 is UNCONDITIONED (carries no info about where it rains), so kernel_crps
+#      is minimised by making the decoder noise-invariant -> the learnable sigma decays to ~0
+#      -> members become identical. Just raising sigma_init does NOT help while it is still
+#      learnable (it re-decays). FIX: sigma_learnable: False + a larger fixed sigma_init, so
+#      the spread is forced and the decoder cannot collapse it. num_members 4 -> 8 for a
+#      richer ensemble now that it will not collapse.
+#
+#   2. BLUR / dry bias (the single field): the frozen forecast engine hands the decoder a
+#      blurry latent. The noise is injected DOWNSTREAM of the FE, so unfreezing does not touch
+#      the collapse -- but it lets the FE produce a sharper latent, which is the only way to
+#      lift the capped extremes. FIX: freeze option (b), forecast engine trainable. This is
+#      the same frozen(yzjv1l6f)/unfrozen(ldwpc9i7) axis already used on this project.
+#
+# HONEST EXPECTATION: unconditioned noise on a SHARED latent token is the weakest of the
+# diversity mechanisms tried; even fixed + unfrozen, expect "jittered variants of one field"
+# rather than the distinct realizations mse_wta gives. Run this to confirm/deny, but the
+# wta arm (config_finetune_imerg_diag_wta_rck9wgm7.yml) is the stronger bet for realistic
+# distinct members.
+#
+# sigma_init 0.5 is a STARTING point (relative to the O(1) latent-token scale) and the primary
+# knob to sweep: too small -> no spread, too large -> corrupts every member. Read per-point
+# ens_std vs target std and per-member RMSE from a short inference to retune.
+#
+# Uses a dedicated stream dir (imerg_diag_crps_fixed_rck9wgm7) whose ONLY change vs
+# imerg_diag_rck9wgm7 is max_num_targets 131072 -- required because 8 members tile the decoder
+# AND the FE is now trainable (FE gradients across the 2-step rollout), so the full grid OOMs.
+#
+# Run:
+#   uv run train_continue --from-run-id rck9wgm7_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_crps_fixed_rck9wgm7.yml
+# or on SLURM (single line, no backslashes):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id rck9wgm7_raina --config config/raina_config/config_finetune_imerg_diag_crps_fixed_rck9wgm7.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_crps_fixed_rck9wgm7/"
+
+# Freeze option (b): forecast engine LEFT TRAINABLE (the blur fix). Only the encoder / global /
+# local / adapter / latent / ERA5 path stay frozen; forecast + IMERG decoder train.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# Latent Gaussian perturbation for probabilistic decoding (PR #2578), COLLAPSE-FIXED:
+# sigma FIXED (not learnable) so kernel_crps cannot shrink the spread to zero.
+decoder_ens_latent_perturbation :
+  num_members: 8
+  sigma_init: 0.5
+  sigma_learnable: False
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_crps_fixed_from_rck9wgm7"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5_in v6 zarr covers 2016-2023 and the checkpoint was pretrained on 2016-2022;
+  # earlier start dates would sample windows with no input data at all.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # kernel_crps on the only output stream (IMERG). "mse": null disables the checkpoint's
+  # inherited {"mse": {}} (skipped by _parse_loss_fcts).
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": null, "kernel_crps": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_crps_fixed
+  grid: null

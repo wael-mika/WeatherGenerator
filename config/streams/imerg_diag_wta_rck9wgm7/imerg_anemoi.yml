@@ -1,0 +1,53 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder
+# finetune from a pretrained checkpoint. The zarr has a single variable named 'tp'.
+#
+# WTA (winner-take-all) variant: 16 EnsPredictionHead MLPs on the same decoded token, trained
+# with eps-relaxed WTA (mse_wta, loss_functions.py:268). Per point ONLY the best-matching head
+# gets the dominant gradient, so heads SPECIALIZE into distinct sharp regimes instead of all
+# collapsing to the conditional mean (what mse/mse_ens do). Each head then becomes a coherent
+# spatial field with its own light/heavy structure -> the "realistic members" goal.
+#   - eps (default 0.05) keeps losing heads alive AND bounds runaway members (the over/under-
+#     predictors seen in the 16-head kernel_crps run); it is the primary knob to sweep.
+#   - Members are hedged experts, NOT a calibrated distribution: score/use them INDIVIDUALLY
+#     (best-member or a selection head), the ensemble MEAN is meaningless here.
+# A stream-level loss_fcts overrides the global losses.physical.loss_fcts for this stream only
+# and bypasses the global loss-name gate (loss_module_physical.py:310-315, 379-381).
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  # 16 heads -> 16x decode activations; an uncapped n320 window (~542k pts/step) OOMs a 96 GB
+  # GH200 in backward. 131072 is smoke-verified end-to-end for the 16-head family; 262144 also
+  # trains. Uniform random subsample without replacement per window (data_reader_base.py:240) --
+  # unbiased, different points every window.
+  max_num_targets: 131072
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 16, num_layers: 2}
+
+  # Stream-specific loss: per-point eps-relaxed winner-take-all over the 16 heads.
+  loss_fcts:
+    "mse_wta":
+      weight: 1.0
+      args:
+        eps: 0.05

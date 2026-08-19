@@ -1,0 +1,60 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder
+# finetune from pretrained run c71eo6pu. The zarr has a single variable named 'tp'.
+#
+# WTA (winner-take-all) variant: 16 EnsPredictionHead MLPs on the same decoded token, trained
+# with eps-relaxed WTA (mse_wta, loss_functions.py:268). Per point ONLY the best-matching head
+# gets the dominant gradient, so heads specialize instead of all collapsing to the conditional
+# mean (what mse/mse_ens do). Members are hedged experts, NOT a calibrated distribution: use
+# them individually, the ensemble MEAN is meaningless here.
+#
+# CAVEAT (see playground/docs/imerg_tp_ensemble_loss_plan.md §2.2): per-point WTA winner = head
+# closest in VALUE to the target, so on this 67%-zero field heads tend to self-partition by
+# INTENSITY BAND (dry head / heavy head) -- similar to the pinball structure. Also argmin ties
+# on exact-zero points break to head 0 -> head-0 dominance / dead heads; eps=0.05 keep-alive is
+# weak. Inspect per-head win-count / wet-frac / wet-only member corr before trusting the members;
+# sweep eps 0.1-0.2 if heads collapse or starve.
+#
+# COPY of imerg_diag_c71eo6pu/imerg_anemoi.yml with THREE changes vs the MSE base:
+#   - pred_head.ens_size 1 -> 16 (the ensemble axis is the 16 heads; freshly initialised in the
+#     finetune, so this does not break checkpoint loading).
+#   - max_num_targets -1 -> 131072 (16 heads = 16x decode activations; an uncapped n320 window
+#     ~542k pts/step OOMs in backward. 131072 is smoke-verified for the 16-head family. Uniform
+#     random subsample w/o replacement per window -- unbiased, different points every window).
+#   - a stream-level loss_fcts (mse_wta) that overrides the global losses.physical.loss_fcts for
+#     this stream only and bypasses the global loss-name gate
+#     (loss_module_physical.py:310-315, 379-381).
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: 131072
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 16, num_layers: 2}
+
+  # Stream-specific loss: per-point eps-relaxed winner-take-all over the 16 heads.
+  loss_fcts:
+    "mse_wta":
+      weight: 1.0
+      args:
+        eps: 0.05

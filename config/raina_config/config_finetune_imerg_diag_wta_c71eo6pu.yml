@@ -1,0 +1,134 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run c71eo6pu (ERA5 + georing/AVHRR obs, LOWRES o256
+# obs set) -- WINNER-TAKE-ALL variant, 16 heads, eps-relaxed MCL. Same backbone/stream set and
+# recipe as config_finetune_imerg_diag_mse_c71eo6pu.yml; the loss is the only variable.
+#
+# WHY: mse/mse_ens collapse to the conditional mean (blurry). mse_wta gives per-point WTA so the
+# 16 heads specialize into distinct sharp fields (docs/decoder_assessment.md §2.1.1: per-point
+# selection holds the prize, per-sample selection is worthless). Members are hedged experts, NOT
+# a calibrated distribution -- use them individually, the ensemble mean is meaningless.
+# CAVEAT + diagnostics: see playground/docs/imerg_tp_ensemble_loss_plan.md §2.2 (heads may
+# self-partition by intensity band on this 67%-zero field; watch per-head win-counts / dead heads;
+# eps 0.05 is the primary knob to sweep up to 0.1-0.2 if heads collapse or starve).
+#
+# The IMERG decoder + 16 heads are new in this finetune, so all heads are freshly initialised --
+# ens_size 16 does not break checkpoint loading. 16 epochs (step-based LR schedule, so the epoch
+# count only sets the constant-LR stretch).
+#
+# MUST launch from c71eo6pu_raina, not c71eo6pu: launch-slurm ships CODE from the --from-run-id
+# run's snapshot, and c71eo6pu's snapshot predates this branch's CRPS / geoinfo-synthesis /
+# forcing-target-skip fixes AND the mse_wta loss. c71eo6pu_raina carries the current branch code.
+#
+# Run:
+#   uv run train_continue --from-run-id c71eo6pu_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_wta_c71eo6pu.yml
+# or on SLURM (single line, no backslashes):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id c71eo6pu_raina --config config/raina_config/config_finetune_imerg_diag_wta_c71eo6pu.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_wta_c71eo6pu/"
+
+# Absolute target coordinates in the decoder queries -- MATCHES THE BACKBONE: c71eo6pu was
+# pretrained with the fixed-grid patch active (verified in its slurm snapshot). Because the value
+# is stored in the run config, inference inherits it automatically; do NOT set it on the inference
+# command line. The c71eo6pu_raina staging dir must carry the gated tokenizer code for this key.
+target_coords_absolute: True
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+#     Kept for a clean, cheap first read (the loss is the only variable vs the mse arm).
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention) --
+#     the follow-up if members are sharp but the underlying field stays blurry:
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# The ensemble axis is the 16 heads (pred_head.ens_size), so no model-wide latent perturbation.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_wta_ens16_from_c71eo6pu"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# HOST-RAM bound, NOT a comparability knob. Matches the mse c71eo6pu arm (this o256 arm is the
+# lighter one). trainer.py briefly runs train AND val DataLoaders at the val transition
+# (4 ranks/node x num_workers each). Raise only with evidence.
+data_loading:
+  num_workers: 6
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  # 16 epochs (requested). Step-based LR schedule (warmup 256 / cooldown 512 steps), so the epoch
+  # count only sets the constant-LR stretch; matches the mse c71eo6pu arm.
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # 2016-01-01 kept to match every other IMERG-diag arm; end 2022-12-31 = the pretraining end.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Global loss block kept as plain MSE for parity; IMERG is the only stream with targets and it
+  # declares its own loss_fcts (mse_wta) in the stream config, which takes precedence, so this
+  # block is inert here.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+# Pinned to match the other IMERG-diag arms (c71eo6pu pretrained with 128); val dates are already
+# identical (Oct-Dec 2023) across all arms.
+validation_config:
+  samples_per_mini_epoch: 256
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_wta
+  grid: null

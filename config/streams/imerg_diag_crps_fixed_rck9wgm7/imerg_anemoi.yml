@@ -1,0 +1,40 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG (via the anemoi reader) as the ONLY diagnostic/output stream for the decoder
+# finetune from a pretrained checkpoint. The zarr has a single variable named 'tp'.
+# pred_head.ens_size stays 1: in the CRPS variant the ensemble axis comes from the
+# model-wide decoder_ens_latent_perturbation (PR #2578 recipe), not EnsPredictionHead.
+# The loss (mse vs kernel_crps) is set globally in the finetune config, not here --
+# IMERG is the only stream with targets, so the global loss applies to it alone.
+#
+# COPY of imerg_diag_rck9wgm7/imerg_anemoi.yml with ONE change: max_num_targets -1 -> 131072.
+# The fixed-CRPS config that uses this dir tiles the decoder over num_members=8 latent-noise
+# members AND unfreezes the forecast engine (gradients for the whole FE across the 2-step
+# rollout), so the full n320 grid (~542k pts/step) would OOM. 131072 keeps decode + FE-grad
+# memory in budget. Uniform random subsample w/o replacement per window (unbiased).
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: 131072
+  embed: {net: transformer, num_tokens: 1, num_heads: 8, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 2}

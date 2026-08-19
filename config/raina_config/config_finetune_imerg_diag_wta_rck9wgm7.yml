@@ -1,0 +1,116 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune from pretrained run rck9wgm7 (ERA5+Obs -> OperAn+obs)
+# -- WINNER-TAKE-ALL variant, 16 heads, eps-relaxed MCL.
+#
+# WHY: the pinball arm proved the ensemble axis should be SAMPLES, not quantiles; the
+# kernel_crps-on-16-heads run produced real diversity but MCL-uneven ("2 good members, rest
+# over/under-predicting"); and the CRPS+latent-noise run (rqwdc8hu) COLLAPSED (members corr
+# 0.95, spread 0.5% of signal). mse_wta is the loss engineered for exactly that MCL dynamic:
+# per point the best head gets the gradient (heads specialize into distinct sharp fields) while
+# eps keeps losing heads alive and bounds the runaway over/under-predictors. Product = distinct
+# realistic members, each a coherent field mixing light & extreme across space. Members are
+# hedged experts, NOT calibrated -- use them individually, the ensemble mean is meaningless.
+#
+# Same 16-head architecture and rck9wgm7 backbone as the mse_ens/pinball arms, so the loss is
+# the only variable. Freeze option (a) (decoder-only probe) is kept for a clean, cheap first
+# read; option (b) (forecast engine trainable) is the follow-up if members are sharp but the
+# underlying field stays blurry (the frozen backbone caps sharpness -- see the rqwdc8hu
+# diagnosis). 16 epochs as requested (the LR schedule is step-based: warmup 256 / cooldown 512
+# steps, so the epoch count only sets the constant-LR stretch).
+#
+# The IMERG decoder + 16 heads are new in this finetune, so all heads are freshly initialised
+# -- ens_size 16 does not break checkpoint loading.
+#
+# Run:
+#   uv run train_continue --from-run-id rck9wgm7_raina \
+#       --config config/raina_config/config_finetune_imerg_diag_wta_rck9wgm7.yml
+# or on SLURM (single line, no backslashes):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id rck9wgm7_raina --config config/raina_config/config_finetune_imerg_diag_wta_rck9wgm7.yml --nodes 2
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_wta_rck9wgm7/"
+
+# Freeze options -- keep exactly ONE active:
+# (a) pure decoder probe: backbone AND forecast engine frozen; only the IMERG decoder trains.
+freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*forecast.*"
+# (b) forecast engine left trainable (config_forecasting_finetuning_raina.yml convention):
+# freeze_modules: ".*encoder.*|.*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*"
+
+# The ensemble axis is the 16 heads (pred_head.ens_size), so no model-wide latent perturbation.
+decoder_ens_latent_perturbation: null
+
+general:
+
+  # mutable parameters
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  multiprocessing_method: "fork"
+
+  desc: "imerg_diag_wta_ens16_from_rck9wgm7"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# config for training
+training_config:
+
+  # training_mode: "masking", "student_teacher", "latent_loss"
+  training_mode: ["masking"]
+
+  # 16 epochs (requested). Step-based LR schedule, so this only shortens the constant-LR stretch.
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5_in v6 zarr covers 2016-2023 and the checkpoint was pretrained on 2016-2022;
+  # earlier start dates would sample windows with no input data at all.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling :
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # Global loss block kept as plain MSE for parity; IMERG is the only stream with targets and it
+  # declares its own loss_fcts (mse_wta), which takes precedence, so this block is inert here.
+  losses : {
+   "physical": {
+       type: LossPhysical,
+       loss_fcts: {"mse": {}, },
+       },
+   }
+
+  forecast :
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 2
+      policy: "fixed"
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_wta
+  grid: null
