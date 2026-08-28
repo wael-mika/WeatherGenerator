@@ -345,6 +345,10 @@ Global SEEPS **skill** (higher better), `eval_config_imerg.yml`, JSC climatology
   `_parse_pipeline_config` + `_validate_parsed_pipeline` before submitting — the local python3 is
   3.6 and cannot parse the script, so import it under
   `uv run --with omegaconf --with mlflow-skinny --with dacite`.
+- **`uv run` cold-starts slowly enough here to blow a 2-minute timeout.** For quick config parse
+  checks use `.venv/bin/python` (omegaconf is already installed there) and `.venv/bin/ruff`
+  directly. Reserve `uv run --with ...` for the launch-slurm dry-run, which genuinely needs
+  packages the venv lacks (dacite, mlflow-skinny).
 - **Do NOT pin `run_id:` on pipeline stages** — the user reports it does not work in practice.
   Omit it; `_validate_stage` does `run_id = p.run_id if p.run_id else get_run_id()` and downstream
   stages resolve through `from_run_id: STAGE.<name>`, so the chain works without any id being
