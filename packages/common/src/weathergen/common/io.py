@@ -492,6 +492,12 @@ class ZarrIO:
 
     @functools.cached_property
     def forecast_offset(self) -> int:
+        # A stream that carries no source data (e.g. a diagnostic-only output stream such as
+        # an IMERG decoder) writes nothing at all at fstep 0, so the group is missing rather
+        # than merely target-less. An absent fstep 0 is unambiguously an offset-1 store.
+        if 0 not in self._stored_forecast_steps:
+            return 1
+
         fstep0_datasets = self._get_datasets(self.example_key)
         return ItemKey._infer_forecast_offset(fstep0_datasets)
 
@@ -520,18 +526,24 @@ class ZarrIO:
         return list(example_sample.group_keys())
 
     @functools.cached_property
-    def forecast_steps(self) -> list[int]:
-        """Query available forecast steps in this zarr store."""
+    def _stored_forecast_steps(self) -> list[int]:
+        """Forecast steps physically present in this zarr store, numerically sorted."""
         # assume stream/samples/forecast_steps are orthogonal
         _, example_sample = next(self.data_root.groups())
         _, example_stream = next(example_sample.groups())
 
-        all_steps = sorted(list(example_stream.group_keys()))
+        # group keys are strings, so they must be sorted as numbers: a lexicographic sort
+        # puts "10" before "2" and the offset-1 slice below would then drop fstep 1.
+        return sorted(int(fstep) for fstep in example_stream.group_keys())
 
+    @functools.cached_property
+    def forecast_steps(self) -> list[int]:
+        """Query available forecast steps in this zarr store."""
         if self.forecast_offset == 1:
-            return all_steps[1:]  # exclude fstep with no targets/preds
-        else:
-            return all_steps
+            # exclude fstep with no targets/preds
+            return [fstep for fstep in self._stored_forecast_steps if fstep != 0]
+
+        return list(self._stored_forecast_steps)
 
 
 class ZipZarrIO(ZarrIO):
