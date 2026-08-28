@@ -1181,7 +1181,9 @@ class Model(torch.nn.Module):
                 # lens for varlen attention (replicate coords for ensemble members)
                 tcls = torch.cat(
                     [
-                        batch.samples[i_b % n_real].streams_data[stream_name].target_coords_lens[fstep_idx]
+                        batch.samples[i_b % n_real]
+                        .streams_data[stream_name]
+                        .target_coords_lens[fstep_idx]
                         for i_b in range(batch_size)
                     ]
                 )

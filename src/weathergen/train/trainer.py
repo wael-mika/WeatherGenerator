@@ -307,8 +307,7 @@ class Trainer(TrainerBase):
                 )
 
         physical_loss_names = [
-            name for name, loss_cfg in mode_cfg.losses.items()
-            if loss_cfg.type == "LossPhysical"
+            name for name, loss_cfg in mode_cfg.losses.items() if loss_cfg.type == "LossPhysical"
         ]
         assert len(physical_loss_names) == 1, (
             "Chunked non-full validation requires one LossPhysical term."
@@ -316,9 +315,9 @@ class Trainer(TrainerBase):
 
         physical, latent = [], []
         forecast_chunk = batch.get_source_samples()
-        
+
         target_aux_chunk = copy.deepcopy(targets_and_auxs[physical_loss_names[0]])
-        
+
         for chunk_idx, chunk in enumerate(chunks):
             if not compute_full_loss:
                 batch.to_device_for_output_chunk(self.device, chunk)
@@ -338,7 +337,9 @@ class Trainer(TrainerBase):
 
             if should_write_output:
                 target_aux = targets_and_auxs[physical_loss_names[0]]
-                target_aux_chunk.physical = [None for _ in range(chunk[0])] + [target_aux.physical[step] for step in chunk]
+                target_aux_chunk.physical = [None for _ in range(chunk[0])] + [
+                    target_aux.physical[step] for step in chunk
+                ]
                 target_aux_chunk.output_idxs = chunk
                 # this modifies targets_and_auxs in place
                 write_output(
@@ -350,7 +351,7 @@ class Trainer(TrainerBase):
                     denormalize_data_fct,
                     batch,
                     forecast_chunk,
-                    { physical_loss_names[0]: target_aux_chunk },
+                    {physical_loss_names[0]: target_aux_chunk},
                 )
 
             if compute_full_loss:
@@ -377,7 +378,6 @@ class Trainer(TrainerBase):
         )
         preds.physical = physical
         preds.latent = latent
-
 
         if not compute_full_loss:
             # this modifies targets_and_auxs in place
