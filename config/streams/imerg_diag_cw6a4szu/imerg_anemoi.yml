@@ -25,8 +25,21 @@
 # max_num_targets 108416 is likewise ERA5's own value. That matters: with an N320 grid (542080
 # points) an uncapped diagnostic decoder at 8 forecast steps is exactly what OOM'd runs x5k0r6z0
 # and yj9x1jhj at ~92.4 of 95 GiB. Inheriting ERA5's cap keeps per-step decoder load identical to
-# what this checkpoint already ran with. Training-only: trainer.inference() forces it back to -1,
-# so evaluation still scores full maps.
+# what this checkpoint already ran with. Training-only: trainer.inference() forces it back to -1
+# (trainer.py:397,403), so evaluation still scores full N320 maps.
+#
+# 2026-08-20: THE VALUE BELOW SAID `-1` UNTIL NOW -- this comment described the intent but the
+# setting was never changed, so the cap was never in force. Run `wx9bzx7q` (cw6a4szu via-2-step,
+# 8 steps, 2 nodes) became the third casualty, dying in flash_attn varlen_bwd on its FIRST
+# backward at 91-94 of 95 GiB, before a single terminal log line. Now 108416, which also makes
+# this lineage match the other eight via-2-step stream dirs (dwzio194, dy0jlrmw, f7ug724z,
+# hmco4ptc, lnm4ud42, mtm, oywmz4sz, whzrt2cc all already had 108416) -- so it is a fairness fix
+# as well as a memory fix.
+#
+# NOTE FOR REPRODUCTION: `xqlk2nkf` and `ti7k7l5s` were trained through this directory while it
+# still said -1. Re-running config_finetune_imerg_diag_mse_cw6a4szu{,_8step,_8step_4ep}.yml now
+# will NOT reproduce them exactly. `config/streams/imerg_diag_fx276yn3/` still carries the same
+# comment-vs-value mismatch and has NOT been touched.
 #
 # The loss (mse) is set globally in the finetune config, not here -- IMERG is the only stream
 # with targets, so the global physical loss applies to it alone.
@@ -44,7 +57,7 @@ IMERG_ANEMOI:
   location_weight: cosine_latitude
   token_size: 16
   tokenize_spacetime: true
-  max_num_targets: -1
+  max_num_targets: 108416
   embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
   embed_target_coords: {net: linear, dim_embed: 512}
   target_readout: {type: obs_value, num_layers: 4, num_heads: 4}
