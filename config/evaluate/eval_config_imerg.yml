@@ -1,0 +1,335 @@
+# Evaluation config: IMERG diagnostic-decoder finetunes — pretrained-backbone comparison
+#
+# Compares precipitation (IMERG tp, 6 h accumulation windows) over a full 3-month rollout
+# across eight 2->8 step finetunes that share the same IMERG diagnostic decoder but sit on
+# different pretrained backbones (labels in `run_ids` below name the parent run).
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_imerg.yml
+#
+# INFERENCE SETTINGS these runs were produced with:
+#   start_date 2023-06-01T00:00, end_date 2023-09-12T00:00, shuffle False,
+#   samples_per_mini_epoch 368, output.num_samples 368, time_window_step 06:00:00,
+#   forecast.num_steps 40, output.streams [IMERG_ANEMOI], 8 ranks (2 nodes x 4 GPUs).
+#
+# STORE VERIFICATION (2026-08-21). Every rank zip of all nine runs was opened and walked:
+# forecast-step groups 1..40 present for every sample, target/prediction arrays shaped
+# (542080 ipoints, 1 channel, 1 member), and the arrays read back finite without error.
+# Eight runs hold the full 8 x 46 = 368 samples; ce4rujvd holds 364 (see below).
+#
+# SAMPLE ALIGNMENT. Global sample indices are assigned by rank-file concatenation order
+# (rank0000 -> 0..45, rank0001 -> 46..91, ...; wegen_reader.py:538-552), so they are NOT
+# chronological and a run with short ranks has DIFFERENT indices for the same init.
+# The eight complete runs share a byte-identical index -> time map covering 368 unique inits
+# contiguous at 6 h from 2023-06-01 12Z to 2023-09-01 06Z. ce4rujvd's 364 inits are a strict
+# SUBSET of those, missing 2023-08-09 06Z, 08-20 18Z, 08-26 12Z and 09-01 06Z.
+# Every run is therefore evaluated on the SAME 364 inits, addressed in each one's own space:
+#   the eight complete runs -> indices 0-274, 276-320, 322-365  (the explicit list below)
+#   ce4rujvd               -> indices 0-363                     (its per-run `streams:` block)
+# The 4 dropped inits are ~1% of the period and do not shift any summary score materially.
+#
+# IMPORTANT CAVEATS:
+# 1. ce4rujvd's inference died on an NCCL collective timeout (exit 143) and is 4 samples
+#    short. The store itself is NOT corrupt — the zips close cleanly and all 364 samples
+#    read back — so it is included via the realignment described above rather than re-run.
+# 2. tp is in METRES per 6 h window, so a threshold of 0.001 = 1 mm/6h and the plotting
+#    `levels` below run from 0.1 mm to 100 mm.
+# 3. Ensemble metrics (crps/spread/ssr) are currently disabled in Scores.get_score (early
+#    `return None`), so any CRPS-trained run is scored on its ensemble MEAN — a fair
+#    deterministic comparison. Switch `ensemble` to "all" to plot individual members.
+# 4. psd / grad_amplitude are omitted: they need gridded lat/lon and crash on the
+#    scattered-ipoint WeatherGen output. Threshold sweeps, FSS and spatial extreme
+#    metrics are covered by playground/extreme_eval.py instead.
+# 5. calc_seeps returns 1.0 - seeps_error (score.py:1393), so the stored `seeps` is a
+#    SKILL: higher is better and it must decrease with lead time.
+#
+max_workers: 16
+
+global_plotting_options:
+  image_format: "png"
+  animation_format: "mp4"  # frames are stitched with imageio + the bundled imageio-ffmpeg
+                           # binary (no system ffmpeg needed); "gif" is the code default.
+  fps: 3                   # 40 fsteps at 3 fps = ~13 s per rollout animation
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precip histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres/6h: 0.1 mm ... 100 mm
+      # BoundaryNorm is built as BoundaryNorm(levels, cmap.N, extend="both") in
+      # plotter.py:737, so it needs len(levels)+1 colors: (len(levels)-1) interior bins
+      # plus the under- and over-flow extensions. The previous 8-level/8-color pair was
+      # one colour short and raised ValueError at plot time.
+      #
+      # 9 levels -> 8 interior bins -> 10 colors.
+      # Extended to 0.05 (50 mm/6h) and 0.1 (100 mm/6h) so that the Doksuri and Daniel
+      # case studies do not saturate: everything above 20 mm/6h used to fall in one bin.
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+      colors:
+        - "none"           # under  <0.1 mm  (dry, transparent)
+        - "#BEDAE5"        #   0.1 -   0.5 mm
+        - "#80B5CC"        #   0.5 -   1   mm
+        - "#5691B3"        #   1   -   2   mm
+        - "#4B6E9C"        #   2   -   5   mm
+        - "#424B83"        #   5   -  10   mm
+        - "#45596D"        #  10   -  20   mm
+        - "#5B9E4C"        #  20   -  50   mm
+        - "#F4A83A"        #  50   - 100   mm
+        - "#C7212F"        # over  >100 mm  (extreme)
+
+evaluation:
+  metrics:
+    - rmse
+    - mae
+    - bias
+    # THRESHOLD SWEEP. tp is in METRES per 6h window, so the values below are
+    #   0.0005 = 0.5 mm  (rain / no-rain)      0.002 = 2 mm     0.005 = 5 mm
+    #   0.01   = 10 mm                          0.02  = 20 mm
+    # ets, fbi and pss all share get_2x2_event_counts (score.py:501-504), so one threshold
+    # set applies identically to the three of them.
+    #
+    # A LIST is required here; repeating `- ets:` with different thresholds does NOT work.
+    # parse_metric_params folds the metrics list into a dict keyed by metric name
+    # (utils/dict_utils.py), so duplicate keys merge and only the LAST thresh survives --
+    # silently, with no error. Given a list, it instead expands to one entry per value named
+    # `<metric>_thr<value>` (ets_thr0.0005, ets_thr0.002, ...), and Scores.get_score strips
+    # that suffix to dispatch, passing the scalar thresh through unchanged.
+    #
+    # This turns 6 metrics into 19. Scores land in
+    # `<run>_<stream>_<region>_<metric>_chkpt<NNNNN>.json`, one file per metric per region.
+    # - ets:
+    #     thresh: [0.0005, 0.002, 0.005, 0.01, 0.02]
+    # - fbi:              # frequency bias (>1 wet, <1 dry)
+    #     thresh: [0.0005, 0.002, 0.005, 0.01, 0.02]
+    # - pss:              # Peirce skill score
+    #     thresh: [0.0005, 0.002, 0.005, 0.01, 0.02]
+    - seeps              # unweighted (equal weight per grid point); needs IMERG tp climatology
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  summary_dir: "./plots/imerg_diag_comparison_3months/"
+  plot_ensemble: "members"
+  plot_score_maps: true
+  plot_score_animations: false
+  plot_score_init_timeseries: true
+  print_summary: true
+  log_scale: false
+  add_grid: false
+  score_cards: false
+  bar_plots: false
+
+default_streams:
+  IMERG_ANEMOI:
+    # Note IMERG only covers 60S-60N, so these are effectively 0-60N and 60S-0.
+    # "nhem"/"shem" are the RegionLibrary keys for the hemispheres (utils/regions.py) —
+    # "NH"/"SH" are not registered and raise. Every extra region multiplies the scoring cost
+    # over all 364 inits x 40 fsteps, so keep this list minimal. (If case-study zooms are
+    # ever wanted, `global_plotting_options.regions` overrides the PLOTTING regions only,
+    # at no scoring cost — plot_orchestration.py:882.)
+    regions: ["global", "nhem", "shem"]
+    channels: ["tp"]
+    # SEEPS climatology (prob_dry + light_heavy_threshold). Pinned explicitly: on Santis the
+    # stores under assets/climatology/ are empty shells (.zattrs/.zgroup only, no chunks), so
+    # auto-resolution from data_path_aux yields nothing. Pulled byte-verified from JSC
+    # shared_work/assets/climatology/ on 2026-08-20 (2082 files, .zattrs/.zmetadata md5-checked);
+    # supersedes the locally-synthesized version from playground/scripts/build_imerg_seeps_climatology.py.
+    climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+    evaluation:
+      forecast_step: "all"           # fsteps 1-40 = the full +240 h rollout
+      # THE 364 INITS COMMON TO ALL NINE RUNS (see "SAMPLE ALIGNMENT" in the header).
+      # These are this index space's 368 minus indices 275, 321, 366, 367, which are the
+      # four inits ce4rujvd never wrote (2023-08-09 06Z, 08-20 18Z, 08-26 12Z, 09-01 06Z).
+      # ce4rujvd carries the same 364 inits as its own contiguous 0-363 and gets
+      # `sample: "0-363"` in its per-run `streams:` block.
+      # The parser only accepts "all", a single "d-d" range or an explicit list
+      # (io_reader.py:363-371), hence the literal list.
+      sample: [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+        40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+        60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+        80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+        120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139,
+        140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159,
+        160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179,
+        180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199,
+        200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219,
+        220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239,
+        240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259,
+        260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 276, 277, 278, 279, 280,
+        281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300,
+        301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320,
+        322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341,
+        342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361,
+        362, 363, 364, 365
+      ]
+      ensemble: "mean"               # no-op at ens_size 1; collapses members if present
+    plotting:
+      # CASE STUDIES. Global sample indices are the rank-file concatenation order
+      # (rank0000 -> 0..45, rank0001 -> 46..91, ...; wegen_reader.py:538-552) and are NOT
+      # chronological. Resolved by reading `<sample>/IMERG_ANEMOI/1/target/times` out of
+      # every rank zip (verified 2026-08-21). Each forecast is 40 x 6 h = +240 h.
+      #
+      #   196  first window 2023-07-19 00Z -> 2023-07-28 18Z   Doksuri, 24 h before genesis
+      #   204  first window 2023-07-20 00Z -> 2023-07-29 18Z   Doksuri, at genesis (Jul 20)
+      #        Both cover Luzon landfall (Jul 26) and Fujian landfall (Jul 28).
+      #   357  first window 2023-08-31 00Z -> 2023-09-09 18Z   Daniel, 24 h before the last
+      #   365  first window 2023-09-01 00Z -> 2023-09-10 18Z   Daniel, latest common init
+      #
+      # These are indices in the EIGHT-RUN space; ce4rujvd needs 196, 204, 355, 363 for the
+      # same four inits (its own space) — set in its per-run `streams:` block.
+      #
+      # NOTE on Daniel: inference was initialised only to 2023-09-01, so an init at or 24 h
+      # before genesis (Sep 3-4) does not exist. 357/365 are the two latest common inits,
+      # exactly 24 h apart; they see Daniel purely at lead time — genesis ~+96/+72 h and the
+      # Derna flood (Sep 10-11) at the end of the rollout.
+      sample: [196, 204, 357, 365]
+      forecast_step: "all"
+      ensemble: "mean"
+      plot_maps: true
+      plot_bias: true
+      plot_target: true              # overlay IMERG obs for visual comparison
+      plot_histograms: true
+      plot_animations: true
+      plot_timeseries: false
+
+run_ids:
+  # 2 STEPS
+  # luzbikci:
+  #   label: "Forecast:dy0jlrmw"
+  #   # color: "#e7298a"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/luzbikci"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/luzbikci/"
+
+  # spbhsahx:
+  #   label: "MTM:dwzio194, W/O FE, CW"
+  #   # color: "#e7298a"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/spbhsahx"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/spbhsahx/"
+
+  # mjh75lxo:
+  #   label: "MTM: f7ug724z W/ FE, CW"                              # <- fill in
+  #   # color: "#e7298a"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/mjh75lxo"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/mjh75lxo/"
+
+  # hc58drc1:
+  #   label: "S/JEPA:lnm4ud42, W/O CW"                              # <- fill in
+  #   # color: "#e7298a"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/hc58drc1"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/hc58drc1/"
+
+  # uccblskr:
+  #   label: "S/JEPA:whzrt2cc, W/ CW"                              # <- fill in
+  #   # color: "#e7298a"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/uccblskr"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/uccblskr/"
+
+  # iq5c34dx:
+  #   label: "MTM: xq65fhca W/O FE, CW"          # <- fill in
+  #   # color: "#7570b3"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/iq5c34dx"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/iq5c34dx/"
+
+  # w7gd4p5q:
+  #   label: "MTM: ra1xax01"          # <- fill in
+  #   # color: "#66a61e"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/w7gd4p5q"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/w7gd4p5q/"
+
+  # f6t0xcz3:
+  #   label: "T/JEPA:cw6a4szu, CW"          # <- fill in
+  #   # color: "#66a61e"
+  #   results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/f6t0xcz3"
+  #   runplot_base_dir: "./plots/imerg_diag_comparison/score_maps/f6t0xcz3/"
+
+  # 2 -> 8 STEPS
+  m745z8wi:
+    label: "Forecast:dy0jlrmw"
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/m745z8wi"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/m745z8wi/"
+
+  tvmzluy6:
+    label: "Forecast:oywmz4sz"
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/tvmzluy6"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/tvmzluy6/"
+
+  fvenw2nq:
+    label: "MTM:dwzio194, W/O FE, CW"
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/fvenw2nq"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/fvenw2nq/"
+
+  xt069k3n:
+    label: "MTM: f7ug724z W/ FE, CW"                              # <- fill in
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/xt069k3n"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/xt069k3n/"
+
+  b96m0co5:
+    label: "MTM: xq65fhca W/O FE, CW"          # <- fill in
+    # color: "#7570b3"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/b96m0co5"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/b96m0co5/"
+
+  csuff3rz:
+    label: "MTM: ra1xax01"          # <- fill in
+    # color: "#66a61e"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/csuff3rz"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/csuff3rz/"
+
+  sctxzwwe:
+    label: "S/JEPA:lnm4ud42, W/O CW"                              # <- fill in
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/sctxzwwe"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/sctxzwwe/"
+
+  lf7aj7df:
+    label: "S/JEPA:whzrt2cc, W/ CW"                              # <- fill in
+    # color: "#e7298a"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/lf7aj7df"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/lf7aj7df/"
+
+  ce4rujvd:
+    label: "T/JEPA:cw6a4szu, CW"
+    # color: "#66a61e"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/ce4rujvd"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months/score_maps/ce4rujvd/"
+    # PARTIAL RUN, REALIGNED - see "SAMPLE ALIGNMENT" in the header.
+    # Its inference job (SLURM 820419) aborted on an NCCL collective timeout (exit 143), so
+    # ranks 5/6/7 wrote 45/45/44 samples instead of 46 -> 364 of 368. The 364 it does hold
+    # are a strict SUBSET of the other runs' 368 and every one of them reads back clean, so
+    # the run is usable as-is; only the INDEXING differs. Because global indices are assigned
+    # by rank-file concatenation, the short ranks shift everything from index 275 upward,
+    # which is why this run needs its own `streams:` block rather than the default one.
+    #   this run:      contiguous 0-363
+    #   the other 8:   the same 364 inits at indices 0-274, 276-320, 322-365
+    # A per-run `streams:` REPLACES `default_streams` wholesale (run_evaluation.py:345 is
+    # `if "streams" not in run`, not a deep merge), so every key is repeated below.
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"
+          sample: "0-363"            # all of them = the 364 common inits
+          ensemble: "mean"
+        plotting:
+          # Same four inits as the default block, in THIS run's index space:
+          #   196 Jul 19 00Z, 204 Jul 20 00Z, 355 Aug 31 00Z, 363 Sep 1 00Z
+          # (196/204 coincide because the divergence only starts at index 275.)
+          sample: [196, 204, 355, 363]
+          forecast_step: "all"
+          ensemble: "mean"
+          plot_maps: true
+          plot_bias: true
+          plot_target: true
+          plot_histograms: true
+          plot_animations: true
+          plot_timeseries: false
