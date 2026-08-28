@@ -1,0 +1,77 @@
+# VIA-2-STEP -> 8-STEP IMERG, dwzio194 (MTM, W/O forecast engine, cross-window).
+#
+# One parent, one file. Two stages, run as a strict chain (no `parallelize`, so the inference
+# waits on the training job):
+#
+#   1. 8-step / 2-mini-epoch IMERG finetune from the 2-STEP run `ue0ifd0t` at `chkpt00007`
+#   2. 3-month / 40-step inference on `chkpt00001` of the run stage 1 produces
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/raina_config/pipelines_final/pipeline_imerg_via2step_dwzio194.yml --account=ACCOUNT --partition=PARTITION | tee launch_dwzio194.log
+#
+# The other eight parents have their own file in this directory; they are independent, so submit
+# as many as the queue will take. Every file uses the SAME nodes (2) and the same inference
+# options, which is what keeps the runs comparable -- see "why 368" below.
+#
+# NO PINNED `run_id:`. launch-slurm mints one per stage
+# (`run_id = p.run_id if p.run_id else get_run_id()`) and stage 2 references stage 1 symbolically
+# through `from_run_id: STAGE.train8s2ep`, so the chain resolves without any id being named. The
+# minted ids appear ONLY in the launcher's stdout, in the "Resolved parameters for stage '<name>'"
+# block -- hence the `| tee` above. Afterwards they are recoverable from the slurm job names
+# (`sacct --name=weathergen_*`, `logs/<runid>/`) and the `models/` mtimes. Record them in
+# playground/docs/imerg_via2step_8step_plan.md as runs complete.
+#
+# WHY `mini_epoch: 7` ON STAGE 1
+#   `ue0ifd0t` ran 8 mini epochs x 4096 samples at 2 forecast steps; `chkpt00007` is
+#   "Mini_epoch 7 of 8: save_model", istep 4096. The launcher defaults to -1 ->
+#   `<run>_latest.chkpt`, which train() rewrites every `train_logging.checkpoint` = 250 batches
+#   and is NOT that state.
+#
+# WHY `mini_epoch: 1` ON STAGE 2
+#   Same argument one level down: stage 1 runs 2 mini epochs, so `chkpt00001` is its end state
+#   while `_latest` is batch 500 of the 510-batch second mini epoch.
+#   NB the output store is named `validation_chkpt00000_rank*.zip` regardless of what was loaded
+#   -- `Trainer.inference` calls `self.validate(0, ...)`. The mapping lives in the plan doc.
+#
+# WHY `end_date` IS 2023-09-12 AND `samples_per_mini_epoch` IS 368
+#   `MultiStreamDataSampler.check_samples` subtracts the whole forecast horizon from the index
+#   range -- 42 windows at 40 steps / 6 h -- so `end_date=2023-08-31T00` yields only 322 inits
+#   ending 2023-08-20T00, silently dropping the last 11 days of the requested period (the log
+#   just says "Sufficient available samples"). 2023-09-12T00 gives 370 available; 368 are
+#   requested, spanning 2023-06-01T06 .. 2023-09-01T00 every 6 h. `end_date` bounds only the
+#   VERIFICATION window; IMERG runs to 2024-07-31.
+#   Per-rank length is ((spme // world) // (batch * num_workers)) * batch * num_workers,
+#   truncated with no message -- 368 is exact for world 8 (nodes 2 -> 46/rank). The sample index
+#   -> init time map depends on BOTH world size and num_workers (ranks take contiguous blocks,
+#   workers interleave inside a rank), so every parent must keep nodes 2 / num_workers 2 or
+#   index i stops meaning the same init across runs.
+#
+# COST: ~2.5-3.5 h training on 2 nodes, ~1.5-2 h inference, ~75 GB of zarr output.
+#####################################
+
+stages:
+  - name: train8s2ep
+    stage: train
+    from_run_id: ue0ifd0t
+    mini_epoch: 7
+    config_files:
+      - config/raina_config/config_finetune_imerg_diag_mse_dwzio194_via2step_8step_2ep.yml
+    nodes: 2
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s2ep
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"

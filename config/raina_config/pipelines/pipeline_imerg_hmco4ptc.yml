@@ -1,0 +1,62 @@
+# Pipeline: IMERG decoder finetune for parent `hmco4ptc` (2step_8ep + 8step_2ep) plus
+# a matched inference run for each. One file per parent because launch-slurm.py caps a
+# pipeline at 8 stages (STAGES_MAX_ALLOWED) -- 7 parents x 4 stages would be 28.
+#
+# Run (sequential chain: each stage waits for the one before it):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/raina_config/pipelines/pipeline_imerg_hmco4ptc.yml --account=ACCOUNT --partition=PARTITION
+#
+# Parent checkpoint MUST be hmco4ptc_fix (see the finetune configs' own header comments).
+
+stages:
+  - name: train2s8ep
+    stage: train
+    from_run_id: hmco4ptc_fix
+    run_id: f2pcn9t8
+    config_files:
+      - config/raina_config/config_finetune_imerg_diag_mse_hmco4ptc_2step_8ep.yml
+    nodes: 2
+
+  - name: infer2s8ep
+    stage: inference
+    from_run_id: STAGE.train2s8ep
+    run_id: aye511mk
+    nodes: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-08-31T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=32"
+      - "test_config.output.num_samples=32"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
+
+  - name: train8s2ep
+    stage: train
+    from_run_id: hmco4ptc_fix
+    run_id: fq85jsg6
+    config_files:
+      - config/raina_config/config_finetune_imerg_diag_mse_hmco4ptc_8step_2ep.yml
+    nodes: 2
+
+  - name: infer8s2ep
+    stage: inference
+    from_run_id: STAGE.train8s2ep
+    run_id: ukxvf1t2
+    nodes: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-08-31T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=32"
+      - "test_config.output.num_samples=32"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
+

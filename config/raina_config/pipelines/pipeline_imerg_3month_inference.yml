@@ -1,0 +1,128 @@
+# ###################################################################################
+# SUPERSEDED -- THIS IS THE **DIRECT** PATH (8-step finetune straight off the pretrained
+# backbone). The comparison being built is the **VIA-2-STEP** path: 8-step finetune started
+# from each lineage's 2-step IMERG run at chkpt00007. Use
+#   config/raina_config/pipelines/pipeline_imerg_via2step_8step_group{1,2}.yml
+# instead. Kept because the seven direct-path training runs it points at already exist and the
+# direct-vs-via-2-step contrast may still be worth one figure -- but do not mix the two sets
+# in a single backbone ranking. See playground/docs/imerg_via2step_8step_plan.md.
+# ###################################################################################
+# 3-MONTH / 40-STEP IMERG INFERENCE -- matched-checkpoint backbone comparison.
+#
+# One inference stage per 8-step/2-mini-epoch IMERG finetune, all launched from the SAME
+# checkpoint index (`mini_epoch: 1` == <run>_chkpt00001.chkpt == end of mini epoch 2 == 1024
+# optimizer steps, LR fully cooled down). `parallelize: true` -> the 7 stages are independent
+# and are submitted together; the file is exactly at STAGES_MAX_ALLOWED (8).
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/raina_config/pipelines/pipeline_imerg_3month_inference.yml --account=ACCOUNT --partition=PARTITION
+#
+# WHY `mini_epoch: 1` IS MANDATORY HERE
+#   The launcher defaults to -1 -> `<run>_latest.chkpt`, which train() rewrites every
+#   `train_logging.checkpoint` = 250 batches. For these runs that is batch 500 of the 512-batch
+#   second mini epoch, i.e. 1012 of 1024 steps, mid-way through the 64-step linear cooldown --
+#   12 steps short of chkpt00001 and NOT the state the val curve was measured at. The five
+#   already-existing 32-sample 8-step inference runs (vxvg0fn9, mn9er14f, if8mdd4v, m6fao72k,
+#   ukxvf1t2) all used `_latest`; these runs deliberately do not.
+#
+# WHY `end_date` IS 2023-09-12, NOT 2023-08-31
+#   MultiStreamDataSampler.check_samples subtracts the whole forecast horizon from the index
+#   range: max_index = idx_end - (time_step*(num_steps + offset) + window_len)//step, i.e. 42
+#   windows at 40 steps / 6 h. With end_date 2023-08-31T00 only 322 inits exist and the last one
+#   is 2023-08-20T00 -- the final 11 days of the requested period would be silently dropped.
+#   end_date 2023-09-12T00 gives 370 available inits; 368 are requested, spanning
+#   2023-06-01T06 .. 2023-09-01T00 every 6 h. end_date only bounds the VERIFICATION window here,
+#   not the init window, and IMERG runs to 2024-07-31 so it is covered.
+#
+# WHY 368 AND WHY EVERY RUN MUST USE THE SAME nodes / num_workers
+#   Per-rank length is ((spme // world_size) // (batch_size * num_workers)) * batch_size *
+#   num_workers, so a value that is not divisible by world_size * num_workers is silently
+#   truncated. 368 is exact for world_size 8 (nodes: 2, 46/rank) and for world_size 4
+#   (nodes: 1, 92/rank). The sample index -> init time map depends on BOTH world_size and
+#   num_workers (ranks take contiguous blocks, workers interleave inside a rank), so changing
+#   either for one run breaks index alignment against the others -- exactly the f6t0xcz3 trap.
+#
+# COST: ~75 GB of zarr per run (203 MB/sample x 368) => ~525 GB for the seven; ~1.5-2 h wall
+# each on 2 nodes (32 samples took 21 min on 1 node).
+
+parallelize: true
+
+stages:
+  # Forecast (supervised) baseline -- dy0jlrmw
+  - name: inferdy0jlrmw
+    stage: inference
+    from_run_id: dnq4fmyz
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: &opts3m
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
+
+  # MTM, no forecast engine in pretraining, cross-window -- dwzio194
+  - name: inferdwzio194
+    stage: inference
+    from_run_id: rpqk51fp
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
+
+  # MTM, with forecast engine, cross-window -- f7ug724z
+  - name: inferf7ug724z
+    stage: inference
+    from_run_id: uqjiujv6
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
+
+  # MTM -- hmco4ptc (the seventh pipeline parent; absent from the original 8-run list)
+  - name: inferhmco4ptc
+    stage: inference
+    from_run_id: fq85jsg6
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
+
+  # Spatial JEPA, no cross-window -- lnm4ud42
+  - name: inferlnm4ud42
+    stage: inference
+    from_run_id: yex8fsv8
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
+
+  # Spatial JEPA, cross-window -- whzrt2cc
+  - name: inferwhzrt2cc
+    stage: inference
+    from_run_id: re7ur23g
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
+
+  # MTM, no forecast engine, cross-window -- xq65fhca
+  - name: inferxq65fhca
+    stage: inference
+    from_run_id: r4874frh
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=04:00:00"
+    options: *opts3m
