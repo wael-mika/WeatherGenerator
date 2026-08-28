@@ -1,0 +1,191 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Deepen the IMERG decoder from 2 -> 8 forecast steps, 2 mini epochs, starting from the
+# 2-STEP IMERG FINETUNE `sslfnnb4` (parent backbone: `ra1xax01` -- MTM backbone).
+#
+# THIS IS THE VIA-2-STEP PATH, NOT THE DIRECT ONE. The sibling file
+# `config_finetune_imerg_diag_mse_ra1xax01_8step_2ep.yml` runs the same 8-step/2-mini-epoch stage
+# straight off the pretrained backbone. This one continues an IMERG decoder that has already had
+# 8 mini epochs at 2 forecast steps, which is the comparison being rebuilt here. The two are NOT
+# interchangeable and their results must not be pooled.
+#
+# DERIVED FROM `config_finetune_imerg_diag_mse_ra1xax01_2step_8ep.yml` -- the config that actually produced
+# `sslfnnb4` -- by changing exactly six things, so everything else (streams_directory,
+# freeze_modules, loss key, model_input branch, multiprocessing_method, optimizer, dates) is
+# provably this lineage's own:
+#   num_mini_epochs        8 -> 2
+#   num_steps_warmup       128 -> 32      (3.125% of 1024 steps, the family's shape)
+#   num_steps_cooldown     256 -> 64      (6.25%)
+#   forecast.num_steps     2 -> 8       (training AND validation)
+#   data_loading.num_workers 8 -> 6
+#   desc / wgtags.exp
+#
+# WHY num_workers 6 EVERYWHERE. Per-mini-epoch length is
+# ((samples_per_mini_epoch // world_size) // (batch_size * num_workers)) * batch_size *
+# num_workers. At 4096 / world 8 that is 512 batches with 8 workers but 510 with 6. Pinning all
+# nine via-2-step runs to 6 makes every one of them 510 batches x 8 ranks = 4080 samples per mini
+# epoch -- exactly matched -- and 6 is also the value the existing 8-step configs use for the
+# memory-heavier lineages.
+#
+# START FROM MINI EPOCH 7. `sslfnnb4` ran 8 mini epochs at 2 steps; `chkpt00007` is
+# "Mini_epoch 7 of 8: save_model", the final, fully-cooled-down state. Pass `--mini-epoch 7`
+# (or `mini_epoch: 7` in a pipeline stage) -- the default -1 resolves to `<run>_latest.chkpt`,
+# which train() rewrites every 250 batches and is therefore NOT the checkpoint the other cells
+# start from.
+#
+# `general.istep: 0` BELOW IS LOAD-BEARING. The parent's istep is 4096 (4596 for the restarted
+# ones); without the reset, mini_epoch_base would resolve to 7 or 8 and `num_mini_epochs: 2`
+# would train NOTHING while still writing a checkpoint -- the re0jivry failure mode.
+#
+# sslfnnb4 RESTARTED at istep 4084; its chkpt00007 is at istep 4596. The extra ~512 steps
+# ran at lr 6.9e-10, so the state is equivalent to the other parents' end of mini epoch 7.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id sslfnnb4 --config config/raina_config/config_finetune_imerg_diag_mse_ra1xax01_via2step_8step_2ep.yml --mini-epoch 7 --nodes 2
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_mtm/"
+
+# Parent's own regex + a forecast-engine term. See header for why `.*ERA5.*` stays.
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*|.*forecast_engine.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  desc: "imerg_diag_mse_from_sslfnnb4_8step_2ep"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # 8 mini epochs, 0..7. Plain count, not an absolute stop point, because `general.istep: 0`
+  # above resets the counter: the loop is range(mini_epoch_base, num_mini_epochs) with
+  # base = int(istep / len(data_loader)), so istep 0 => base 0. Without the reset, base would be
+  # recovered from the parent's istep 3822 and 8 would be BELOW it, training nothing at all while
+  # still writing a checkpoint (that is exactly what run re0jivry did).
+  num_mini_epochs: 2
+  samples_per_mini_epoch: 4096
+
+  # Kept identical to the rest of the IMERG diagnostic family for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # Warmup and cooldown HALVED from the 16-epoch config's 32/64, because the run is half as
+  # long. trainer.py computes lr_steps = len_ds * num_mini_epochs / batch_size_per_gpu, so
+  # lr_steps scales linearly with num_mini_epochs at ANY node count; halving both lengths keeps
+  # the schedule's SHAPE (6.25% warmup / 81.25% decay / 12.5% cooldown) identical to the 16-epoch
+  # run's at every --nodes N, which is what makes the loss curves comparable. Leaving 32/64 in
+  # place would instead spend a quarter of this run ramping and cooling.
+  # (LearningRateScheduler has a safety net -- if decay drops below 20% of lr_steps it rewrites
+  # warmup/cooldown to 10%/5% and logs a warning -- but it should not have to fire here.)
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 32
+    num_steps_cooldown: 64
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Declared under `physical` -- this family's ONLY loss key. See header point 1.
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  # KEY NAME MATTERS. This parent's model-input branch is named `masking`, not `forecasting`.
+  # model_input is a DICT of input branches and the merge UNIONS it, so declaring a
+  # `forecasting` key here would ADD a second branch beside the inherited `masking` one rather
+  # than override it. batch_size is then the number of enabled branches
+  # (train/utils.py:139 get_batch_size_from_config sums num_samples over enabled entries), so it
+  # would silently become 2: every sample runs through the model twice, and because
+  # LossPhysical accumulates over batch items without dividing by them
+  # (loss_module_physical.py:329-334 -- ctr_batch is counted but never used as a denominator)
+  # the backprop loss and hence the gradients double, i.e. an effective 2x learning rate.
+  # Run gckt1vzm hit exactly this: LossPhysical.loss_avg was 2.0000x
+  # LossPhysical.IMERG_ANEMOI.mse.avg for every logged step.
+  # `rate: 0.8` inherited on this branch is inert: for masking_strategy "forecast" the mask is
+  # unconditionally np.ones(num_cells) (masking.py:632) and `rate` is read only by "random".
+  model_input:
+    masking:
+      masking_strategy: "forecast"
+
+  # 2 steps -- the shallow variant. Training shallower than the parent's native depth (8) is
+  # always safe: the frozen forecast engine is asked for fewer autoregressive steps than it
+  # already handles.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# Validate at the training depth so the curve is comparable with the 8-step variant's.
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Validation window WIDENED from 3 to 6 months. The old window (2023-10-01 -> 2023-12-31) is
+  # contained in this one, so nothing that was scored before is dropped -- boreal summer and
+  # early autumn are added on top. Sample count is unchanged at 256, so validation costs the same;
+  # the 256 are simply drawn from twice as much time.
+  #
+  # shuffle: True is what makes that widening real. With shuffle False the sampler takes the
+  # FIRST contiguous 256 slots of the window, which after widening would still be July-August
+  # only -- a narrower period than before, not a wider one.
+  #
+  # This does NOT make the validation curve noisy. MultiStreamDataSampler.reset() reseeds from
+  # the constant self.data_loader_rng_seed at the top of every mini epoch
+  # (multi_stream_data_sampler.py:306) before permuting, so the SAME 256 samples are drawn every
+  # epoch and the curve stays epoch-to-epoch comparable. The seed mutation at :941 applies only
+  # inside the forked worker copies and never reaches this permutation.
+  #
+  # NOT comparable with runs validated on the old 3-month window (lf97ve7d, ti7k7l5s, vpj2sbpa,
+  # o8m370eh, w1flta02, bif4t205 and earlier).
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# 8 workers. This family's IASI stream is METOP_ABC_IASI (17 channels), the light one -- the same
+# stream set shape that sustained 8 workers in run r2iy7iko. The fx276yn3 family needs 6 because
+# its METOP_IASI_PC carries 210 channels.
+data_loading:
+  num_workers: 6
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_via2step_8step_2ep
+  grid: null

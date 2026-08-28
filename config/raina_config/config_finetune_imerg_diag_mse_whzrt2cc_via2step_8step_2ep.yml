@@ -1,0 +1,143 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Deepen the IMERG decoder from 2 -> 8 forecast steps, 2 mini epochs, starting from the
+# 2-STEP IMERG FINETUNE `oeimvihc` (parent backbone: `whzrt2cc` -- Spatial-JEPA backbone, cross-window).
+#
+# THIS IS THE VIA-2-STEP PATH, NOT THE DIRECT ONE. The sibling file
+# `config_finetune_imerg_diag_mse_whzrt2cc_8step_2ep.yml` runs the same 8-step/2-mini-epoch stage
+# straight off the pretrained backbone. This one continues an IMERG decoder that has already had
+# 8 mini epochs at 2 forecast steps, which is the comparison being rebuilt here. The two are NOT
+# interchangeable and their results must not be pooled.
+#
+# DERIVED FROM `config_finetune_imerg_diag_mse_whzrt2cc_2step_8ep.yml` -- the config that actually produced
+# `oeimvihc` -- by changing exactly six things, so everything else (streams_directory,
+# freeze_modules, loss key, model_input branch, multiprocessing_method, optimizer, dates) is
+# provably this lineage's own:
+#   num_mini_epochs        8 -> 2
+#   num_steps_warmup       128 -> 32      (3.125% of 1024 steps, the family's shape)
+#   num_steps_cooldown     256 -> 64      (6.25%)
+#   forecast.num_steps     2 -> 8       (training AND validation)
+#   data_loading.num_workers 6 -> 6
+#   desc / wgtags.exp
+#
+# WHY num_workers 6 EVERYWHERE. Per-mini-epoch length is
+# ((samples_per_mini_epoch // world_size) // (batch_size * num_workers)) * batch_size *
+# num_workers. At 4096 / world 8 that is 512 batches with 8 workers but 510 with 6. Pinning all
+# nine via-2-step runs to 6 makes every one of them 510 batches x 8 ranks = 4080 samples per mini
+# epoch -- exactly matched -- and 6 is also the value the existing 8-step configs use for the
+# memory-heavier lineages.
+#
+# START FROM MINI EPOCH 7. `oeimvihc` ran 8 mini epochs at 2 steps; `chkpt00007` is
+# "Mini_epoch 7 of 8: save_model", the final, fully-cooled-down state. Pass `--mini-epoch 7`
+# (or `mini_epoch: 7` in a pipeline stage) -- the default -1 resolves to `<run>_latest.chkpt`,
+# which train() rewrites every 250 batches and is therefore NOT the checkpoint the other cells
+# start from.
+#
+# `general.istep: 0` BELOW IS LOAD-BEARING. The parent's istep is 4096 (4596 for the restarted
+# ones); without the reset, mini_epoch_base would resolve to 7 or 8 and `num_mini_epochs: 2`
+# would train NOTHING while still writing a checkpoint -- the re0jivry failure mode.
+#
+# Run:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id oeimvihc --config config/raina_config/config_finetune_imerg_diag_mse_whzrt2cc_via2step_8step_2ep.yml --mini-epoch 7 --nodes 2
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_whzrt2cc/"
+
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*encoder.*|.*forecast_engine.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  desc: "imerg_diag_mse_from_oeimvihc_8step_2ep"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # Plain count, not an absolute stop point, because `general.istep: 0` resets the counter:
+  # the loop is range(mini_epoch_base, num_mini_epochs) with base = int(istep / len(data_loader)).
+  # Without the reset the base would come from the parent's istep and this value would be BELOW
+  # it, training nothing while still writing a checkpoint (that is what run re0jivry did).
+  num_mini_epochs: 2
+  samples_per_mini_epoch: 4096
+
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # Warmup/cooldown scaled to this run's length. lr_steps is linear in num_mini_epochs
+  # (trainer.py), so 32/64 reproduces the family's 6.25% / 81.25% / 12.5% schedule shape at
+  # any --nodes N, keeping the loss curve comparable with the other IMERG finetunes.
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 32
+    num_steps_cooldown: 64
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses:
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    forecasting:
+      masking_strategy: "forecast"
+
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+validation_config:
+  samples_per_mini_epoch: 256
+  # 6-month window, sampled across the whole period (shuffle picks a fixed spread rather than
+  # the first contiguous block); same set every mini epoch, so the curve stays comparable.
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+data_loading:
+  num_workers: 6
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_via2step_8step_2ep
+  grid: null
