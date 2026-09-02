@@ -274,6 +274,23 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
         logger.warning(f"Missing keys when loading model: {mkeys}")
     if len(ukeys) > 0:
         logger.warning(f"Unused keys when loading model: {ukeys}")
+        # Unused keys are weights the PARENT trained and this code has nowhere to put. Unlike
+        # missing keys -- which are reinitialised on purpose, and are how a new decoder branch
+        # gets its weights -- this silently produces a DIFFERENT, worse model than the checkpoint
+        # claims to continue, and training proceeds without complaint.
+        #
+        # This is not hypothetical: ypj5be4l carries a per-stream `geo_bias` MLP that does not
+        # exist on this branch, so eight tensors were dropped and every continuation ran a base
+        # 48% worse on MSE than the parent's published numbers -- for 28 mini-epochs, with the
+        # evidence sitting in the log unread.
+        if not bool(cf.get("allow_unused_checkpoint_keys", False)):
+            raise RuntimeError(
+                f"{len(ukeys)} checkpoint tensors have no home in this model: {ukeys[:8]}"
+                f"{' ...' if len(ukeys) > 8 else ''}. The parent trained weights this code cannot "
+                "use, so continuing would silently run a different model. Either restore the "
+                "missing module, pick a compatible parent, or set "
+                "`allow_unused_checkpoint_keys: True` to accept the degraded base deliberately."
+            )
 
     return model
 
