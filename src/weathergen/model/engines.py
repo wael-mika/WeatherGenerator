@@ -28,6 +28,10 @@ from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
 )
+from weathergen.model.flow_math import (
+    flow_time_embedding,
+    sample_flow_time_for_points,
+)
 from weathergen.model.layers import MLP
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
@@ -993,30 +997,6 @@ class TargetPredictionEngine(nn.Module):
         return output
 
 
-def sample_flow_time(
-    n: int,
-    device,
-    dtype,
-    mode: str = "uniform",
-    logit_mean: float = 0.0,
-    logit_std: float = 1.0,
-) -> torch.Tensor:
-    """Draw the flow time ``t`` for conditional flow-matching training -> ``[n, 1]`` in (0, 1).
-
-    ``uniform`` is the textbook choice and the default. ``logit_normal`` --
-    ``t = sigmoid(N(mean, std))``, Esser et al. 2024 (SD3) -- concentrates training on the middle
-    of the path, where the velocity is hardest to predict and where sample quality is decided,
-    and spends less on the two ends where the task is nearly trivial. It is one of the
-    best-established quality wins in the flow-matching literature and costs nothing at inference.
-    """
-    if mode == "uniform":
-        return torch.rand((n, 1), device=device, dtype=dtype)
-    if mode == "logit_normal":
-        z = torch.randn((n, 1), device=device, dtype=dtype) * logit_std + logit_mean
-        return torch.sigmoid(z)
-    raise ValueError(f"unknown flow_time_sampling '{mode}' (use 'uniform' or 'logit_normal')")
-
-
 class FlowNullConditioning(torch.nn.Module):
     """Learned null conditioning token for classifier-free guidance.
 
@@ -1037,24 +1017,6 @@ class FlowNullConditioning(torch.nn.Module):
     def expand_to(self, latent: torch.Tensor) -> torch.Tensor:
         """Null KV with the same row count as ``latent``, so varlen lens are unchanged."""
         return self.null_latent.to(latent.dtype).expand(latent.shape[0], -1)
-
-
-def flow_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-    """Sinusoidal embedding of the flow time ``t`` in [0, 1].
-
-    Args:
-        t   : ``[N, 1]`` flow time per point.
-        dim : embedding width (even).
-
-    Returns:
-        ``[N, dim]``
-    """
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(10000.0) * torch.arange(half, device=t.device, dtype=torch.float32) / half
-    )
-    ang = t.float() * freqs.unsqueeze(0) * 1000.0
-    return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1).to(t.dtype)
 
 
 class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
@@ -1110,6 +1072,11 @@ class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
     ``flow_cond_dropout: 0.1`` and then sampling with ``w > 1``. Because ``w`` is a sampling
     knob, one fine-tune yields the whole diversity/fidelity curve.
     """
+
+    # Model.predict_decoders must hand this decoder the ground truth to build the probability
+    # path. Duck-typed rather than isinstance-checked so other generative decoders can opt in
+    # without growing a tuple at every call site.
+    needs_target_in_forward = True
 
     def __init__(
         self,
@@ -1167,50 +1134,17 @@ class FlowMatchingPointDecoder(TargetPredictionEngineClassic):
         self.vel_head = torch.nn.Linear(dims_embed[-1], num_channels)
 
     def _sample_time(self, y1, output_lens):
-        """Flow time for the training path -> ``[N, 1]``.
-
-        Default (``flow_time_per_cell: False``) draws an independent ``t`` for every target
-        point. That is **inconsistent with the sampler**, which advances every point of a cell
-        together on one shared ``t`` (see ``sample``). Two consequences, both bad for a decoder
-        whose whole purpose is to emit a joint sample:
-
-        * the states the ODE visits (all coordinates at the same ``t``) have vanishing
-          probability under a training distribution of iid per-point times, so the velocity
-          field is evaluated far outside the region it was fitted on;
-        * during training a point's cell-mates sit at unrelated noise levels, some of them
-          nearly clean, so the cheapest way to predict a velocity is to copy from a neighbour
-          that has already resolved. No such neighbour exists at sampling time, and the learned
-          coupling is then inert.
-
-        With the option on, ``t`` is drawn once per decode cell and broadcast over that cell's
-        points, which is exactly the state the sampler produces. Cells stay independent -- they
-        are independent in the network too (varlen groups, per-cell KV), and one draw per cell
-        keeps hundreds of distinct times per step, so the time marginal is still well covered.
-        """
-        if not self.time_per_cell:
-            return sample_flow_time(
-                y1.shape[0],
-                y1.device,
-                y1.dtype,
-                mode=self.time_sampling,
-                logit_mean=self.time_logit_mean,
-                logit_std=self.time_logit_std,
-            )
-        # output_lens is a per-group count vector with a leading 0 (the attention cumsums it)
-        counts = output_lens[1:].to(torch.long)
-        assert int(counts.sum()) == y1.shape[0], (
-            f"flow_time_per_cell: decode-group counts sum to {int(counts.sum())} but there are "
-            f"{y1.shape[0]} target points"
-        )
-        t_cell = sample_flow_time(
-            counts.shape[0],
+        """Flow time for the training path -> ``[N, 1]``. See ``sample_flow_time_for_points``."""
+        return sample_flow_time_for_points(
+            y1.shape[0],
+            output_lens,
             y1.device,
             y1.dtype,
+            per_cell=self.time_per_cell,
             mode=self.time_sampling,
             logit_mean=self.time_logit_mean,
             logit_std=self.time_logit_std,
         )
-        return t_cell.repeat_interleave(counts, dim=0)
 
     def velocity(self, y_t, t, latent, output, latent_lens, output_lens, coordinates):
         """One evaluation of ``v_theta(y_t, t, token, coords)`` -> ``[N, num_channels]``."""
