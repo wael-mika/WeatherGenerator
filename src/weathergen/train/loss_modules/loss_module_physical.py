@@ -110,7 +110,12 @@ class LossPhysical(LossModuleBase):
         self.dynamic_loss_cfg = loss_fcts.get("dynamic_loss")
         self.forecast_offset = self.mode_cfg.forecast.offset
 
-        # dynamically load loss functions based on configuration and stage
+        # dynamically load loss functions based on configuration and stage.
+        # `enabled: False` drops a loss function for this stage. validation_config is an
+        # OmegaConf.merge *union* of the training config, so a loss function cannot be removed by
+        # overriding -- this is the only way to score training and validation with different
+        # functions. Needed by the residual-flow decoder, whose training pack is read by
+        # mse_det/mse_flow while validation sees ordinary fields and wants plain mse.
         self.loss_fcts = [
             [
                 getattr(loss_fns, name),
@@ -118,7 +123,7 @@ class LossPhysical(LossModuleBase):
                 name,
             ]
             for name, params in loss_fcts.items()
-            if name != "dynamic_loss"
+            if name != "dynamic_loss" and params is not None and params.get("enabled", True)
         ]
 
         self.dynamic_loss_ema = DynamicLossEMA(

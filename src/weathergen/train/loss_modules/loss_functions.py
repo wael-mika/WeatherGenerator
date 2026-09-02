@@ -224,6 +224,64 @@ def mse(
     )
 
 
+_RESIDUAL_FLOW_PACK = (
+    "expects the [2, N, C] training pack of ResidualFlowPointDecoder "
+    "(member 0 = mu, member 1 = mu + r_scale*(y0+v)); got ens_dim {n}. "
+    "Use plain `mse` for any other decoder, and never `mse` for this one -- it would average "
+    "the two members together."
+)
+
+
+def mse_det(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Deterministic half of the residual-flow pack: mse of ``mu`` (member 0) against the target.
+
+    Slicing keeps a one-member ensemble axis, over which ``lp_loss``'s ``pred.mean(0)`` is the
+    identity. Reported under its own name, so the deterministic and flow terms are logged
+    separately per channel.
+    """
+    assert pred.shape[0] == 2, "mse_det " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    return lp_loss(
+        target=target,
+        pred=pred[0:1],
+        p_norm=2,
+        with_p_root=False,
+        with_mean=True,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+    )
+
+
+def mse_flow(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Flow half of the residual-flow pack: the conditional-flow-matching objective.
+
+    Member 1 is ``mu.detach() + r_scale*(y0 + v)``, so with ``r := (y1-mu)/r_scale`` this mse is
+    ``r_scale^2 * ||(r - y0) - v||^2`` -- the CFM loss exactly, with the existing channel/point
+    weighting and NaN masking applied for free. See ``model.flow_math.residual_to_physical``.
+    """
+    assert pred.shape[0] == 2, "mse_flow " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    return lp_loss(
+        target=target,
+        pred=pred[1:2],
+        p_norm=2,
+        with_p_root=False,
+        with_mean=True,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+    )
+
+
 def rss(
     target: torch.Tensor,
     pred: torch.Tensor,
