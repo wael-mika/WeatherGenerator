@@ -391,6 +391,21 @@ class LossStructureFunction(LossModuleBase):
             self._channel_idx = [names.index(c) for c in self.channels]
         return self._channel_idx
 
+    def _resolve_channel_names(self, num_channels: int) -> list[str]:
+        """Names of the channels actually scored, in the order the SF arrays carry them."""
+        stream_info = self.cf.streams[self.target_stream]
+        names = list(
+            stream_info.val_target_channels
+            if self.stage == "val"
+            else stream_info.train_target_channels
+        )
+        if self.channels is not None:
+            names = list(self.channels)
+        if len(names) != num_channels:
+            # never let a naming mismatch silently mislabel a diagnostic
+            return [f"c{i}" for i in range(num_channels)]
+        return names
+
     @staticmethod
     def ensemble_fields(pred: torch.Tensor, reduce) -> list[torch.Tensor]:
         """Resolve the ensemble dim into the field(s) the SF loss scores.
@@ -427,6 +442,9 @@ class LossStructureFunction(LossModuleBase):
             self._bin_ratio_sum = torch.zeros(nb, device=self.device)
             self._bin_ratio_cnt = torch.zeros(nb, device=self.device)
             self._bin_pair_sum = torch.zeros(nb, device=self.device)
+            # per-channel, sized lazily on the first accumulation (C is not known until s_p is)
+            self._bin_ratio_ch_sum = None
+            self._bin_ratio_ch_cnt = None
 
         for timestep_idx, (preds_cur, target_cur) in enumerate(
             zip(preds.physical, targets.physical, strict=True)
@@ -500,13 +518,27 @@ class LossStructureFunction(LossModuleBase):
                     if self.log_bin_ratios:
                         loss_ch, s_p, s_t, n_pairs = out
                         if s_p is not None:
+                            ratio_ch = s_p / s_t.clamp_min(self.eps)  # [B, C]
                             # channel-mean ratio per bin; accumulated so the logged value is an
                             # average over the whole validation pass, not one batch
-                            ratio = (s_p / s_t.clamp_min(self.eps)).nanmean(-1)  # [B]
+                            ratio = ratio_ch.nanmean(-1)  # [B]
                             fin = torch.isfinite(ratio)
                             self._bin_ratio_sum[fin] += ratio[fin]
                             self._bin_ratio_cnt[fin] += 1
                             self._bin_pair_sum += n_pairs.to(self._bin_pair_sum)
+
+                            # *** Per channel as well, and this is not decoration. ***
+                            # The nanmean above averages over-dispersed and under-dispersed
+                            # channels into a healthy-looking aggregate: the residual-flow arms
+                            # logged ratio_10_25km ~ 0.9 while injecting 2-5x too much variance
+                            # on 7 of 8 channels. The aggregate cannot detect that; only the
+                            # per-channel numbers can.
+                            if self._bin_ratio_ch_sum is None:
+                                self._bin_ratio_ch_sum = torch.zeros_like(ratio_ch)
+                                self._bin_ratio_ch_cnt = torch.zeros_like(ratio_ch)
+                            fin_ch = torch.isfinite(ratio_ch)
+                            self._bin_ratio_ch_sum[fin_ch] += ratio_ch[fin_ch]
+                            self._bin_ratio_ch_cnt[fin_ch] += 1
                     else:
                         loss_ch = out
                     if loss_ch is not None:
@@ -551,5 +583,16 @@ class LossStructureFunction(LossModuleBase):
                 # a ratio estimated from a handful of pairs is noise, not a measurement; log the
                 # sample size next to it so the two are never read apart
                 reordered[stream_name]["structure"][f"npairs_{lo}_{hi}km"] = pairs[b].detach()
+
+                if self._bin_ratio_ch_sum is None:
+                    continue
+                names = self._resolve_channel_names(self._bin_ratio_ch_sum.shape[1])
+                cnt_b = self._bin_ratio_ch_cnt[b]
+                ratios_b = self._bin_ratio_ch_sum[b] / cnt_b.clamp_min(1)
+                reordered[stream_name]["structure"][f"ratio_{lo}_{hi}km_ch"] = {
+                    name: ratios_b[c].detach()
+                    for c, name in enumerate(names)
+                    if float(cnt_b[c]) > 0
+                }
 
         return LossValues(loss=loss, losses_all=reordered, stddev_all=None)
