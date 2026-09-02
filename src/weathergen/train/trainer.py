@@ -26,6 +26,7 @@ import weathergen.common.config as config
 from weathergen.common.config import Config
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
 from weathergen.model.ema import EMAModel
+from weathergen.model.flow_math import ResidualScale
 from weathergen.model.model_interface import (
     init_model_and_shard,
 )
@@ -444,6 +445,36 @@ class Trainer(TrainerBase):
             else:
                 assert False, "validate_before_training must be integer or boolean."
 
+    def _activation_offload_ctx(self):
+        """Park autograd's saved tensors in host memory during the forward. Default: OFF.
+
+        **What it is for.** At HEALPix level 6 the backbone sees 4x the cells of level 5 and the
+        forward's saved activations do not fit a 95 GiB GH200: measured peaks of 92-96 GiB and an
+        OOM, with no single module responsible. Cutting `ae_global_dim_embed` (2048 -> 1024 ->
+        512), `fe_num_blocks` (8 -> 2) and `max_num_targets` (500k -> 250k) were each worth only
+        2-4 GiB, because the cost is spread across every block rather than concentrated in one.
+
+        **Why a saved-tensor hook and not a model change.** `torch.autograd.graph.save_on_cpu`
+        intercepts what autograd stores for backward, so it composes with the `checkpoint()` calls
+        already in `engines.py` (it offloads the checkpoint INPUTS) and needs no edit to any
+        module. Activation checkpointing was already applied throughout, so trading compute for
+        memory again was not available -- this trades BANDWIDTH instead, which is the resource the
+        machine actually has spare.
+
+        **Why this is cheap on this machine specifically.** On a GH200 the Grace CPU hangs off
+        NVLink-C2C at roughly 900 GB/s rather than a ~60 GB/s PCIe link, so a round trip of tens of
+        GB costs order 100 ms against a step time of seconds. **On a PCIe-attached node this would
+        be far more expensive**, so do not enable it by default elsewhere.
+
+        Off by default, so every existing run is bit-identical -- `save_on_cpu` changes only where
+        a tensor is stored between forward and backward, never its value.
+        """
+        if not self.cf.get("activation_offload", False):
+            return contextlib.nullcontext()
+        # pinned staging keeps the copies asynchronous; without it each offload is a synchronous
+        # pageable transfer and the bandwidth argument above no longer holds
+        return torch.autograd.graph.save_on_cpu(pin_memory=True)
+
     def train(self, mini_epoch):
         """
         Perform training for one epoch
@@ -473,14 +504,19 @@ class Trainer(TrainerBase):
                     dtype=self.mixed_precision_dtype,
                     enabled=cf.with_mixed_precision,
                 ):
-                    preds = self.model(
-                        model_params=self.model_params,
-                        batch=batch.get_source_samples(),
-                        # Only a generative decoder needs the target inside the forward (to put
-                        # it on the probability path). Everything else keeps the usual strict
-                        # separation and gets None.
-                        target_batch=batch if self._model_requires_targets else None,
-                    )
+                    # Activation offload: park saved tensors in host memory for the duration of
+                    # the forward, so only the recompute working set stays resident on the GPU.
+                    # See `_activation_offload_ctx` for why this is a saved-tensor hook rather
+                    # than a change to the model, and when it is worth paying for.
+                    with self._activation_offload_ctx():
+                        preds = self.model(
+                            model_params=self.model_params,
+                            batch=batch.get_source_samples(),
+                            # Only a generative decoder needs the target inside the forward (to
+                            # put it on the probability path). Everything else keeps the usual
+                            # strict separation and gets None.
+                            target_batch=batch if self._model_requires_targets else None,
+                        )
 
                     targets_and_auxs = {}
                     for loss_name, target_aux in self.target_and_aux_calculators.items():
@@ -586,6 +622,41 @@ class Trainer(TrainerBase):
             self.cf.general.istep += 1
 
         self.dataset.advance()
+        self._report_residual_scales(mini_epoch)
+
+    def _report_residual_scales(self, mini_epoch):
+        """Log every ``ResidualScale`` vector, and fail loudly if one never calibrated.
+
+        This exists because that failure already happened and was silent: runs ``fthi701s`` and
+        ``zk7yuisj`` trained 28 mini-epochs with ``count == 0`` and ``scale == [1, ...]``, i.e.
+        the global scalar ``ResidualScale``'s docstring explains cannot survive this data. The
+        corrector consequently injected 2-5x too much residual amplitude on 7 of 8 channels and
+        the runs were unusable. Nothing in the logs said so.
+
+        A self-calibrating buffer must therefore prove it calibrated. An uncalibrated scale is a
+        silently wrong model, so this raises rather than warns.
+        """
+        scales = [
+            (name, m)
+            for name, m in getattr(self.model, "module", self.model).named_modules()
+            if isinstance(m, ResidualScale)
+        ]
+        if not scales:
+            return
+
+        for name, m in scales:
+            if is_root():
+                logger.info(
+                    f"r_scale[{name}] count={int(m.count)} "
+                    f"value={[round(v, 4) for v in m.value().tolist()]}"
+                )
+            if m.fixed is None and int(m.count) == 0:
+                raise RuntimeError(
+                    f"{name}: ResidualScale was never updated after a full training mini-epoch "
+                    f"(count=0, scale still {m.scale.tolist()}). The corrector would train "
+                    "against a global scalar of 1.0. Set flow_residual_scale explicitly to pin a "
+                    "scale on purpose, otherwise this is the calibration silently not running."
+                )
 
     def validate(self, mini_epoch, mode_cfg, batch_size):
         """
