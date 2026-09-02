@@ -1,0 +1,349 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM B (LEVEL 5) -- RESIDUAL FLOW CORRECTOR, TRAINED JOINTLY FROM SCRATCH.
+# Standalone: this file is complete, warm-starts nothing, and must be passed ALONE.
+# ===========================================================================================
+#
+# Identical to config_pretrain_l5.yml except for the decoder and the loss. Same width, same
+# streams, same density, same schedule -- so a comparison against that run isolates the corrector
+# and nothing else.
+#
+# WHY FROM SCRATCH RATHER THAN A CONTINUATION. Both level-5 arms that continued `ypj5be4l` were
+# void: its `geo_bias` MLP does not exist here and was silently dropped on load (48% worse base),
+# and `r_scale` never calibrated. A from-scratch run cannot hit the first failure at all, and
+# Trainer._report_residual_scales now makes the second one fatal instead of silent.
+#
+# THIS RUN IS ALSO THE GATE FOR THE r_scale BUG. `ResidualScale.update()` was never called in
+# fthi701s / zk7yuisj (count == 0, scale == [1]*8 in every checkpoint) even though the same code
+# path calls it correctly in the unit tests. The cause is still unknown, so this config exists to
+# be smoke-run for ONE mini-epoch first and the checkpoint inspected:
+#
+#   uv run --with dacite python ../WeatherGenerator-private/hpc/launch-slurm.py \
+#     --nodes 1 --account e-ext-2025e01-128 --no-register \
+#     --config config/cerra_sharpness/config_residualflow_l5.yml \
+#     --options training_config.num_mini_epochs=1 training_config.samples_per_mini_epoch=64 \
+#               validation_config.samples_per_mini_epoch=4
+#
+# then grep the log for `r_scale[` -- the vector is logged at every mini-epoch boundary, and a
+# count of 0 now raises rather than training 28 epochs on a global scalar of 1.0.
+#
+# HOW TO READ IT -- THIS ARM WILL LOOK WORSE ON RMSE, BY CONSTRUCTION. An oracle probe measured
+# the increment correlation rho at 5.5 km as tp 0.054 | 2t 0.514 | 10si 0.195 | z_850 0.172.
+# `skill = 2*A*rho - A^2` is maximised at `A = rho`, i.e. AT THE BLUR, so restoring amplitude
+# costs RMSE necessarily. Judge the mechanism on `sf_ratio_member` PER CHANNEL (now logged as
+# `ratio_<lo>_<hi>km_ch.<channel>`) and on the member maps, never on mse alone:
+#
+#   uv run python playground/scripts/plot_member_maps.py --runs <RUN>:<CK> \
+#     --channel 2t --slice 0 --size 6 --zoom 44 51 2 14 --out plots/2t_zoom.png
+#
+# A member sd 3x the target's over a 7x12 degree box is what a broken corrector looked like. Look
+# at the picture before reading any metric.
+# ===========================================================================================
+
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+# Matched to ypj5be4l exactly (545 M params), minus geo_bias. Keeping the width identical means
+# the arms are compared against a base of the same capacity as the run every oracle number in
+# playground/flowmatching/README.md was measured on, so the rho table stays a usable reference
+# even though the absolute MSE will differ.
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 4
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 1
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: ResidualFlow
+pred_adapter_kv: False
+# REQUIRED. The within-cell self-attention is the only mechanism coupling a cell's target points,
+# so it is the only thing that can make the corrector emit a spatially coherent residual rather
+# than independent per-point noise. Model.create warns if this is off.
+pred_self_attention: True
+pred_mlp_adaln: True
+
+# --- the corrector. See the block in config/default_config.yml for what each key does.
+# Joint but decoupled: the base trains under mse_det, the corrector under mse_flow, and no
+# gradient crosses between them, so mse_det stays a clean deterministic baseline inside this run.
+flow_freeze_base: False
+flow_detach_cond: True
+flow_cond: "mu+tokens+latent"
+flow_num_layers: 2
+# Per-channel, calibrated online over the first 1000 steps then frozen. NEVER pin a global
+# scalar: measured CERRA residual stds span 0.32 (2t) to 0.85 (tp), and a scalar of 1.0 -- which
+# is what fthi701s/zk7yuisj silently used -- over-drove 2t by 4.45x, t_850 by 4.92x and z_850 by
+# 4.94x while leaving tp (0.851, closest to 1) about right. That is the whole failure.
+flow_residual_scale: null
+flow_residual_scale_steps: 1000
+# REQUIRED, not optional. With an independent t per point, a point's cell-mates sit at unrelated
+# noise levels and any neighbour near t=1 leaks the answer -- a shortcut worth nothing at
+# sampling time, where every point shares one t. The leak grows with point density.
+flow_time_per_cell: True
+flow_solver: euler
+flow_num_steps: 10
+flow_time_sampling: logit_normal
+flow_time_logit_mean: 0.0
+flow_time_logit_std: 1.0
+flow_cond_dropout: 0.1
+flow_guidance: 1.0
+# Validation costs ens_size x flow_num_steps passes over the corrector stack, so keep it small
+# during training and raise it for the final offline scoring. 0 emits bare mu, i.e. scores this
+# checkpoint as a purely deterministic model.
+flow_ens_size: 2
+
+num_class_tokens: 0
+num_register_tokens: 0
+
+# REQUIRED on torch >= ~2.9: a stream's decoder runs at every output step, so ERA5's head is used
+# twice per iteration and DDP otherwise raises "marked as ready twice" on the first backward.
+ddp_static_graph: True
+
+fe_num_blocks: 8
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False           # FSDP2 sharding bug with ae_local_blocks; use DDP
+
+# OFF at level 5. ypj5be4l ran this configuration at 500000 targets without it, and the level-6
+# OOM post-mortem left ~56 GiB of device memory unaccounted for with `save_on_cpu(pin_memory=True)`
+# active on GH200 -- untested, but no reason to carry the risk where it buys nothing.
+activation_offload: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+#####################################
+
+# Same stream directory the arms use, so base and arms share `max_num_targets: 500000`, the eight
+# CERRA target channels and their weights. Do not fork it for this run.
+streams_directory: "./config/streams/cerra_flowmatch_v2/"
+streams: ???
+
+zarr_store: "zip"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "residualflow_l5_joint"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+data_loading:
+  num_workers: 6
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  log_spoof_warnings: False
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # ABSOLUTE, not "N more". This run starts at 0, so 96 means 96, and the arms continuing it must
+  # be set ABOVE 96 or they will train nothing and still write a checkpoint.
+  num_mini_epochs: 96
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5 (1979-2023) and CERRA (1985-2023) both cover this range. 2023 is held out for validation.
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # 6h window = ERA5 cadence -> ERA5 present in every window (no starvation).
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # ResidualFlow returns a [2, N, C] pack: member 0 is mu, member 1 is
+  # mu.detach() + r_scale*(y0+v). `mse_det` and `mse_flow` slice one member each, over which
+  # lp_loss's `pred.mean(0)` is the identity.
+  # *** PLAIN `mse` MUST NOT APPEAR HERE. *** It would average the two members into
+  # mu + 0.5*r_scale*(y0+v), which is neither term. Both pack functions assert on the ensemble
+  # dimension so a misconfiguration fails loudly instead of training nonsense.
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: {
+          "mse_det": { weight: 1.0 },
+          "mse_flow": { weight: 1.0 },
+          },
+        },
+    }
+
+  model_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
+  forecast:
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 1
+      policy: "fixed"
+
+
+validation_config:
+  # Deliberately tiny: a liveness check, not a measurement. The structure function needs >=32
+  # samples to replicate, so the real numbers come from a separate validation-only pass at the
+  # end. Writing fields every mini-epoch would also cost tens of GB of scratch over 96 epochs.
+  samples_per_mini_epoch: 2
+  shuffle: False
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+  validate_before_training: True
+  losses: {
+    # Validation sees ordinary fields ([ens, N, C]) from the sampler, so it wants plain `mse` and
+    # must NOT see the pack functions -- they would assert on the ensemble dimension. Both need an
+    # explicit `enabled: False` because validation_config is merged as a UNION on top of the
+    # training config, so a loss function cannot be removed by omission.
+    "physical": {
+      type: LossPhysical,
+      loss_fcts: {
+        "mse": { enabled: True, weight: 1.0 },
+        "mse_det": { enabled: False },
+        "mse_flow": { enabled: False },
+        },
+      },
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          # *** ALL CHANNELS, NOT JUST tp -- THIS IS A CORRECTION, NOT A PREFERENCE. ***
+          # The level-5 arms scored `channels: ['tp']`, and tp happened to be the ONE channel
+          # whose accidental r_scale of 1.0 was near-correct (injected/true residual amplitude
+          # 1.02). So the diagnostic faithfully reported a healthy ratio ~0.9 for the only
+          # channel that was not broken, while 2t (4.45x), t_850 (4.92x) and z_850 (4.94x) were
+          # over-dispersed and NEVER MEASURED. Scoring every channel costs essentially nothing:
+          # one pair sample serves all channels at once.
+          channels: null,
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,               # ensemble MEAN
+          # Uniform sampling put ~16 of 262144 pairs in the 10-25 km bin on this domain, i.e. the
+          # bins that matter were noise or dropped. Numbers are NOT comparable with
+          # pre-2026-07-31 runs.
+          pair_sampling: stratified,
+          # now also emits ratio_<lo>_<hi>km_ch.<channel>; the channel-mean aggregate alone
+          # cannot distinguish "calibrated" from "half the channels cancel out"
+          log_bin_ratios: True,
+        },
+      },
+    },
+    "structure_members": {
+      type: LossStructureFunction,
+      weight: 1.0,
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct_members": {
+          target_stream: CERRA,
+          channels: null,
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: members,            # the coherence read: per-member, not the mean
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+  }
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+    }
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_residualflow_l5
+  grid: null
