@@ -24,6 +24,7 @@ from torch.utils.checkpoint import checkpoint
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
+from weathergen.model.decode_residual_flow import ResidualFlowPointDecoder
 from weathergen.model.encoder import EncoderModule
 from weathergen.model.engines import (
     BilinearDecoder,
@@ -480,6 +481,31 @@ class Model(torch.nn.Module):
                             stream_config=si,
                             num_channels=self.targets_num_channels[i_stream],
                         )
+                    elif cf.decoder_type == "ResidualFlow":
+                        # Deterministic readout kept intact, with a flow-matching corrector on
+                        # its residual. See decode_residual_flow.ResidualFlowPointDecoder.
+                        assert int(si.get("decode_soft_blend_k", 1) or 1) == 1, (
+                            f"stream {stream_name}: decode_soft_blend_k must be off for "
+                            "ResidualFlow. Blending averages independent samples inside the "
+                            "transition band, which re-smooths exactly the fine structure the "
+                            "corrector produces."
+                        )
+                        if not cf.pred_self_attention and is_root():
+                            logger.warning(
+                                "ResidualFlow with pred_self_attention: False -- the corrector's "
+                                "target points are then sampled independently and the residual "
+                                "will not be spatially coherent, which defeats the point."
+                            )
+                        tte = ResidualFlowPointDecoder(
+                            cf,
+                            dims_embed,
+                            dim_coord_in,
+                            tr_dim_head_proj,
+                            tr_mlp_hidden_factor,
+                            softcap,
+                            stream_config=si,
+                            num_channels=self.targets_num_channels[i_stream],
+                        )
                     else:
                         # target prediction engines
                         tte_version = (
@@ -514,6 +540,11 @@ class Model(torch.nn.Module):
                         final_activation=final_activation,
                         stream_name=stream_name,
                     )
+
+                    # a frozen residual-flow base must freeze its readout too, or mu keeps
+                    # drifting under mse_det and the corrector chases a moving target
+                    if isinstance(tte, ResidualFlowPointDecoder) and tte.freeze_base:
+                        self.pred_heads[stream_name].requires_grad_(False)
 
             # iterate again to setup shared spatial pred heads if specified in config
             for i_stream, (stream_name, si) in enumerate(self.streams.items()):
@@ -695,16 +726,52 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
+    def _gather_stream_targets(self, batch, target_batch, stream_name, step, num_channels, num_pts):
+        """Ground truth for a generative decoder's probability path -> ``[num_pts, C]``.
+
+        Target *values* live on a different sample set than the target *coordinates* the decoder
+        queries with (source_select carries "target_coords", target_select carries
+        "target_values"), so they must be fetched from ``target_batch`` through the source->target
+        matching -- not from ``batch``, where ``target_tokens`` is empty.
+        """
+        assert target_batch is not None, (
+            f"{stream_name}: a generative decoder needs target values in the forward pass; the "
+            "trainer must pass target_batch (see Model.requires_targets_in_forward)."
+        )
+        tgts = []
+        for i_b in range(len(batch)):
+            i_t = target_batch.get_target_idx_for_source(i_b)
+            assert i_t >= 0, f"source sample {i_b} has no matching target sample"
+            tgts.append(
+                target_batch.get_target_sample(i_t)
+                .streams_data[stream_name]
+                .target_tokens[step]
+                .reshape(-1, num_channels)
+            )
+        tgt = torch.cat(tgts)
+        # LossPhysical pairs target and prediction by a plain reshape, so the two are in the same
+        # point order; assert the count to catch any future divergence rather than silently
+        # training on mispaired data.
+        assert tgt.shape[0] == num_pts, (
+            f"{stream_name}: {tgt.shape[0]} target points vs {num_pts} decoded points -- the "
+            "ordering assumption for generative decoding is broken"
+        )
+        return tgt
+
     @property
     def requires_targets_in_forward(self) -> bool:
         """Whether ``forward`` needs ``target_batch`` (training only).
 
-        True only for the flow-matching decoder, which has to place the target on the probability
-        path to build its own input. Every other decoder is a pure function of the source, so the
+        True only for the generative decoders, which have to place the target on the probability
+        path to build their own input. Every other decoder is a pure function of the source, so the
         trainer leaves ``target_batch`` at None and the model cannot see targets at all.
+
+        Duck-typed on ``needs_target_in_forward`` rather than isinstance-checked, so a new
+        generative decoder opts in by setting one class attribute instead of being added to a
+        tuple at every call site.
         """
         return any(
-            isinstance(tte, FlowMatchingPointDecoder)
+            getattr(tte, "needs_target_in_forward", False)
             for tte in (self.target_token_engines or {}).values()
         )
 
@@ -876,36 +943,14 @@ class Model(torch.nn.Module):
                     tte = self.target_token_engines[stream_name]
                     tte_kwargs = {"ens_size": self.streams[stream_name]["pred_head"]["ens_size"]}
                     if self.training:
-                        # Ground truth for the probability path. Target *values* live on a
-                        # different sample set than the target *coordinates* the decoder queries
-                        # with (source_select carries "target_coords", target_select carries
-                        # "target_values"), so they must be fetched from target_batch through the
-                        # source->target matching -- not from `batch`, where target_tokens is
-                        # empty.
-                        assert target_batch is not None, (
-                            "FlowMatching needs target values in the forward pass; the trainer "
-                            "must pass target_batch (see Model.requires_targets_in_forward)."
+                        tte_kwargs["target"] = self._gather_stream_targets(
+                            batch,
+                            target_batch,
+                            stream_name,
+                            step,
+                            tte.num_channels,
+                            tc_tokens.shape[0],
                         )
-                        tgts = []
-                        for i_b in range(len(batch)):
-                            i_t = target_batch.get_target_idx_for_source(i_b)
-                            assert i_t >= 0, f"source sample {i_b} has no matching target sample"
-                            tgts.append(
-                                target_batch.get_target_sample(i_t)
-                                .streams_data[stream_name]
-                                .target_tokens[step]
-                                .reshape(-1, tte.num_channels)
-                            )
-                        tgt = torch.cat(tgts)
-                        # LossPhysical pairs target and prediction by a plain reshape, so the two
-                        # are in the same point order; assert the count to catch any future
-                        # divergence rather than silently training on mispaired data.
-                        assert tgt.shape[0] == tc_tokens.shape[0], (
-                            f"{stream_name}: {tgt.shape[0]} target points vs "
-                            f"{tc_tokens.shape[0]} decoded points -- ordering assumption for "
-                            "flow matching is broken"
-                        )
-                        tte_kwargs["target"] = tgt
 
                     pred = tte(
                         latent=tokens_nbors,
@@ -914,6 +959,41 @@ class Model(torch.nn.Module):
                         output_lens=tcs_lens,
                         coordinates=t_coords,
                         **tte_kwargs,
+                    )
+                elif isinstance(self.target_token_engines[stream_name], ResidualFlowPointDecoder):
+                    # Deterministic decode as usual, then the corrector on its residual. mu is
+                    # produced by pred_heads (kept on Model, so a deterministic parent's
+                    # checkpoint keys match exactly) and computed ONCE -- ensemble members differ
+                    # only in the corrector's base noise.
+                    tte = self.target_token_engines[stream_name]
+                    det_tokens = tte.det_forward(
+                        latent=tokens_nbors,
+                        output=tc_tokens,
+                        latent_lens=tokens_nbors_lens,
+                        output_lens=tcs_lens,
+                        coordinates=t_coords,
+                    )
+                    mu = self.pred_heads[stream_name](det_tokens).mean(0)
+                    tgt = None
+                    if self.training:
+                        tgt = self._gather_stream_targets(
+                            batch,
+                            target_batch,
+                            stream_name,
+                            step,
+                            tte.num_channels,
+                            tc_tokens.shape[0],
+                        )
+                    pred = tte.correct(
+                        mu=mu,
+                        det_tokens=det_tokens,
+                        coord_tokens=tc_tokens,
+                        latent=tokens_nbors,
+                        latent_lens=tokens_nbors_lens,
+                        output_lens=tcs_lens,
+                        coordinates=t_coords,
+                        target=tgt,
+                        ens_size=self.streams[stream_name]["pred_head"]["ens_size"],
                     )
                 else:
                     tc_tokens = self.target_token_engines[stream_name](

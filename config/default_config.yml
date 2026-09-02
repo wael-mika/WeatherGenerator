@@ -44,7 +44,7 @@ ae_aggregation_att_dense_rate: 1.0
 ae_aggregation_block_factor: 64
 ae_aggregation_mlp_hidden_factor: 2
 
-decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, FlowMatching, Linear
+decoder_type: PerceiverIOCoordConditioning #  Options: PerceiverIOCoordConditioning, FlowMatching, ResidualFlow, Linear
 pred_adapter_kv: False
 pred_self_attention: True
 pred_dyadic_dims: False
@@ -80,6 +80,60 @@ flow_time_logit_mean: 0.0
 flow_time_logit_std: 1.0
 flow_cond_dropout: 0.0
 flow_guidance: 1.0
+
+# Residual flow-matching corrector (decoder_type: ResidualFlow, see ResidualFlowPointDecoder).
+# Unlike FlowMatching, the deterministic readout is KEPT and still trained by its own mse; the
+# corrector flow-matches only the residual r = (y - mu)/r_scale. One checkpoint therefore carries
+# both the RMSE-optimal prediction and a sharp sample.
+#
+# The training output is a [2, N, C] pack -- member 0 is mu, member 1 is mu + r_scale*(y0+v) --
+# so the TRAINING loss must be `mse_det` + `mse_flow`, never plain `mse`, which would average the
+# two members together. Validation sees ordinary fields and wants plain `mse`; select per stage
+# with `enabled: False` on the loss functions that do not apply.
+#
+#   flow_cond                 mu | mu+tokens | mu+tokens+latent. What the corrector sees.
+#                             `mu` is a strict post-hoc corrector (coords, t and mu only);
+#                             `mu+tokens` adds the deterministic decoder's own representation;
+#                             `mu+tokens+latent` also cross-attends the cell's latents. The first
+#                             two sever the encoder gradient structurally.
+#   flow_detach_cond          detach mu, the decoder tokens and the latent inside the corrector,
+#                             so the flow loss moves corrector parameters only. With this on,
+#                             `mse_det` is provably identical to a standalone deterministic run
+#                             and doubles as a live regression check. Turn it OFF only if you
+#                             want the corrector to reshape the encoder -- and then `mse_det`
+#                             stops being a clean baseline.
+#   flow_freeze_base          requires_grad_(False) on the inherited decode stack and its
+#                             pred_head, and forces them to eval() so their dropout is off. Set
+#                             `mse_det` weight to 0 alongside it (it is still logged).
+#   flow_num_layers           depth of the corrector stack. Evaluation costs
+#                             ens_size * flow_num_steps passes over it, so this dominates
+#                             validation time.
+#   flow_ens_size             overrides pred_head.ens_size for the corrector. 0 emits bare mu,
+#                             i.e. evaluates the same checkpoint as a purely deterministic model.
+#   flow_residual_scale       null -> per-channel std, calibrated online and kept in the
+#                             checkpoint. A float pins one global scalar instead, which does not
+#                             survive multi-channel data: measured CERRA residual stds span
+#                             0.32 (2t) to 0.85 (tp), and a scalar tuned for tp leaves 2t's
+#                             normalised residual small against the unit-variance noise, where
+#                             the velocity degenerates toward -y0.
+#   flow_residual_clamp       intentionally absent. Clamping the residual breaks the identity
+#                             that makes plain mse the CFM objective: the path would be built
+#                             from a clamped residual while the loss regresses against the
+#                             unclamped target.
+# Park autograd's saved tensors in host memory during the forward (see
+# Trainer._activation_offload_ctx). Off by default, so existing runs are bit-identical. Needed to
+# fit HEALPix level 6 on a 95 GiB GH200; cheap there because the Grace CPU is on NVLink-C2C, and
+# expensive on a PCIe-attached node.
+activation_offload: False
+
+flow_cond: "mu+tokens+latent"
+flow_detach_cond: True
+flow_freeze_base: False
+flow_num_layers: 2
+flow_ens_size: null
+flow_residual_scale: null
+flow_residual_scale_ema: 0.999
+flow_residual_scale_steps: 1000
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
