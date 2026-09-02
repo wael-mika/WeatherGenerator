@@ -1,0 +1,106 @@
+# (C) Copyright 2024 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Latent-upsampling A/B: ERA5 as the macroscale state anchor (input + output).
+# With time_window_step=6h and ERA5 at 6h cadence, ERA5 is present in EVERY window, so the
+# encoder is never starved — no second dense input stream is needed for this minimal test.
+#
+# ERA5 output channels: small precip-relevant subset (not the full state), added as an
+# auxiliary decode target alongside CERRA.tp. Same family used as the ERA5 *input* subset in
+# config/streams/era5_to_cerra/era5.yml ("precip-relevant subset", A3 experiment), reused here
+# as an *output* set — physically tied to precipitation formation over the CERRA/Europe domain:
+#   msl          synoptic cyclone/front driver of extratropical precip
+#   z_500        500 hPa trough/ridge; trough approach forces synoptic-scale ascent
+#   t_850        850 hPa thermal/frontal structure; controls rain-vs-snow phase
+#   q_850, q_700 low/mid-level moisture; the direct water-vapor ingredient for precip
+#   u_850, v_850 850 hPa wind; low-level jet / moisture transport & convergence
+#                (e.g. Alpine/Pyrenean orographic uplift, a known CERRA precip signature)
+#   2d           2 m dewpoint; surface moisture/saturation proxy, tied to CERRA's own 2t target
+# loss_weight kept below CERRA's (1.0) so this stays an auxiliary signal, not a competing
+# objective with the CERRA.tp attribution this experiment is designed around.
+
+ERA5 :
+  type : anemoi
+  # *** N320, NOT o96 -- REQUIRED AT LEVEL 6. *** o96 has 40,320 points globally, which is 3.28
+  # per level-5 cell but only **0.82 per level-6 cell**: more than half of all cells would contain
+  # no ERA5 point at all and the macroscale anchor would be degenerate. n320 has 542,080 points =
+  # 11.0 per level-6 cell. Same version (v8), same 1979-2023 range, same 6h cadence, same 101
+  # variables, so it is a true drop-in and nothing else in this file changes.
+  #
+  # WHAT THIS MEANS FOR THE EXPERIMENT. The fine-scale information comes from CERRA-as-input
+  # (5.5 km native, ~677 points per level-6 cell), not from ERA5, which is the macroscale anchor.
+  # n320 is ~25 km, so it CANNOT contribute at 5.5-22 km -- rho at those separations remains
+  # attributable to the cell size, which is the variable under test. Between ~25 and 100 km n320
+  # could contribute, so treat rho in that band as confounded between "finer cell" and "finer
+  # anchor" and read the finest scales for the clean answer.
+  filenames : ['aifs-ea-an-oper-0001-mars-n320-1979-2023-6h-v8.zarr']
+  stream_id : 0
+  source_exclude : ['w_', 'skt', 'tcw', 'cp', 'tp']
+  target : ['msl', 'z_500', 't_850', 'q_850', 'q_700', 'u_850', 'v_850', '2d']
+  target_exclude : []
+  loss_weight : 0.3
+  location_weight : cosine_latitude
+  masking_rate : 0.6
+  masking_rate_none : 0.05
+  # *** 20, NOT 8 -- A HARD FLASH-ATTENTION LIMIT, NOT A TUNING CHOICE. ***
+  # `StreamEmbedTransformer` (embeddings.py:110 -> attention.py:640) calls `flash_attn_func` with
+  # the SOURCE-TOKEN COUNT in the batch dimension, because `embed_orientation: channels` makes each
+  # channel a sequence element. Flash attention maps that dimension onto a CUDA grid axis, which is
+  # capped at 65535. Exceeding it raises "CUDA error: invalid configuration argument" -- NOT an
+  # OOM, so it presents as a memory problem and is not one. Measured, not inferred: token_size 8
+  # fails there at level 6, token_size 16 clears it and reaches training.
+  # At level 6 n320 gives ~11 points per cell: token_size 8 -> ~2 tokens/cell x 49,152 cells
+  # ~= 98,000 tokens, over the cap. token_size >= 16 -> ~1 token/cell ~= 49,152, under it.
+  # At level 5 with o96 this never bit: 3.3 points/cell -> ~12,288 tokens.
+  # 20 rather than the bare-minimum 16 because it is the value the established n320 configs use
+  # (`config/streams/era5_n320_forecasting/` on wm/develop-ssl-diffusion-v1) and it leaves headroom
+  # for the cells that hold more than 16 points, which would otherwise spill to a second token.
+  # NOTE this is a real ceiling on scaling to finer levels, not specific to this run.
+  token_size : 20
+  tokenize_spacetime : True
+  max_num_targets: -1
+  # *** linear, NOT transformer -- THIS IS THE LEVEL-6 MEMORY FIX. ***
+  # The stream embedder has its OWN `dim_embed` (512 here), independent of `ae_global_dim_embed`,
+  # which is why shrinking the global width 2048 -> 1024 -> 512 was worth almost nothing and cost
+  # two launches (`cqvlevd5`, `ndhtiwpw`). Measured embedder size, tokens x sequence:
+  #     CERRA   level 5   845 x 2048 = 1.73 M   ->   level 6  3251 x 512 = 1.66 M   (1.0x)
+  #     ERA5    level 5 12288 x    8 = 0.10 M   ->   level 6 49152 x  20 = 0.98 M  (10.0x)
+  # ERA5 is the growth: 4x the cells AND token_size 8 -> 20, and neither can be undone -- one
+  # token per cell is already the floor, and token_size 8 at level 6 breaks flash attention's
+  # 65535 grid cap. So the transformer over those tokens is what has to go.
+  # `net: linear` is also the established n320 practice
+  # (`config/streams/era5_n320_forecasting/` on wm/develop-ssl-diffusion-v1), which uses it for
+  # exactly this stream at exactly this resolution.
+  # CAVEAT: this is a genuine difference from the level-5 control `ypj5be4l`, which embeds ERA5
+  # with a 2-block transformer. It weakens the ERA5 *input* encoding only; CERRA, the fine-scale
+  # stream under test, keeps its transformer embedder untouched.
+  embed :
+    net : linear
+    num_tokens : 1
+    num_heads : 8
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 2
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
+  # Per-channel weights carried over from the full-state pressure-level scaling convention
+  # used elsewhere in the repo (weight increases toward the surface); msl/2d default to 1.0.
+  channel_weights :
+    q_700: 0.61
+    q_850: 0.71
+    t_850: 0.71
+    u_850: 0.71
+    v_850: 0.71
+    z_500: 0.48

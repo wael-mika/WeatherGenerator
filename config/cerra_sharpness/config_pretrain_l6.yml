@@ -1,0 +1,339 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# STAGE 1 -- FRESH DETERMINISTIC LEVEL-6 BASE. The single parent for every corrector arm.
+# Trains from scratch. Nothing here is inherited from ypj5be4l or rrwhf8xh.
+# ===========================================================================================
+#
+# WHY A DETERMINISTIC PARENT AND NOT A JOINT RUN. Arms A1 and A2 freeze the base and train only
+# the corrector, so they need a converged deterministic checkpoint to start from. Making all
+# three arms continuations of ONE parent is what makes them comparable: they then differ only
+# in the corrector's conditioning and in whether the base keeps training.
+#
+#   stage 1  this file                          -> deterministic L6 base, 96 mini-epochs
+#   stage 2  config_residualflow_a1.yml         -> corrector sees mu + decoder tokens
+#            config_residualflow_a2.yml         -> corrector also sees the latent
+#            config_residualflow_b_l6.yml       -> joint: base keeps training under mse_det
+#
+# *** max_num_targets IS SET IN THE STREAM CONFIG AND MUST BE THE SAME FOR ALL FOUR RUNS. ***
+# config/streams/cerra_perceiver_l6/cerra.yml. The binding constraint is NOT this run -- it is
+# the corrector arms, which add a 2-layer stack on top of the 4-layer readout, i.e. ~50% more
+# decode attention over the same points. Measured on this branch:
+#     500000 + corrector -> OOM in the backward (z45153bw, 13.04 GiB dq/dk/dv allocation)
+#     250000 + corrector -> runs
+# So pick the largest value that fits WITH the corrector and use it here too. Training the base
+# denser than the arms would mean the corrector is fitted in a regime the base never saw, which
+# is exactly the train/eval mismatch the density campaign was about.
+#
+# The arms inherit this value through the parent config, so setting it once here is enough --
+# and it is why none of the arm files override it.
+#
+# VALIDATION IS DELIBERATELY TINY HERE (samples_per_mini_epoch: 2, no written output). It is a
+# liveness check, not a measurement: the structure function needs >=32 samples to replicate, so
+# the real numbers come from a separate validation-only inference at the end. Writing fields
+# every mini-epoch would also cost tens of GB of scratch across 96 epochs.
+#
+# num_mini_epochs is ABSOLUTE. This run starts at 0, so 96 means 96. The arms continue the same
+# counter, so they must be set ABOVE 96 (e.g. 128 for 32 more).
+# ===========================================================================================
+
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+# *** UNCHANGED at v3_geo's 2048 -- AND THAT IS THE POINT: NO CAPACITY CONFOUND. ***
+# Two arms were lost chasing the level-6 OOM through this setting before the real cause was found:
+#   `cqvlevd5` dim 1024 -> all 8 ranks OOM at 89.84 GiB
+#   `ndhtiwpw` dim  512 -> all 8 ranks OOM, on a single 12.00 GiB tensor
+# Width was never the lever. The cause is CERRA's `token_size`, which must track POINTS PER CELL:
+# refining a HEALPix level quarters the points in a cell, so carrying token_size 2048 over from
+# level 5 quadruples the token COUNT while each token is still padded to 2048 slots -- 4x the
+# embedder attention for the same data, ~92% padding. Fixed in the stream config (2048 -> 512);
+# see the note there. Measured at THIS width: token_size 2048 OOMs at 92.76 GiB, token_size 512
+# peaks at 52.4 GiB and completes a training step. Same width, only the token size changed.
+#
+# Because the fix is elsewhere, the model keeps the control's full width and depth: 544 M params
+# against `ypj5be4l`'s 545 M. **So rho(r) at fine scales is attributable to the cell size, not to
+# capacity, and a NULL result is now interpretable too** -- no matched-size control is needed.
+#
+# Two measurement lessons, both of which cost a launch:
+#   * A single-GPU probe UNDER-REPORTS: it sees only the first couple of training samples, while
+#     production shuffles through larger ones. Leave real headroom, do not launch at ~95%.
+#   * An instantaneous `nvidia-smi` reading is NOT a peak. Sample it, or read
+#     `torch.cuda.max_memory_allocated`, and never clear a launch on a spot value.
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 4
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 1
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+pred_self_attention: True
+pred_mlp_adaln: True
+
+
+# THE ONE KNOB THIS ARM CHANGES vs v2. Zero-initialised, so step 0 is identical to v2's model;
+# it selects the dense grouped cross-attention path (flash takes no attention bias).
+num_class_tokens: 0
+num_register_tokens: 0
+
+# NOTE: decode_latent_expand / decode_upsample_num_blocks were removed on 2026-07-31. They are
+# latent_upsampling-branch keys with ZERO readers here (LatentUpsamplingEngine does not exist on
+# this branch), so they merged cleanly and did nothing -- exactly the failure mode that cost the
+# g1ydywu2 fine-tune. Check `grep -rl <key> src/` before adding a key inherited from a config.
+
+# # Euler steps for the probability-flow ODE at evaluation, and the width of the
+# # sinusoidal flow-time embedding that rides along with the coordinate frame in AdaLN.
+# # 24 steps is a reasonable accuracy/cost point; 8-16 is usually enough for a quick look.
+# flow_num_steps: 24
+# flow_dim_time: 32
+
+# # THE FIX THIS RUN EXISTS FOR. Training draws the flow time once per DECODE CELL instead of
+# # once per target point, so the states the model is trained on are the states the sampler
+# # actually visits. With per-point t, a point's cell-mates sit at unrelated noise levels and
+# # any neighbour at t ~ 1 is nearly clean, so "copy from the neighbour" solves the training
+# # objective completely -- and is worth nothing at sampling time, where all points share one t.
+# # f8as896p is the proof: at 800000 targets the training residual fell 2.4-3.9x below the 50k
+# # parent while the samples got monotonically worse. The leak scales with density, so this is
+# # REQUIRED here, not optional. See engines.py `_sample_time`.
+# flow_time_per_cell: True
+
+# REQUIRED on torch >= ~2.9, and nothing to do with this experiment. A stream's decoder runs at
+# every output step, and `_get_output_length` is `offset + num_steps` = 2 here, so ERA5's
+# velocity head is used twice per iteration. Older torch tolerated that under DDP; 2.9 raises
+# "Parameter target_token_engines.ERA5.vel_head.bias has been marked as ready twice" and the run
+# dies on the first backward. l4m31jbd trained fine with a byte-identical config on an older
+# torch -- uv.lock is gitignored on this branch, so every fresh run re-resolves dependencies and
+# eventually picked up the stricter torch. static_graph is the documented fix and subsumes
+# find_unused_parameters, which is safe here because the unused set (pred_heads, bypassed by the
+# flow decoder) is identical every iteration. See model_interface.py.
+ddp_static_graph: True
+
+fe_num_blocks: 8
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+# 4x the cells, ~100 km. THE architectural variable under test; see the header.
+healpix_level: 6
+
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False           # FSDP2 sharding bug with ae_local_blocks; use DDP
+
+# Insurance, not the fix. The fix is ERA5's `net: linear` (see the stream config); with it a
+# faithful 24-sample probe completes at 90.6 GiB of 95.6, which is only ~5 GiB of headroom, and
+# production adds DDP gradient buckets and NCCL buffers on top. Offload buys ~3 GiB more by
+# parking autograd's saved tensors in host memory, which on GH200 costs bandwidth the machine has
+# spare. It is worth little on its own here -- the model is already activation-checkpointed
+# throughout, so the saved tensors were never the peak; the peak is a TRANSIENT 8.63 GiB MLP
+# tensor that no offload can move. See Trainer._activation_offload_ctx.
+activation_offload: True
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+#####################################
+
+# one line differs from cerra_flowmatch_v2: ERA5 is n320, required at level 6
+streams_directory: "./config/streams/cerra_perceiver_l6/"
+streams: ???
+
+zarr_store: "zip"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "pretrain_l6_deterministic"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+# 12 workers x ~1 GB per prefetched sample at max_num_targets: -1 is a lot of host RAM.
+# Drop further if workers get OOM-killed; the bottleneck is the model, not the loader.
+data_loading:
+  num_workers: 6
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  log_spoof_warnings: False
+
+training_config:
+
+  training_mode: ["masking"]
+
+  num_mini_epochs: 96
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5 (1979-2023) and CERRA (1985-2023) both cover this range. Hold out 2023 for validation.
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # 6h window = ERA5 cadence -> ERA5 present in every window (no starvation).
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  model_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
+  forecast:
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 1           # predict CERRA tp at t+6h
+      policy: "fixed"
+
+
+validation_config:
+  # Routine validation is deliberately small. At max_num_targets: -1 one member is a decode pass
+  # over ~1.1M points, and ens_size x flow_num_steps is that many passes PER SAMPLE. f8as896p
+  # also wrote 71 GB of zarr in 16 epochs at num_samples: 4. Full-fidelity numbers come from a
+  # separate validation-only inference at the end (see the header).
+  samples_per_mini_epoch: 2
+  shuffle: False
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+  # Validate the untrained model before the first gradient step. f8as896p had no such anchor and
+  # its trend had to be read without one.
+  validate_before_training: True
+  losses: {
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          channels: ['tp'],           # tp only: the campaign target, and the hard one
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,               # ensemble MEAN
+          # Uniform sampling put ~16 of 262144 pairs in the 10-25 km bin on this domain and ~43
+          # in the 25-50 km bin, i.e. the two bins that matter were noise or were dropped.
+          # 'stratified' fills every bin. Numbers are NOT comparable with pre-2026-07-31 runs;
+          # use playground/scripts/decoder_forensics.py, which is the same estimator.
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+    "structure_members": {
+      type: LossStructureFunction,
+      weight: 1.0,
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct_members": {
+          target_stream: CERRA,
+          channels: ['tp'],
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: members,            # the coherence read: per-member, not the mean
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+  }
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+    }
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_pretrain_l6
+  grid: null

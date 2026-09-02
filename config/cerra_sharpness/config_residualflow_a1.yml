@@ -1,0 +1,48 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ARM A1 -- POST-HOC CORRECTOR (idea #1). Pair with config_residualflow_ft.yml:
+#   --config config/cerra_sharpness/config_residualflow_ft.yml \
+#            config/cerra_sharpness/config_residualflow_a1.yml
+#
+# The corrector sees mu and the deterministic decoder's own tokens, but NOT the latent: the
+# cross-attention KV is the learned null token, so the encoder is severed structurally. A1 can
+# only redistribute what mu already contains. If A2 does not beat it, the latent is not the
+# bottleneck and the k-NN / density work is the better lever.
+#
+# flow_cond_dropout and flow_guidance MUST be off here. With a null KV they are inert by
+# construction -- dropping a null token changes nothing and v_uncond == v_cond makes any
+# guidance weight the identity -- so ResidualFlowBranch asserts on them rather than letting a
+# knob silently do nothing.
+general:
+  desc: "residualflow_a1_mu_tokens"
+
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+
+training_config:
+  # The [2, N, C] training pack is read by mse_det/mse_flow. Plain `mse` MUST be off: it would
+  # average the two members into mu + 0.5*r_scale*(y0+v), which is meaningless. The parent config
+  # carries `mse` and OmegaConf.merge is a UNION, so it must be disabled explicitly.
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        # weight 0, but still computed and logged per channel: the regression check that the
+        # frozen base has not moved.
+        mse_det: {weight: 0.0}
+        mse_flow: {weight: 1.0}
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+  # ABSOLUTE stop point, not "N more": the counter continues the parent's.
+  # config_pretrain_l6.yml ends at 96, so 128 buys 32 more mini-epochs.
+  num_mini_epochs: 128

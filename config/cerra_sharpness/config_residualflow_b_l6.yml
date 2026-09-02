@@ -1,0 +1,68 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ARM B -- L6 CORRECTOR on the existing rrwhf8xh base. Pair with config_residualflow_ft.yml:
+#   --config config/cerra_sharpness/config_residualflow_ft.yml \
+#            config/cerra_sharpness/config_residualflow_b_l6.yml
+#
+# Warm-starts from rrwhf8xh (PerceiverIOCoordConditioning, healpix 6, 9 ckpts) -- so you get the
+# corrector at level 6 WITHOUT training a base from scratch. rrwhf8xh already carries
+# activation_offload: True in its own config, which is what makes level 6 fit in 95 GiB.
+#
+# The corrector additionally cross-attends the cell's 9 latents, so it can read fine-scale
+# structure the deterministic readout left unused. This is the arm with headroom: the latent
+# probes measured ~6x more sub-cell precipitation information in the latent than the decoder
+# reads out. Compare against A1, which is identical except for the KV.
+#
+# flow_cond_dropout is on so a guidance sweep is free afterwards at sampling time. Read the
+# shared header: w > 1 removes spread and every channel is already UNDER-dispersed, so w < 1 is
+# the interesting direction here.
+general:
+  desc: "residualflow_b_l6"
+
+flow_cond: "mu+tokens+latent"
+flow_cond_dropout: 0.1
+flow_guidance: 1.0
+flow_freeze_base: False
+
+training_config:
+  # The [2, N, C] training pack is read by mse_det/mse_flow. Plain `mse` MUST be off: it would
+  # average the two members into mu + 0.5*r_scale*(y0+v), which is meaningless. The parent config
+  # carries `mse` and OmegaConf.merge is a UNION, so it must be disabled explicitly.
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        # NOT frozen here: the base keeps training under its own mse exactly as a standalone
+        # deterministic run would, because flow_detach_cond cuts the flow gradient. mse_det is
+        # therefore both a live loss and the control this arm is judged against.
+        mse_det: {weight: 1.0}
+        mse_flow: {weight: 1.0}
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+  # ABSOLUTE stop point, not "N more": the counter continues the parent's.
+  # config_pretrain_l6.yml ends at 96, so 128 buys 32 more mini-epochs.
+  num_mini_epochs: 128
+
+# ===========================================================================================
+# MEMORY. The first attempt (z45153bw) OOM'd in the BACKWARD -- flash-attn allocating 13.04 GiB
+# for dq/dk/dv -- not at model build. rrwhf8xh fit level 6 at max_num_targets 500000 with a
+# 4-layer readout and NO corrector; this arm adds a 2-layer corrector stack on top, i.e. ~50%
+# more decode attention over the same target points, and that is what tips it over.
+#
+# Density is NOT set here. It lives in exactly one place -- the stream config the parent was
+# trained with (config/streams/cerra_perceiver_l6/cerra.yml) -- so the base and every corrector
+# arm are fitted at the same points per cell. Raising it in two places is how the two get out of
+# step, which is precisely the train/eval mismatch the density campaign was about.
+
+# One ODE integration per validation sample. Validation costs flow_ens_size x flow_num_steps
+# passes over the corrector stack, and at level 6 that is the dominant validation expense.
+# Raise it for the final offline scoring, not during training.
+flow_ens_size: 1

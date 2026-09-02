@@ -1,0 +1,150 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# RESIDUAL FLOW CORRECTOR, ARM A -- frozen deterministic base.
+# train_continue overlay on a finished PerceiverIOCoordConditioning run.
+# ===========================================================================================
+#
+# WHAT THIS ARM IS. The deterministic decode is kept and FROZEN; a small second stack
+# flow-matches only the residual r = (y - mu)/r_scale. mu is unchanged from the parent, so this
+# measures exactly one thing: how much texture a corrector can add on top of a fixed prediction.
+#
+# *** WARM-START FROM A DETERMINISTIC PARENT, NOT A FlowMatching ONE. ***
+# ResidualFlowPointDecoder builds its inherited stack with the UN-widened aux, so a
+# PerceiverIOCoordConditioning checkpoint matches every `tte.*` key and only `...flow.*` is
+# reported missing and re-initialised. A FlowMatching parent widens the AdaLN aux to
+# dim_coord_in + flow_dim_time, and load_state_dict(strict=False) still RAISES on a size
+# mismatch -- the run dies at startup rather than half-loading. Check the log for:
+#     Missing keys ... only target_token_engines.<stream>.flow.*
+#     Unused keys  ... empty
+#
+# VERIFIED DETERMINISTIC PARENTS on this system (checked 2026-08-29):
+#   ypj5be4l   PerceiverIOCoordConditioning, healpix 5, dim 2048, token_size 2048, 30 ckpts
+#              (0..29). The run every oracle/probe number in this header was measured on --
+#              so the corrector is compared against a baseline we have already characterised.
+#   rrwhf8xh   PerceiverIOCoordConditioning, healpix 6, dim 2048, token_size 512, 9 ckpts (0..8).
+#              Use this to get the corrector at level 6 WITHOUT training a new base.
+# Both carry the same 8 CERRA target channels and `mse` as their only loss.
+# FlowMatching runs -- g1ydywu2, dg48kzg6, f8as896p, ofyn3v5c, hcujpc61, kt8g6wey -- are NOT
+# usable as parents here.
+#
+# *** `git add` THE NEW SOURCE FILES BEFORE SEEDING. *** seed_raina_run.py ships
+# `git ls-files` (TRACKED files) plus every untracked config/**/*.yml. So the configs travel on
+# their own but decode_residual_flow.py and flow_math.py DO NOT while they are untracked, and
+# the job dies with ImportError on weathergen.model.decode_residual_flow. Staging is enough.
+#
+# HOW TO READ IT -- THIS ARM WILL LOOK WORSE ON RMSE, BY CONSTRUCTION.
+# An ORACLE probe on ypj5be4l:29 (an upper bound on ANY decoder) measured the increment
+# correlation rho at 5.5 km:
+#     tp 0.054 | 2t 0.514 | 10si 0.195 | z_850 0.172 | t_850 0.093 | u_850 0.095 | v_850 0.085
+# skill = 2*A*rho - A^2 is maximised at A = rho, i.e. AT THE BLUR, so restoring amplitude
+# (A -> 1) costs RMSE necessarily. Expected member-MSE inflation on the increment is 1 + 1 - 2rho:
+# ~sqrt(0.97)x for 2t, ~sqrt(1.89)x for tp.
+#   * Judge the MECHANISM on 2t (rho 0.514) and 10si (0.195). They are the only channels with
+#     enough decodable signal for a positive result to be interpretable.
+#   * Score with sf_ratio_member (MEMBERS, never the ensemble mean), power_ratio per scale, and
+#     FSS. Report rho as the information ceiling; do NOT rank this arm against the deterministic
+#     one by RMSE or rho.
+#   * mse_det is logged at weight 0. With a frozen base it must be EXACTLY CONSTANT across
+#     mini-epochs -- if it moves, something is not frozen and the comparison is void.
+#
+# THE TWO VARIANTS, which is the whole point of the arm:
+#   A1  flow_cond: "mu+tokens"          the corrector sees mu and the decoder's own tokens
+#   A2  flow_cond: "mu+tokens+latent"   it also cross-attends the cell's 9 latents
+# A1 can only redistribute what mu already contains; A2 can additionally read structure the
+# deterministic readout left in the latent. Run A1 first: if A2 does not beat it, the latent is
+# not the bottleneck and the k-NN/density work is the better lever.
+# Set the variant on the command line so both arms share this file:
+#     --options flow_cond="mu+tokens"
+#
+# WHY flow_time_per_cell IS ON AND MUST STAY ON. The density arm (f8as896p) trained beautifully
+# and got monotonically WORSE, because with an independent t per point a point's cell-mates sit
+# at unrelated noise levels and any neighbour near t=1 leaks the answer. That shortcut is worth
+# nothing at sampling time, where every point shares one t. The leak scales with point density,
+# and it applies to the RESIDUAL at least as strongly as to the field.
+# ===========================================================================================
+
+# ===========================================================================================
+# THIS FILE IS THE SHARED HALF. Pass it FIRST, then exactly one arm file:
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_residualflow_a1.yml
+#
+# *** EVERY TOP-LEVEL KEY MUST APPEAR IN EXACTLY ONE CONFIG SOURCE. ***
+# launch-slurm.py calls mlflow log_config once PER FILE and logs each file's top-level keys as
+# run params, so a key present in two files -- or in a file and in `--options`, which becomes
+# config_command_line.yaml -- makes mlflow reject the second write and kills the launch:
+#     RestException: Parameter with key flow_cond was already logged with a value of ...
+# That is why `general`, `flow_cond`, `flow_cond_dropout`, `flow_guidance`, `flow_freeze_base`
+# and the whole `training_config` block live in the ARM files, not here. It is also why you
+# cannot override any of them with `--options` on a registered run.
+# ===========================================================================================
+
+decoder_type: ResidualFlow
+
+# Frozen base: requires_grad_(False) on the inherited stack AND its pred_head, and the stack is
+# forced to eval() so its dropout is off -- otherwise mu would be stochastic and the corrector
+# would burn capacity undoing dropout noise.
+# The flow loss moves corrector parameters only. With the base frozen this is belt-and-braces,
+# but it also makes the arm directly comparable to the joint one.
+flow_detach_cond: True
+flow_num_layers: 2
+
+# Per-channel residual scale, calibrated online over the first 1000 steps and then frozen so the
+# loss weighting is stationary. Do NOT pin a global scalar here: measured CERRA residual stds
+# span 0.32 (2t) to 0.85 (tp), and one scalar leaves the small-residual channels in the regime
+# where the target is dwarfed by the unit-variance noise and the velocity degenerates to -y0.
+flow_residual_scale: null
+flow_residual_scale_steps: 1000
+
+# REQUIRED at this density, not optional -- see the header.
+flow_time_per_cell: True
+flow_solver: euler
+flow_num_steps: 24
+flow_time_sampling: logit_normal
+flow_time_logit_mean: 0.0
+flow_time_logit_std: 1.0
+# Guidance stays available for free at sampling time. Note w > 1 removes spread and every
+# channel is already under-dispersed; w < 1 is the interesting direction here.
+
+validation_config:
+  # Validation sees ordinary fields ([ens, N, C]), so it wants plain mse and must NOT see the
+  # pack functions -- they would assert on the ensemble dimension.
+  losses:
+    physical:
+      # `type` is REQUIRED on every loss TERM: Model.create reads `v.type` for each entry of
+      # validation_config.losses. The parent's validation_config has no `physical` term, so
+      # nothing supplies it by merge and omitting it kills the job at model construction.
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: True, weight: 1.0}
+        mse_det: {enabled: False}
+        mse_flow: {enabled: False}
+    structure:
+      loss_fcts:
+        struct:
+          pair_sampling: stratified
+          log_bin_ratios: True
+    structure_members:
+      loss_fcts:
+        struct_members:
+          pair_sampling: stratified
+          log_bin_ratios: True
+  samples_per_mini_epoch: 32
+  # Epoch -1 is the parent measured in this exact estimator: the only honest reference for
+  # "did the corrector help".
+  validate_before_training: True
+  output:
+    num_samples: 4
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_residualflow_ft
+  grid: null
