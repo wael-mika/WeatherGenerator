@@ -236,7 +236,26 @@ def get_grid_type(data_type, stream: str, fname_zarr: str) -> str:
 
 
 # TODO: this will change after restructuring the lead time.
-def get_source_info(fname_zarr, stream, samples) -> tuple[list[np.datetime64], list[np.datetime64]]:
+def _reference_from_first_target(zio, sample, stream, fstep_hours: int, fname_zarr):
+    """Reference time inferred from the earliest forecast step that has a target."""
+    steps = sorted((int(f) for f in zio.forecast_steps), key=int)
+    for step in steps:
+        group = zio.data_root.get(f"{sample}/{stream}/{step}/target")
+        if group is None:
+            continue
+        times = np.asarray(group["times"]).astype("datetime64[ns]")
+        if times.size == 0:
+            continue
+        return np.min(times) - np.timedelta64(int(step) * int(fstep_hours), "h")
+    raise FileNotFoundError(
+        f"sample {sample} of {fname_zarr} has neither a forecast-step-0 source "
+        f"group nor any target group for stream {stream}"
+    )
+
+
+def get_source_info(
+    fname_zarr, stream, samples, fstep_hours: int = 6
+) -> tuple[list[np.datetime64], list[np.datetime64]]:
     """
     Retrieve source interval boundaries from the source group at forecast step 0.
 
@@ -272,12 +291,20 @@ def get_source_info(fname_zarr, stream, samples) -> tuple[list[np.datetime64], l
             group_path = f"{sample}/{stream}/0/source"
             source_group = zio.data_root.get(group_path)
 
-            if source_group is None:
-                raise FileNotFoundError(f"Zarr group '{group_path}' not found in {fname_zarr}")
-
-            times_arr = np.asarray(source_group["times"]).astype("datetime64[ns]")
-            source_start = np.min(times_arr)
-            source_end = np.max(times_arr)
+            if source_group is not None:
+                times_arr = np.asarray(source_group["times"]).astype("datetime64[ns]")
+                source_start = np.min(times_arr)
+                source_end = np.max(times_arr)
+            else:
+                # A diagnostic-only stream writes no forecast-step-0 group at
+                # all, so there is no source interval to read. Recover the
+                # reference time from the first target-bearing step instead:
+                #   reference = valid_time(step n) - n * fstep_hours
+                # Raising here instead made the export impossible for every run
+                # that omits the fstep-0 group, which is most of them.
+                source_start = source_end = _reference_from_first_target(
+                    zio, sample, stream, fstep_hours, fname_zarr
+                )
 
             _logger.debug(f"Sample {sample}: source_interval=[{source_start} .. {source_end}]")
             source_starts.append(source_start)
@@ -291,6 +318,16 @@ def get_streams(stream, fname_zarr):
         zio_streams = zio.streams
     streams = zio_streams if stream is None else [stream]
     return streams
+
+
+def _discover_rank_files(run_id: str, epoch: int, rank) -> list:
+    """Resolve the rank store files for a run, honouring rank="all"."""
+    if rank == "all" or rank == ["all"]:
+        first = get_model_results(run_id, epoch, 0)
+        pattern = f"validation_chkpt{epoch:05d}_rank*{first.suffix}"
+        return sorted(first.parent.glob(pattern))
+    ranks = rank if isinstance(rank, list) else [rank]
+    return [get_model_results(run_id, epoch, int(r)) for r in ranks]
 
 
 def export_model_outputs(data_type: str, config: OmegaConf, **kwargs) -> None:
@@ -330,9 +367,14 @@ def export_model_outputs(data_type: str, config: OmegaConf, **kwargs) -> None:
         raise ValueError(f"Invalid type: {data_type}. Must be 'target' or 'prediction'.")
 
     # --- Discover rank files ---
-    # get_model_results accepts lists of epochs and ranks ("all" or list of ints).
-    rank_arg = ["all"] if rank == "all" else (rank if isinstance(rank, list) else [rank])
-    rank_files = get_model_results(run_id, [epoch], rank_arg)
+    # get_model_results takes a SCALAR epoch and rank and returns one Path; it
+    # formats both with :05d/:04d. The previous call passed [epoch] and a list
+    # of ranks, which raised
+    #   TypeError: unsupported format string passed to list.__format__
+    # for every invocation. Resolve one rank at a time, and expand "all" by
+    # globbing next to rank 0 so the store's extension is discovered rather
+    # than assumed.
+    rank_files = _discover_rank_files(run_id, epoch, rank)
     if not rank_files:
         raise FileNotFoundError(
             f"No rank files found for run_id={run_id}, epoch={epoch}, rank={rank}"
@@ -357,7 +399,9 @@ def export_model_outputs(data_type: str, config: OmegaConf, **kwargs) -> None:
             _logger.info(f"RUN {run_id}: Processing rank {rank_label} ({rank_file.name})")
 
             samples = get_samples(samples_cfg, rank_file)
-            source_starts, source_ends = get_source_info(rank_file, stream, samples)
+            source_starts, source_ends = get_source_info(
+                rank_file, stream, samples, kwargs.get("fstep_hours", 6)
+            )
 
             kwargs["rank_label"] = rank_label
             parser = CfParserFactory.get_parser(config=config, **kwargs)

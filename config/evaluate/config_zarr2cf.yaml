@@ -96,6 +96,18 @@ variables:
     wg_unit: m
     std_unit: m
     level_type: sfc
+  # The IMERG_ANEMOI stream names its precipitation channel "tp"; only the older
+  # "tp_imerg_0" spelling was mapped, so exporting any run whose channel is "tp"
+  # failed with KeyError: Variable 'tp' not found in mapping. Keeping the
+  # exported variable name as "tp" rather than renaming it to tp_imerg_0, so the
+  # netCDF matches the channel the store actually holds.
+  tp:
+    var: tp
+    long: imerg_total_precipitation
+    std: precipitation_amount
+    wg_unit: m
+    std_unit: m
+    level_type: sfc
   
 
 coordinates:
