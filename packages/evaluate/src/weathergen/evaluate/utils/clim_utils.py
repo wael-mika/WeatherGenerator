@@ -16,6 +16,7 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 from weathergen.evaluate.utils.derived_channels import scale_z_channels
+from weathergen.evaluate.utils.dict_utils import base_metric_name
 
 _logger = logging.getLogger(__name__)
 
@@ -274,6 +275,6 @@ def needs_climatology(metrics_dict: dict) -> bool:
     bool
         True if any metric requires climatology, False otherwise
     """
-    metrics = [m for metrics in metrics_dict.values() for m in metrics.keys()]
+    metrics = [base_metric_name(m) for metrics in metrics_dict.values() for m in metrics.keys()]
     req_clim = ["acc", "rps", "rpss", "seeps"]
     return any(m in req_clim for m in metrics)

@@ -19,6 +19,7 @@ from scipy.spatial import cKDTree
 
 from weathergen.evaluate.scores.psd import compute_psd_score, detect_grid_type
 from weathergen.evaluate.scores.score_utils import calc_latitude_weights, to_list
+from weathergen.evaluate.utils.dict_utils import base_metric_name
 
 # from common.io import MockIO
 
@@ -273,10 +274,13 @@ class Scores:
         """
         if parameters is None:
             parameters = {}
-        if score_name in self.det_metrics_dict.keys():
-            f = self.det_metrics_dict[score_name]
+        # ``ets_thr0.02`` and friends are per-threshold names minted by parse_metric_params;
+        # they must dispatch to the plain ``ets`` implementation.
+        base_name = base_metric_name(score_name)
+        if base_name in self.det_metrics_dict.keys():
+            f = self.det_metrics_dict[base_name]
             _logger.debug(f"Using deterministic metric: {score_name}")
-        elif score_name in self.prob_metrics_dict.keys():
+        elif base_name in self.prob_metrics_dict.keys():
             if self._ens_dim not in data.prediction.dims:
                 _logger.warning(
                     f"Probabilistic score '{score_name}' chosen, but ensemble dimension "
@@ -329,7 +333,7 @@ class Scores:
         }
 
         # assign p and gt by default if metrics do not have specific args
-        keys = score_args_map.get(score_name, ["p", "gt"])
+        keys = score_args_map.get(base_name, ["p", "gt"])
         args = {k: available[k] for k in keys}
 
         for an in arg_names:

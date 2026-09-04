@@ -14,6 +14,7 @@ from weathergen.evaluate.plotting.plot_utils import (
     calculate_average_over_dim,
     lower_is_better,
 )
+from weathergen.evaluate.utils.dict_utils import base_metric_name
 
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
@@ -291,7 +292,7 @@ class ScoreCards:
             return 0.0
 
         # Metrics where higher values indicate better performance (with specific perfect score)
-        elif metric in ["psnr"]:
+        elif base_metric_name(metric) in ["psnr"]:
             return 100.0
 
         # Metrics where higher values indicate better performance (default perfect score)

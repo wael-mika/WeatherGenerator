@@ -17,6 +17,8 @@ import numpy as np
 import xarray as xr
 from numpy.typing import NDArray
 
+from weathergen.evaluate.utils.dict_utils import base_metric_name
+
 _logger = logging.getLogger(__name__)
 
 
@@ -77,8 +79,23 @@ def calculate_average_over_dim(
 
 
 def lower_is_better(metric: str) -> bool:
-    """Determine whether lower or higher is better."""
-    return metric in {"l1", "l2", "mae", "mse", "rmse", "vrmse", "bias", "crps", "spread"}
+    """Determine whether lower or higher is better.
+
+    Per-threshold names such as ``ets_thr0.02`` are reduced to their base metric first,
+    otherwise every thresholded metric would fall through to the "higher is better"
+    branch by accident rather than by decision.
+    """
+    return base_metric_name(metric) in {
+        "l1",
+        "l2",
+        "mae",
+        "mse",
+        "rmse",
+        "vrmse",
+        "bias",
+        "crps",
+        "spread",
+    }
 
 
 def compute_offsets(n, spacing=0.11):
