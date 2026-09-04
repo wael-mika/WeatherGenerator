@@ -65,7 +65,6 @@ training_config:
 # One ODE integration per validation sample. Validation costs flow_ens_size x flow_num_steps
 # passes over the corrector stack, and at level 6 that is the dominant validation expense.
 # Raise it for the final offline scoring, not during training.
-flow_ens_size: 1
 
 # lr_max is 5e-5, NOT the 2e-4 the frozen-base arms use, and the difference is deliberate.
 # In A1/A2 the base is frozen, so 2e-4 is seen only by a freshly initialised corrector. Here the

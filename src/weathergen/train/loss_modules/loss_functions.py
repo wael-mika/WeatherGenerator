@@ -225,10 +225,10 @@ def mse(
 
 
 _RESIDUAL_FLOW_PACK = (
-    "expects the [2, N, C] training pack of ResidualFlowPointDecoder "
-    "(member 0 = mu, member 1 = mu + r_scale*(y0+v)); got ens_dim {n}. "
-    "Use plain `mse` for any other decoder, and never `mse` for this one -- it would average "
-    "the two members together."
+    "expects the [3, N, C] training pack of ResidualFlowPointDecoder "
+    "(member 0 = mu, member 1 = mu + r_scale*(y0+v), member 2 = the per-channel r_scale); "
+    "got ens_dim {n}. Use plain `mse` for any other decoder, and never `mse` for this one -- it "
+    "would average the members together."
 )
 
 
@@ -245,7 +245,7 @@ def mse_det(
     identity. Reported under its own name, so the deterministic and flow terms are logged
     separately per channel.
     """
-    assert pred.shape[0] == 2, "mse_det " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    assert pred.shape[0] == 3, "mse_det " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
     return lp_loss(
         target=target,
         pred=pred[0:1],
@@ -264,16 +264,45 @@ def mse_flow(
     weights_points: torch.Tensor | None,
 ):
     """
-    Flow half of the residual-flow pack: the conditional-flow-matching objective.
+    Flow half of the residual-flow pack: the conditional-flow-matching objective, weighted
+    EQUALLY across channels.
 
-    Member 1 is ``mu.detach() + r_scale*(y0 + v)``, so with ``r := (y1-mu)/r_scale`` this mse is
-    ``r_scale^2 * ||(r - y0) - v||^2`` -- the CFM loss exactly, with the existing channel/point
-    weighting and NaN masking applied for free. See ``model.flow_math.residual_to_physical``.
+    Member 1 is ``mu + r_scale*(y0 + v)``, so a plain mse against the target would give
+
+        ||y1 - member1||^2  =  r_scale^2 * ||(r - y0) - v||^2
+
+    -- the CFM objective, but with each channel's gradient scaled by ``r_scale_c^2``. That is
+    fatal once the base is well converged, because ``r_scale`` IS the residual std: the better a
+    channel is predicted, the smaller its ``r_scale``, and the less the corrector ever learns it.
+    Measured on the level-5 arms (lk0sdbsd/uqrvsx96/gr76l82m) with a base at mse 0.086:
+
+        channel  r_scale   relative gradient   member SF ratio (want ~1)
+        tp        0.624          1.000                1.5
+        10si      0.312          0.285                4.3
+        2t        0.096          0.029               22.7
+        t_850     0.077          0.016               75.3
+        z_850     0.070          0.013               31.5
+
+    An 80x spread in effective learning weight, and the over-dispersion is almost perfectly
+    rank-inverse to it: ``mse_flow`` falling mostly meant "tp is training".
+
+    So divide the residual by ``r_scale`` (member 2) before scoring, which recovers the plain CFM
+    objective per channel, and multiply back by the ROOT-MEAN-SQUARE ``r_scale`` so the overall
+    loss magnitude -- and therefore the meaning of the learning rate, of ``grad_clip``, and of the
+    ``mse_det``/``mse_flow`` balance -- is unchanged. Net effect: the per-channel weight
+    ``r_scale_c^2`` is replaced by the constant ``mean(r_scale^2)``.
+
+    Dividing the TARGET as well keeps NaN masking intact (``nan / x`` is still ``nan``), so the
+    existing spoof/mask handling in ``lp_loss`` is untouched.
     """
-    assert pred.shape[0] == 2, "mse_flow " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    assert pred.shape[0] == 3, "mse_flow " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    r_scale = pred[2]
+    # scalar; keeps the loss magnitude where it was instead of inflating it by ~1/r_scale^2
+    rms = r_scale.pow(2).mean().sqrt()
+    denom = r_scale / rms
     return lp_loss(
-        target=target,
-        pred=pred[1:2],
+        target=target / denom,
+        pred=(pred[1] / denom).unsqueeze(0),
         p_norm=2,
         with_p_root=False,
         with_mean=True,

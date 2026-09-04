@@ -21,6 +21,19 @@
 # guidance weight the identity -- so ResidualFlowBranch asserts on them rather than letting a
 # knob silently do nothing.
 general:
+  # *** spawn, not fork. ***
+  # With forked dataloader workers both FROZEN arms die at the start of the epoch-96 validation:
+  # every rank throws an uncaught `c10::AcceleratorError: CUDA error: initialization error` while
+  # the workers are being created, and they are SIGABRT'd. Reproduced on two independent launches
+  # (s0yhrz41/otszriof, then wj2klruj/coqf3au3). It is the freeze that selects it, not the cost:
+  # at identical flow_ens_size the JOINT arm walked through the same validation to mini-epoch 97
+  # with zero CUDA errors.
+  # `num_workers: 0` is NOT an option -- multi_stream_data_sampler.worker_workset asserts
+  # `world_size == 1` on that path, so it is single-GPU only and dies instantly on 8 ranks.
+  # spawn gives each worker a fresh interpreter with no inherited CUDA context, which is the
+  # documented cure for cudaErrorInitializationError. The underlying interaction is still not
+  # diagnosed -- see playground/flowmatching/README.md.
+  multiprocessing_method: "spawn"
   desc: "residualflow_a1_mu_tokens"
 
 flow_cond: "mu+tokens"

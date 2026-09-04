@@ -88,6 +88,7 @@
 
 decoder_type: ResidualFlow
 
+
 # Frozen base: requires_grad_(False) on the inherited stack AND its pred_head, and the stack is
 # forced to eval() so its dropout is off -- otherwise mu would be stochastic and the corrector
 # would burn capacity undoing dropout noise.
@@ -110,6 +111,14 @@ flow_num_steps: 24
 flow_time_sampling: logit_normal
 flow_time_logit_mean: 0.0
 flow_time_logit_std: 1.0
+
+# Validation costs flow_ens_size * flow_num_steps passes of the corrector stack over every target
+# point, and writes that many fields per sample. At the stream's pred_head.ens_size of 4 that is 96
+# decode passes over 500k points per sample; the two frozen arms died in validation with a CUDA
+# initialisation error in their forked dataloader workers, which neither the base (writes nothing)
+# nor the joint arm (pinned to 1) hit. 2 keeps a spread estimate at a quarter of the cost.
+# Set ONCE here, never in an arm file -- mlflow rejects a top-level key that appears twice.
+flow_ens_size: 2
 # Guidance stays available for free at sampling time. Note w > 1 removes spread and every
 # channel is already under-dispersed; w < 1 is the interesting direction here.
 
@@ -137,9 +146,16 @@ validation_config:
           pair_sampling: stratified
           log_bin_ratios: True
   samples_per_mini_epoch: 32
-  # Epoch -1 is the parent measured in this exact estimator: the only honest reference for
-  # "did the corrector help".
-  validate_before_training: True
+  # *** MUST STAY False WHENEVER output.num_samples > 0 AND THE RUN IS CHAINED. ***
+  # write_zarr asserts `Group already exists, stop overwriting` (packages/common/.../io.py:445).
+  # Every chained restart re-runs the mini_epoch -1 validation and tries to rewrite
+  # validation_chkpt-0001_rank*.zip, which the parent job already wrote -- so part 2 dies within
+  # 3 minutes of starting. This killed the first A1/A2 launch (s0yhrz41, otszriof). The level-5
+  # base survived four restarts only because it wrote nothing (num_samples: 0).
+  # Nothing is lost: for an ARM, epoch -1 is the base plus a RANDOM corrector, which is not a
+  # reference for anything (it measured mse 5.26 vs the base's 0.17 last time). The honest
+  # deterministic reference is the parent run's own final validation.
+  validate_before_training: False
   output:
     num_samples: 4
 

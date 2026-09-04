@@ -30,34 +30,66 @@ C = 3
 
 
 def _pack(mu, y0, v, r_scale):
-    """The decoder's training return: [mu, mu.detach() + r_scale*(y0+v)]."""
-    return torch.stack([mu, residual_to_physical(mu, y0, v, r_scale)], 0)
+    """The decoder's training return: [mu, mu.detach() + r_scale*(y0+v), r_scale]."""
+    return torch.stack([mu, residual_to_physical(mu, y0, v, r_scale), r_scale.expand_as(mu)], 0)
 
 
-def test_packed_mse_equals_scaled_cfm():
-    """Plain mse on member 1 IS the CFM objective, scaled by r_scale^2.
+def test_packed_mse_is_the_cfm_objective_weighted_equally_per_channel():
+    """``mse_flow`` must score the CFM objective with the SAME weight on every channel.
 
-    This is the identity the whole design rests on: it is what lets the existing LossPhysical
-    machinery compute a flow-matching loss with no new loss module. If anyone reintroduces a
-    clamp on the residual, or drops the detach, this test fails.
+    Member 1 is ``mu + r_scale*(y0+v)``, so a plain mse against the target gives
+    ``r_scale^2 * ||(r - y0) - v||^2`` -- the CFM objective, but with each channel's gradient
+    scaled by ``r_scale_c^2``. Since ``r_scale`` IS the residual std, that starves exactly the
+    channels the base already predicts well: on the level-5 arms it gave an 80x spread in
+    effective learning weight and 20-75x over-dispersion on the small-residual channels, while
+    ``tp`` (the largest ``r_scale``) trained fine and hid it.
+
+    ``mse_flow`` therefore divides member 1 and the target by ``r_scale`` (member 2) and
+    multiplies back by the rms ``r_scale``, so the per-channel weight ``r_scale_c^2`` becomes the
+    CONSTANT ``mean(r_scale^2)`` and the overall loss magnitude is unchanged.
+
+    If anyone reintroduces a clamp on the residual, drops the detach, or drops member 2, this
+    fails.
     """
     torch.manual_seed(0)
     mu = torch.randn(N, C)
     y0 = torch.randn(N, C)
     v = torch.randn(N, C)
     y1 = torch.randn(N, C)
-    # per-channel scale, the configuration that actually ships
+    # per-channel scale, the configuration that actually ships; deliberately a wide spread
     r_scale = torch.tensor([0.851, 0.348, 0.563])
 
     packed = _pack(mu, y0, v, r_scale)
-    got, _ = mse_flow(y1, packed, None, None)
+    got, per_channel_got = mse_flow(y1, packed, None, None)
 
-    # the objective it is supposed to equal: ||v - (r - y0)||^2 weighted by r_scale^2 per channel
     r = physical_to_residual(y1, mu, r_scale)
-    per_channel = ((v - (r - y0)) ** 2 * r_scale**2).mean(0)
-    want = per_channel.mean()
+    cfm = ((v - (r - y0)) ** 2).mean(0)  # per channel, UNWEIGHTED
+    want_per_channel = cfm * r_scale.pow(2).mean()  # one constant weight for every channel
 
-    assert torch.allclose(got, want, atol=1e-6), f"{got} != {want}"
+    assert torch.allclose(per_channel_got, want_per_channel, atol=1e-5), (
+        f"{per_channel_got} != {want_per_channel}"
+    )
+    assert torch.allclose(got, want_per_channel.mean(), atol=1e-6)
+
+
+def test_flow_loss_no_longer_favours_large_residual_channels():
+    """The regression that cost the level-5 arms: equal CFM error must cost the same everywhere.
+
+    Two channels with an 8x difference in ``r_scale`` but an identical velocity error must
+    contribute identically. Under the old ``r_scale^2`` weighting they differed by 64x.
+    """
+    n = 4096
+    r_scale = torch.tensor([0.80, 0.10])
+    mu = torch.zeros(n, 2)
+    y0 = torch.zeros(n, 2)
+    v = torch.zeros(n, 2)
+    # same CFM error (r - y0 - v = 1) in both channels
+    y1 = r_scale.expand(n, 2) * 1.0
+
+    _, per_channel = mse_flow(y1, _pack(mu, y0, v, r_scale), None, None)
+    assert per_channel[0].item() == pytest.approx(per_channel[1].item(), rel=1e-5), (
+        f"channels weighted unequally: {per_channel.tolist()}"
+    )
 
 
 def test_mse_det_and_flow_slice_the_right_member():
@@ -66,21 +98,26 @@ def test_mse_det_and_flow_slice_the_right_member():
     y1 = torch.randn(N, C)
     other = y1 + 3.0
 
-    exact_mu = torch.stack([y1, other], 0)
+    ones = torch.ones_like(y1)
+    exact_mu = torch.stack([y1, other, ones], 0)
     det, _ = mse_det(y1, exact_mu, None, None)
     flow, _ = mse_flow(y1, exact_mu, None, None)
     assert det.item() == pytest.approx(0.0, abs=1e-12)
     assert flow.item() == pytest.approx(9.0, rel=1e-6)
 
-    exact_flow = torch.stack([other, y1], 0)
+    exact_flow = torch.stack([other, y1, ones], 0)
     det, _ = mse_det(y1, exact_flow, None, None)
     flow, _ = mse_flow(y1, exact_flow, None, None)
     assert det.item() == pytest.approx(9.0, rel=1e-6)
     assert flow.item() == pytest.approx(0.0, abs=1e-12)
 
-    # plain mse on the pack averages the members -- exactly what must never be configured
+    # plain mse on the pack averages ALL THREE members -- exactly what must never be configured.
+    # Assert against the explicit mean rather than a literal, so the check keeps its meaning if
+    # the pack ever grows another slot.
     both, _ = mse(y1, exact_flow, None, None)
-    assert both.item() == pytest.approx(2.25, rel=1e-6)
+    nonsense = ((y1 - exact_flow.mean(0)) ** 2).mean()
+    assert both.item() == pytest.approx(nonsense.item(), rel=1e-6)
+    assert both.item() > 1.0, "averaging the pack must not accidentally look like a good loss"
 
 
 def test_pack_functions_reject_a_non_pack():
@@ -90,7 +127,7 @@ def test_pack_functions_reject_a_non_pack():
         with pytest.raises(AssertionError, match="training pack"):
             fn(y1, torch.randn(1, N, C), None, None)
         with pytest.raises(AssertionError, match="training pack"):
-            fn(y1, torch.randn(4, N, C), None, None)
+            fn(y1, torch.randn(2, N, C), None, None)
 
 
 def test_nan_targets_stay_finite():

@@ -105,8 +105,12 @@ def test_training_returns_the_two_member_pack(inputs):
     dec = _build().train()
     mu, _, pred = _decode(dec, inputs, target=inputs["target"])
 
-    assert pred.shape == (2, inputs["n"], C)
+    assert pred.shape == (3, inputs["n"], C)
     assert torch.allclose(pred[0], mu, atol=1e-5), "member 0 must be mu itself"
+    # member 2 is the per-channel r_scale, which mse_flow divides out so that every channel's
+    # CFM term carries the same weight regardless of how well the base already fits it
+    assert torch.allclose(pred[2], dec.flow.r_scale.value().expand_as(pred[2]).float(), atol=1e-5)
+    assert (pred[2] > 0).all()
 
     pred.float().sum().backward()
     assert dec.flow.vel_head.weight.grad is not None

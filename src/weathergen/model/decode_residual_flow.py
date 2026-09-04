@@ -261,10 +261,11 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
     raises on *size* mismatch, and that decoder widens the AdaLN aux.
 
     Returns:
-        training : ``[2, N, C]`` -- member 0 is ``mu`` (undetached, trains the base via
-            ``mse_det``), member 1 is ``mu.detach() + r_scale*(y0+v)`` (scored by ``mse_flow``,
-            which is the CFM objective). **The training loss must use ``mse_det``/``mse_flow``,
-            never plain ``mse``**, which would average the two members into nonsense.
+        training : ``[3, N, C]`` -- member 0 is ``mu`` (undetached, trains the base via
+            ``mse_det``), member 1 is ``mu.detach() + r_scale*(y0+v)``, and member 2 is the
+            per-channel ``r_scale`` that ``mse_flow`` divides out so every channel's CFM term
+            carries the same weight. **The training loss must use ``mse_det``/``mse_flow``,
+            never plain ``mse``**, which would average the members into nonsense.
         eval : ``[ens_size, N, C]`` of corrected fields, or ``[1, N, C]`` of bare ``mu`` when
             ``flow_ens_size == 0`` -- which evaluates the same checkpoint as a purely
             deterministic model.
@@ -382,4 +383,10 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
         member = self.flow.training_pack(
             mu_cond, target, kv, base, latent_lens, output_lens, coordinates
         )
-        return torch.stack([mu.float(), member], 0)
+        # Member 2 carries the per-channel r_scale so `mse_flow` can divide it out and score the
+        # CFM objective with EQUAL weight per channel. Without it the loss weight is r_scale_c^2,
+        # which starves exactly the channels the base already predicts well -- see the table in
+        # loss_functions.mse_flow. It is a loss-contract slot, not a prediction; `mse_det` still
+        # slices member 0 and validation never sees this pack at all.
+        r_scale = self.flow.r_scale.value().to(mu.dtype).expand_as(mu)
+        return torch.stack([mu.float(), member, r_scale.float()], 0)
