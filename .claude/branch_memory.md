@@ -641,6 +641,31 @@ override its init_times so both conventions agree.
 - Working venvs (both `UV_LINK_MODE=copy`, private cache, no /capstor dependency):
   `/iopsstor/scratch/cscs/walmikae/venvs/wg` (weathergen, torch 2.9.1+cpu, built with
   `--extra cpu` since export needs no GPU) and `.../venvs/raina` (science stack).
+- **The default `--n-processes 8` dies on a Santis login node** with
+  `RuntimeError: can't start new thread` — the user slice's cgroup `pids.max` is **1000** and a VS
+  Code session already sits at ~720, so 8 workers x their BLAS/zarr threads blow the cap. Memory is
+  not the constraint (183 GB limit, ~490 GB free). **`--n-processes 2` runs fine**; anything bigger
+  belongs in a SLURM job. Verified end to end on b96m0co5: ~65 s per batch of 4 samples,
+  ~12.5 min/rank, **~1.7 h and ~97 GB for a full 8-rank / 368-sample / 40-fstep `tp` export**
+  (265 MB per sample file, 542080 cells x 40 steps, all finite).
+- **The exported `forecast_reference_time` is 6 h EARLIER than the eval package's `init_times`**
+  for the seven no-fstep-0 runs. `_reference_from_first_target` subtracts `step * fstep_hours`
+  from the first target, giving the *window-start* convention (b96m0co5 -> 2023-06-01T06, which is
+  also the filename stamp), while `add_lead_time_coord` gives offset-1 runs the window END
+  (2023-06-01T12) — the same +6 h split documented in the ce4rujvd trap above. `valid_time` is read
+  straight from the store and is unambiguous, so anything matching on valid time is unaffected;
+  only `forecast_reference_time` / `forecast_period` / the filename carry the convention. Note
+  `--init-time-reference` is a **no-op** for diagnostic-only runs (the fallback sets
+  `source_start == source_end`).
+- **`export` resolves stores from the PLATFORM's private config**, not from any CLI flag:
+  `get_model_results` builds `<path_shared_working_dir>/results/<run>/validation_chkpt<ep:05d>_
+  rank<r:04d>.{zip,zarr}`. Santis gives `/iopsstor/scratch/cscs/thunter/shared_work/`, Jupiter
+  `/e/scratch/weatherai/shared_work` — different centres, no shared mount. Running the export on
+  Jupiter for a Santis-only run therefore fails with `FileNotFoundError: ... does not exist or is
+  not a directory`, which reads like a naming bug but is just the wrong machine. (A genuine
+  permissions problem would raise `PermissionError` instead — `Path.exists()` only swallows
+  ENOENT/ENOTDIR/EBADF/ELOOP.) The nine 3-month runs exist ONLY on Santis; each is 73 GB
+  (8 rank zips x ~9.7 GB), while `results/<run>/evaluation/` is only 32 MB.
 
 ## Sibling repo: raina_evaluation
 `/users/walmikae/weathergen/raina_evaluation` (JSC GitLab, Sebastian Buschow) holds the RAINA
@@ -675,3 +700,345 @@ false alarms), a paired-difference forest plot, and a QQ/exceedance intensity fi
 `raina_utils.paths`: every JSC root is now behind an env var (`RAINA_DISTANCE_DIR`,
 `RAINA_PLOT_DIR`, `RAINA_IMERG_ROOTS`, …), so the repo finally runs on Santis. Figures were
 verified by rendering against synthetic netCDFs, not just eyeballed in code.
+
+## Two new backbones: nhv6tkln_fix and aets3ku5_fix (2026-08-28)
+- **`nhv6tkln_fix` is cw6a4szu's ENCODER with a different forecast engine.** Loaded both
+  checkpoints and compared tensor by tensor: same 1419 parameter names, **1195 bit-identical, 224
+  different, and every differing tensor is `module.forecast_engine.*`** (224 is exactly the FE
+  parameter count). Its own freeze regex has no forecast_engine term, i.e. it was an FE-only
+  finetune off that encoder. So nhv6tkln vs `ce4rujvd` (T/JEPA:cw6a4szu) is a clean FE ablation.
+  Size, run_history and istep are all identical to cw6a4szu_chkpt00008 -- do NOT infer identity
+  from those.
+- **`aets3ku5_fix` is the 8-STEP continuation of `f2esyc18_fix`** -- its run_history ends
+  `['f2esyc18', 0]`, istep 2048, 8 mini epochs x 8192, `forecast.num_steps 8`. **Use it, not
+  `f2esyc18_fix`**, which stopped at num_steps 2: pairing that against nhv6tkln_fix would have
+  confounded the JEPA objective with pretraining depth. With aets3ku5 the pair is symmetric --
+  same architecture, same budget (istep 2048), same depth (8 steps), byte-identical resolved
+  streams -- and the only difference is the JEPA objective, **temporal (nhv6tkln, `temporal:True`
+  + `independent`) vs spatial (aets3ku5, `subset`)**.
+- `aets3ku5_fix`'s resolved streams are byte-identical to nhv6tkln_fix's AND to cw6a4szu's, so
+  both new stream dirs are verbatim copies of `imerg_diag_cw6a4szu/`. The ERA5
+  `max_num_targets: 542080` trap applies only to the discarded `f2esyc18_fix`; aets3ku5 has 108416.
+- Both are **code `193332f51fc5`** -- byte-identical to all eight via-2-step parents, so they are
+  code-matched to the existing comparison. Both have only `_latest.chkpt` (no numbered ones).
+- **Resolved streams: nhv6tkln_fix == cw6a4szu exactly** (all ten streams, every field), so
+  `config/streams/imerg_diag_nhv6tkln/` is a verbatim copy of `imerg_diag_cw6a4szu/`.
+  **f2esyc18_fix differs only in the ERA5 diagnostic-output stream**: no `channel_weights`,
+  different `target_channel_weights`, and **`max_num_targets: 542080`** rather than 108416.
+  Following "inherit ERA5's cap" literally there would give an uncapped decoder -- the wx9bzx7q
+  OOM. Both IMERG streams use 108416 deliberately.
+- Both carry `physical` and `student-teacher` as type **Disabled**, so **`forecast` is the single
+  live LossPhysical** -- declare the MSE under that key. model_input branch is `forecasting`.
+- Parameter names confirmed from the real checkpoint: `module.encoder.*`,
+  `module.forecast_engine.*`, `module.{embed_target_coords,target_token_engines,pred_heads}.<STREAM>.*`
+  -- which is what makes the freeze regex
+  `.*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*` correct.
+- **BOTH new checkpoints say `parallel_scaling_policy: "const"`**, while the whole IMERG family
+  runs `sqrt`. All four configs set `sqrt` EXPLICITLY -- inheriting `const` would make lr_max 1e-4
+  mean a peak of 1e-4 here against 1e-4*sqrt(8) = 2.83e-4 everywhere else, i.e. a 2.8x lower LR
+  than the runs these are meant to be compared with. Active arm is lr_max 1e-4; the 3e-4 arm is
+  present but COMMENTED OUT in each config's learning_rate_scheduling block.
+- Final shape: 2 stream dirs, 4 configs (2 backbones x {2step_6ep, 8step_2ep}), 2 eval configs
+  (scores / events) and 2 pipelines `pipelines_final/pipeline_imerg_{nhv6tkln,aets3ku5}.yml`,
+  5 stages each: train2s6ep -> train8s2ep (mini_epoch 5) -> infer3month (mini_epoch 1) ->
+  evalscores -> evalevents. No --mem override anywhere; animations are mp4, which needs the
+  `_pad_frame` fix now restored from the `raina evaluation` stash into the working tree.
+
+## Evaluation inside a pipeline: it does work with minted run ids (2026-08-28)
+- The older note that "`--run-ids` ids must already be in the config" is **too strong**.
+  `run_evaluation.py:150-152` does `cf.run_ids = {k: existing.get(k, {}) for k in args.run_ids}`,
+  so an unknown id yields an EMPTY per-run dict; `streams` then falls back to `default_streams`
+  (`:345`) and `results_base_dir` falls back to the private config's run path
+  (`wegen_reader.py:54-56`). A `run_ids: {}` key MUST still be present in the yaml, or the
+  assignment raises on a struct-mode config. `runplot_base_dir` defaults to `results_base_dir`.
+- `eval_config:` is a real `ParsedStage` field, so an evaluation stage in a pipeline can name its
+  own yaml; `run_ids: [STAGE.<name>]` resolves the upstream inference run.
+- The existing 3-month runs (m745z8wi, ce4rujvd, csuff3rz, fvenw2nq, ...) all used **exactly**
+  spme 368 / 2023-06-01→2023-09-12 / 40 steps / world 8 / num_workers 2, so any new run on those
+  settings shares their index space and the case-study samples **196, 204 (Doksuri) and 357, 365
+  (Daniel)** transfer unchanged.
+
+## aets3ku5/nhv6tkln pipelines: blank `num_mini_epochs` crashed the first launch (2026-08-28)
+- **`m7mff1ck` (train2s8ep, job 833570) died in 1:35** with `TypeError: unsupported operand
+  type(s) for *: 'int' and 'NoneType'` at `trainer.py:547`
+  (`lr_steps = int((len_ds * self.training_cfg.num_mini_epochs) / self.batch_size_per_gpu)`).
+  `config_finetune_imerg_diag_mse_aets3ku5_2step_8ep.yml`'s `num_mini_epochs:` was left BLANK
+  (parses to `None`). sacct showed `COMPLETED 0:0` despite the crash -- same
+  run_continue-swallows-exception pattern as the OOM cases above, so check the log, not the job
+  state.
+- **Decision: these stage-1 runs are 8 mini epochs, matching the eight original via-2-step
+  parents** (which all trained 8 x 4096 to `chkpt00007`), NOT the 6-mini-epoch scheme the file's
+  own comments briefly described (leftover from an earlier draft). Set
+  `num_mini_epochs: 8` in both `config_finetune_imerg_diag_mse_{aets3ku5,nhv6tkln}_2step_8ep.yml`
+  (nhv6tkln's had silently drifted to 8 already, so only aets3ku5's was actually broken) and
+  `mini_epoch: 7` on each pipeline's `train8s2ep` stage (`pipeline_imerg_{aets3ku5,nhv6tkln}.yml`)
+  so stage 2 continues from the fully-cooled-down `chkpt00007`, not a mid-schedule checkpoint.
+  All in-file comments (`desc`, `wgtags.exp`, LR-schedule-length note, header) were updated to
+  say 8/4096-optimizer-steps/chkpt00007 for consistency -- do not trust a stray "6 mini epochs"
+  comment anywhere else in these two config files if one turns up.
+- Logs for a train stage live at `<thunter-shared-work>/logs/<runid>/output.<jobid>.txt` (all
+  ranks interleaved, prefixed `N:`) -- NOT under the per-run snapshot dir's `logs/`, which is a
+  symlink to `/iopsstor/scratch/cscs/thunter/shared_work/logs/`. `models/<runid>/` staying empty
+  (no numbered checkpoint) is the tell that a train stage never got past step 0.
+
+## Tooling
+- `/capstor` degraded again on 2026-08-28: the repo `.venv` lost `omegaconf`
+  (`ModuleNotFoundError`) because site-packages are symlinks into the capstor uv cache.
+  **`/iopsstor/scratch/cscs/walmikae/venvs/wg/bin/python` has omegaconf 2.3.0 and works**; the
+  `raina` venv does not, and neither venv has `pip` or `dacite`. For torch on a login node set
+  `OMP_NUM_THREADS=1` and `torch.set_num_threads(1)` or it dies with
+  `libgomp: Thread creation failed: Resource temporarily unavailable`.
+
+## The 9-run 3-month IMERG mp4s already existed — `find` just couldn't see them (2026-09-01)
+- **`plots/` and `results/` are both top-level symlinks** into
+  `/iopsstor/scratch/cscs/thunter/shared_work/`. Plain `find <path> -iname ...` does NOT descend
+  into a symlink encountered *during traversal* (only a symlink given directly as the search
+  root is followed), so `find . -iname "*imerg_diag_comparison_3months*"` from the repo root (or
+  any ancestor) finds nothing even though the directory is right there — always search under
+  the resolved iopsstor path, or pass the symlinked path itself as the find root, e.g.
+  `find results/<run>/plots ...` (works) vs `find . -iname plots` then descending (doesn't).
+- **A full run of `eval_config_imerg.yml` for all nine 3-month runs already completed on
+  2026-08-21**, writing 39 mp4s per run (15 histograms + 12 maps/preds_ens_mean +
+  12 maps/targets; `maps/bias` has 0) to
+  `plots/imerg_diag_comparison_3months/score_maps/<run>/plots/IMERG_ANEMOI/`, plus the
+  cross-run `compare_*.png` summary plots. Every one of `ce4rujvd, fvenw2nq, b96m0co5,
+  xt069k3n, csuff3rz, m745z8wi, tvmzluy6, sctxzwwe, lf7aj7df` has the full set, m745z8wi
+  included (the "m745z8wi died on the mp4 bug, no scores" note above is now stale — it has
+  `maps`/`histograms` output, just no `score_maps` subdir, so it likely ran again after the
+  `_pad_frame` fix and never got a `results/<run>/evaluation/` score cache written to match).
+- These runs' `results/<run>/plots/` never existed (only `han9w7yt`/`hmw4u8bu` had that shape
+  natively). **Symlinked `histograms/` and `maps/` from each run's `score_maps/.../plots/
+  IMERG_ANEMOI/` into `results/<run>/plots/IMERG_ANEMOI/`** so all nine now match
+  `han9w7yt`/`hmw4u8bu`'s structure (`plots/IMERG_ANEMOI/{histograms,maps/{bias,preds_ens_mean,
+  targets}}`) without duplicating data. Deliberately skipped symlinking `score_maps` itself
+  (the 8 complete runs have it, han9w7yt/hmw4u8bu don't) to keep the shape an exact match.
+- **Do not re-run the eval/plot pass for these nine without checking here first** — it already
+  exists; a from-scratch `uv run evaluation --config eval_config_imerg.yml` pass costs ~11 h
+  sequential (see "Cost of the 3-month IMERG evaluation" above) and would just regenerate what
+  is already on disk.
+
+
+## 11-run comparison: combining the individual evals needs NO job (2026-09-03)
+- The stored score JSONs are **per-sample** (`(364, 40, 1, 1)` = sample/fstep/channel/ens), not
+  pre-aggregated, and `wegen_reader.load_scores` re-subsets them with
+  `score.sel(sample=...)` (`wegen_reader.py:226-230`). Init alignment is therefore enforced
+  **at load time from the config's sample list**, not baked into the cache — so a cross-run
+  comparison is a pure JSON read.
+- `_process_stream` loads zarr only if `plot_score_maps or plot_score_init_time_series or
+  recomputable_metrics` (`run_evaluation.py:237-240`). With every metric cached and those two
+  switches off, a full 11-run comparison **measured 1.4 GB peak RSS and ran on the login node**,
+  vs ~650 GB / ~3 h for the scoring pass. Never submit a job for a comparison-only pass.
+- `config/evaluate/eval_config_imerg_compare_all11.yml` is that pass; it produced 660 PNGs under
+  `/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/compare_all11/summary/`.
+- `do_lead_time` in `plot_orchestration.py:1294` has **no old-style boolean fallback** — it reads
+  `score_plots` only. `summary_plots: true` works solely because
+  `config_compat._SCORE_PLOT_BOOL_MAP` maps it to `lead_time` before that line runs.
+- `ratio_plots` emits **one figure per forecast step** (40 per metric/region), i.e. 600 of those
+  660 files. Leave it off for large metric sets.
+- `baseline:` must name a run_id in `run_ids`; if it doesn't, `line_plots.py:547-549` silently
+  falls back to `run_ids[0]` and every ratio plot changes meaning with no error.
+
+## Threshold LISTS now work for ets/fbi/pss (2026-09-03)
+- Previously only a scalar `thresh` worked; the old claim that a list auto-expands was false.
+  `parse_metric_params` now expands `thresh: [a, b]` into `<metric>_thr<value>` entries
+  (`ets_thr0.001`), each scored/cached/plotted independently. Scalar `thresh` is unchanged, so
+  existing configs and cached JSONs stay valid.
+- `base_metric_name()` (in `utils/dict_utils.py`, a leaf module — import it from anywhere) maps
+  those names back. It is consumed by `Scores.get_score` (function + `score_args_map` lookup),
+  `plot_utils.lower_is_better`, `score_cards.get_perf_score` and `clim_utils.needs_climatology`.
+  **Any new metric-name lookup must go through it**, or thresholded metrics silently take the
+  wrong branch (e.g. defaulting to "higher is better").
+- Verified numerically identical to calling `calc_ets/calc_fbi/calc_pss` directly.
+- Cache-key note: the old scalar-thresh `ets` file is `..._ets_...json`; `ets_thr0.02` writes
+  `..._ets_thr0.02_...json`. Different keys — switching to the list form **recomputes**.
+
+## Metrics available vs. useful for an IFS / GraphCast comparison (2026-09-03)
+- Registry (`score.py:198`): deterministic — ets, pss, fbi, mae, l1, l2, mse, rmse, vrmse, bias,
+  acc, rps, rpss, froct, troct, fact, tact, grad_amplitude, psnr, seeps, qq_analysis, nse, psd;
+  probabilistic — ssr, crps, rank_histogram, spread.
+- **All four probabilistic scores are unusable here**: every one of the 11 runs is ens_size 1, so
+  `get_score` warns and returns None.
+- **`psd` must stay off** — `detect_grid_type` knows only octahedral and regular; this is N320
+  reduced Gaussian, and it fails far downstream as `KeyError: 'global'`.
+- Worth adding: **fbi** (the essential ETS companion — separates "missed everything" from
+  "over-forecast everything"), **pss**, **acc** (the headline score IFS/GraphCast are judged on),
+  **fact/tact** (their ratio is the damping-toward-climatology diagnostic), **grad_amplitude**
+  (blurring), **qq_analysis** (extreme tail). Configured in
+  `config/evaluate/eval_config_imerg_metrics_extended.yml` (expensive, reloads data) with the
+  cheap read-back in `eval_config_imerg_compare_extended.yml`.
+- FBI's perfect value is 1.0 from **either side**, but the score cards treat it as
+  "higher is better, perfect 1.0" — so FBI score cards are only meaningful while fbi < 1.
+  Read FBI from the line plots.
+
+## S/JEPA long-lead collapse: why RMSE alone would have misled (2026-09-03)
+- On the 364 matched inits, `sctxzwwe` and `lf7aj7df` have the **best global RMSE at +240 h**
+  (3.39/3.40 mm/6h) and the **worst SEEPS** (0.029/0.024) — ETS@20mm is exactly 0.000 and bias
+  falls to -0.30/-0.24 mm/6h past ~+168 h. They dry out to a near-empty field, which RMSE rewards.
+- `ce4rujvd` by contrast holds bias -0.047 and ETS 0.010 at +240 h.
+- All 11 SSL variants beat both supervised Forecast baselines on both RMSE and SEEPS.
+- Label discrepancy to resolve: the circulated list calls `fvenw2nq` "MTM noFE" but the config
+  says "W/O FE, **CW**" — same as `b96m0co5`, and their scores nearly coincide (RMSE 3.135 vs
+  3.132), consistent with them being the same configuration.
+
+## Smoke-testing the extended metrics found 3 unusable metrics (2026-09-03)
+Config `config/evaluate/eval_config_imerg_smoketest.yml` — 1 run, 4 samples, 3 fsteps, and
+crucially `metrics_dir:` redirected to scratch (it is a per-run key read at
+`wegen_reader.py:73-74`) so partial scores never touch the real cache. Run it TWICE: the second
+pass is what proves the cache key is stable.
+- **`acc` / `fact` / `tact` cannot be scored on IMERG.** The only IMERG climatology
+  (`nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr`) is SEEPS-specific: `statistic` holds
+  exactly `['prob_dry', 'light_heavy_threshold']`. `calc_acc` (`score.py:1097`) and `_calc_act`
+  (`score.py:1011`, backing both fact and tact) do `c.sel(statistic="mean")` → `KeyError: 'mean'`.
+  Needs a mean/std N320 climatology to be generated; the o96 ERA5 ones are not a substitute.
+- **A failing metric aborts the ENTIRE run with zero JSONs written** — the exception escapes the
+  joblib pool and `calc_scores_per_stream` before anything is banked. One bad metric = the whole
+  ~3 h pass lost, per run. Always smoke-test a new metric list first.
+- **`grad_amplitude` is dead code.** `calc_geo_spatial_diff`'s inner `check_for_coords` calls
+  `coord_names_expected.index()` with no argument (`score.py:1733`) → unconditional TypeError; it
+  also returns None while the caller unpacks two values. It also needs lat/lon *dims*, which
+  unstructured `ipoint` data lacks.
+- **`qq_analysis` can never cache-hit.** `store_metrics_for_region` writes its per-fstep quantiles
+  into the DataArray attrs, so stored attrs are `{'fstep_1/p_quantiles': ...}` while config
+  parameters are `{}`; `load_single_score` requires `attrs == parameters` (`wegen_reader.py:290`),
+  so it reloads and recomputes every single time. Also ~556 KB at 4 samples x 3 fsteps x 1 region
+  → ~2 GB/run, ~22 GB over 11 runs, vs ~5 KB per threshold metric.
+- **What survives: 18 metrics** — ets/fbi/pss x [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05] m/6h.
+  Final reload pass: 18 checks passed, 0 data reloads, 0 recomputes, 555 MB RSS.
+- Sanity values for m745z8wi (4 samples): FBI runs 1.56 (0.1 mm) → 0.28 (50 mm), i.e. it
+  over-forecasts drizzle and badly under-forecasts extremes — the classic precip signature, and
+  the diagnosis ETS alone cannot give.
+
+## Concurrent `uv run` invocations kill each other (2026-09-03)
+Two or more `uv run` processes (evaluation, type-check, launch-slurm) each re-sync the shared venv
+at `/capstor/store/cscs/userlab/ch17/uv_cache_shared/` and yank packages from under the others —
+they die with **exit 141 (SIGPIPE)** after an "Installed N packages" line, having done nothing.
+Uncontended sync is 667 ms; contended it was 2+ min then death. Run `./scripts/actions.sh sync`
+once first, and stagger a multi-run launch loop (`sleep 60` between iterations) rather than
+starting eleven launchers at once.
+
+## Extended 18-metric pass: COMPLETE (2026-09-03)
+- 11 jobs (844437-844481), all COMPLETED in **31-38 min each**, not the 3 h budgeted — once the
+  data is loaded the contingency-table metrics are cheap arithmetic. 594 JSONs written
+  (54/run = ets/fbi/pss x 6 thresholds x 3 regions).
+- Comparison read-back (`eval_config_imerg_compare_extended.yml`): **0 recomputes, 0 data reloads,
+  726 checks passed** (22 metrics x 3 regions x 11 runs), 14 min, 4.6 GB RSS, 264 figures in
+  `/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/extended/summary/`. The `_thr` cache
+  keys hold at full scale.
+- **TRAP: `WEATHERGEN_EVAL_CONFIG` is passed as the LIVE working-copy path**, not the snapshot
+  path (`weathergen_slurm.sh:227` appends it as `--config`). The launcher snapshots the *code*
+  (WEATHERGEN_HOME) but the eval config is read from
+  `/users/walmikae/.../config/evaluate/<name>.yml` at job START. Editing an eval config while
+  jobs are queued changes what they compute, and differently per job depending on start time.
+
+## CORRECTED: S/JEPA collapses to DRIZZLE, not to a dry field (2026-09-03)
+Earlier entries inferred "dries out to a near-empty field" from negative bias + ETS->0. FBI shows
+that was wrong. At +240 h, global:
+- `sctxzwwe` / `lf7aj7df` FBI: **3.49 / 3.81 at 0.1 mm**, 0.68 / 0.87 at 1 mm, **0.031 / 0.029 at
+  5 mm**, 0.001 at 20 mm, 0.000 at 50 mm.
+- So they cover 3.5-3.8x too much area with light rain while producing essentially NO precip above
+  5 mm. The precipitation distribution has collapsed onto drizzle; the negative bias comes from
+  losing the heavy rain that carries the mass, not from going dry.
+- ETS at 5 mm+ is 0.003-0.004 and 0.000 at 20 mm+: no skill beyond light rain.
+- Healthy runs for contrast at +240 h / 5 mm: `m745z8wi` FBI 0.892, `ce4rujvd` 0.784,
+  `han9w7yt` 0.678. T/JEPA and ST/JEPA also over-forecast drizzle (FBI 2.3-2.7 at 0.1 mm) but
+  degrade gracefully.
+- This is exactly the discrimination ETS/SEEPS/bias cannot make on their own and why FBI was the
+  metric worth adding.
+- **Read FBI from the LINE PLOTS, never the score cards**: ScoreCards treats every non-error
+  metric as "higher is better, perfect 1.0", so S/JEPA's 3.81 scores as better than a perfect
+  1.0 instead of far worse.
+
+## Preprint multi-target precipitation experiment (2026-09-03)
+New tree `config/preprint_config/` (+ `pipelines/`), stream dirs `config/streams/preprint_{3target,operanonly}_<bb>/`,
+eval configs `config/evaluate/eval_config_preprint_*`. Four backbones: `cw6a4szu`, `nhv6tkln_fix`,
+`f7ug724z_fix`, `aets3ku5_fix`. Two arms: 3-target (IMERG+OPERAN+ERA5 tp) and operan-only.
+Stages: 2 steps x 16 mini epochs -> 8 steps x 8 mini epochs -> 3-month inference -> 2 eval passes.
+- **ERA5 tp is a 1-HOUR accumulation** (mean 0.120 mm) while IMERG and OPERAN tp are 6-HOUR
+  (0.676 / 0.741 mm). The only N320 ERA5 store is 1-hourly, so `ERA5_TP` sets
+  `frequency: 06:00:00`, which SUBSAMPLES (anemoi frequency selects, never aggregates). Fine as an
+  auxiliary signal; the three heads' scores must never share an axis. OPERAN_TP is the only
+  like-for-like third target that exists today.
+- **Operan-as-target must be `type: anemoi`, NOT `anemoi_operan`.** The operan reader simulates
+  INPUT latency: it rewrites timestamps through `nominal_time_mapping` and keeps only the latest
+  record available at the cut-off (data_reader_anemoi_operan.py:118-128). Correct for forcing,
+  wrong for a target, which must be the analysis valid AT the verification time.
+- **`.*ERA5.*` in f7ug724z's freeze regex also matches `pred_heads.ERA5_TP`** --
+  `apply_fct_to_blocks` does `re.fullmatch` against MODULE names (model/utils.py:56-60), so the
+  new ERA5 decoder would be frozen at random init. Narrowed to `.*\.ERA5|.*\.ERA5\..*`.
+  In YAML this MUST be single-quoted: `"\."` is an invalid double-quoted escape.
+- **Pipeline `options:` DO reach `streams.*`, config-file `streams:` blocks do not.** launch-slurm
+  turns options into config_command_line.yaml via `OmegaConf.from_dotlist` and appends it as the
+  LAST overwrite (launch-slurm.py:312-316), whereas `_load_streams_in_config` ASSIGNS
+  `config.streams` per overwrite. That is how the 8-step stage retunes max_num_targets.
+- **Decoder memory budget is (streams x max_num_targets x forecast steps).** Proven single-IMERG
+  8-step load is 1 x 108416 x 8 = 867328. 3 targets at 8 steps therefore use 36139 each; at
+  2 steps 108416 each is already under budget. Operan-only needs no override.
+- `ctr_streams` counts only streams that produced predictions (loss_module_physical.py:337,346),
+  so forcing streams like SurfaceCombined never enter the loss: 3 and 1 respectively.
+  IMERG's gradient in the 3-target arm is 1/3 of the single-target runs -- a real confound.
+- Verified by full `load_merge_configs` against the real checkpoints: one LossPhysical block each
+  (`forecast` for cw6a4szu/nhv6tkln/aets3ku5, `physical` for f7ug724z), one enabled model_input
+  branch (`forecasting` vs `masking`), no new decoder frozen.
+- **`chain_jobs: 2` is safe with `general.istep: 0`.** All jobs in a chain share one run_id
+  (launch-slurm.py:468-470), so `STAGE.<name>` and pinned `chkptNNNNN` still resolve. Job 2+ passes
+  NO config files (`current_extra_paths = ""`, :471) and inherits the config saved with the
+  checkpoint -- which is what carries pipeline `options` overrides forward. istep does not reset:
+  the trainer increments `cf.general.istep` in the live config (trainer.py:795) and saves that.
+  Empirical proof: `xqlk2nkf`'s config file says istep 0, its saved chkpt00016 config says 8430.
+  chain_jobs is train-only (max 4); inference/evaluation stages ignore it with a warning.
+- **max_num_targets as a fraction of N320 (542080 pts):** 108416 = exactly 20%, 36139 = 6.667%.
+  The 3-target arm keeps the TOTAL sampled fraction at 20% (3 x 36139 = 108417), split three ways,
+  so total decoder load matches the proven single-IMERG runs while each stream sees a third as
+  many points per step.
+- **CORRECTED (2026-09-03): 36139 was far too conservative; the value is now 135520 (25% of N320).**
+  It had been anchored to the last KNOWN-GOOD run rather than a measured ceiling, and left ~60 GiB
+  of the 95 GiB card unused. The decoder wraps ALL 12 of its blocks in `torch.utils.checkpoint`
+  (engines.py:967-977), so it recomputes instead of storing per-layer activations and memory is far
+  cheaper than the naive estimate.
+- **Measured on an idle login-node GH200** (same 95 GiB card as the compute nodes, so no job needed)
+  with `TargetPredictionEngineClassic` built from the real merged config. Marginal cost is LINEAR at
+  **14.1 KiB per point-step**, point-steps = streams x max_num_targets x forecast steps. At
+  3 streams x 8 steps: 36139 -> 11.87 GiB, 108416 -> 35.17, 135520 -> 43.87, 162624 -> 52.65,
+  180693 -> 58.42 GiB of decoder.
+- **Non-decoder baseline is ~23 GiB**, derived from wx9bzx7q: it died with 86.32 GiB allocated
+  asking for 4.04 more, and the same geometry (1 x 542080 x 8) measures 67.05 GiB of decoder.
+- **Concentrating targets in one stream is MORE expensive than splitting them**: 16.2 KiB per
+  point-step at 1 x 542080 vs 14.1 KiB for the same total split three ways, because the varlen
+  attention transient tracks the largest single sequence.
+- The probe covers the decoder stack ONLY; the trainer also retains per-point predictions/targets/
+  coords across steps, which scale with the same number -- so the measured figures are a LOWER
+  bound and 25% deliberately leaves ~28 GiB of headroom. 162624 (30%) is the next rung.
+- **`decoder_type: "PerceiverIOCoordConditioning"` selects `TargetPredictionEngineClassic`**, not
+  `TargetPredictionEngine` -- the condition at model.py:524-526 is inverted relative to the names.
+- Latent bug: `engines.py:1049` does `next(self.cf.streams.values())` on a ValuesView (TypeError).
+  Unreached in practice because that class is never the one selected.
+- **`cw6a4szu` has NO `_latest.chkpt` -- stage 1 from it MUST pin `mini_epoch: 8`.** Its models dir
+  holds only `cw6a4szu_chkpt00008.chkpt`. The launcher defaults to mini_epoch -1, which
+  model_interface turns into `<run>_latest.chkpt` (model_interface.py:262-264) and load_run_config
+  turns into `model_<run>_latest.json`, then SILENTLY falls back to `model_cw6a4szu.json` -- the
+  istep 0 config from before cw6a4szu trained (config.py:244-246). The config fallback is silent;
+  only the weights load fails, with FileNotFoundError on cw6a4szu_latest.chkpt. Burned run
+  sr6zw61d (job 846806) this way. `nhv6tkln_fix`, `aets3ku5_fix` and `f7ug724z_fix` ship ONLY
+  `<run>_latest.chkpt`, so -1 is correct for them and pinning a number would break those instead.
+  ALWAYS check which of the two forms a parent actually has before writing a pipeline.
+- Verified from that same failed run's log.txt that the preprint stream set and freeze regex work:
+  every `target_token_engines.OPERAN_TP.*` and `pred_heads.OPERAN_TP.*` block logged "Did not apply
+  function freeze_weights" while `latent_heads` / `latent_pre_norm` were frozen.
+- launch-slurm copies **git-tracked files from the WORKING TREE** (so tracked-but-uncommitted edits
+  like the `_pad_frame` mp4 fix DO ship) plus **ALL** `config/**/*.y*ml` tracked or not
+  (`copy_all_configs`, rglob). Untracked files OUTSIDE config/ are NOT copied. Non-.yml files in a
+  stream dir (e.g. README.md) are not copied either -- harmless, load_streams reads only *.yml.
+- **Third preprint arm added: ERA5-only (`preprint_era5only_*`)**, symmetric with operan-only --
+  4 stream dirs, 8 configs, 4 pipelines, 2 eval configs. Derived by transforming the operan-only
+  files so every earlier fix (135520, chain_jobs 2, cw6a4szu mini_epoch 8, narrowed f7ug724z regex)
+  carries over automatically.
+- **The f7ug724z ERA5 freeze trap is CRITICAL in this arm**: ERA5_TP is the only trainable decoder,
+  so the original `.*ERA5.*` would have left the run with ZERO trainable parameters rather than
+  merely crippling one head. Verified frozen=NONE for all four backbones.
+- **This arm is comparable ACROSS BACKBONES but NOT against the operan-only/IMERG arms in absolute
+  score** -- ERA5 tp is a 1-hour accumulation (mean 0.120 mm) vs 6-hour for IMERG/OPERAN
+  (0.676/0.741 mm), and `frequency: 06:00:00` subsamples rather than aggregates. Its eval colour
+  levels are the 6h family levels divided by six.
+- Deriving one eval config from another by text extraction is fragile: the stream name appears in
+  BOTH `global_plotting_options` and `default_streams`, so an unanchored search grabs the first
+  match and swallows everything between. Anchor on the `default_streams:` split first.
