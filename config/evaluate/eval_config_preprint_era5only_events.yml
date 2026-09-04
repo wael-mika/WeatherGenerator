@@ -1,0 +1,117 @@
+# PREPRINT era5only evaluation -- PASS B, the two case-study events.
+#
+# Driven by the `evalevents` stage of
+# config/preprint_config/pipelines/pipeline_preprint_era5only_<backbone>.yml. Standalone equivalent:
+#   uv run evaluation --config config/evaluate/eval_config_preprint_era5only_events.yml --run-ids <INFERENCE_RUN_ID>
+#
+# Loads ONLY samples 196, 204 (Typhoon Doksuri, init 2023-07-20) and 357, 365 (Storm Daniel,
+# init 2023-09-01) -- about 10 GB and minutes, against ~634 GB and ~1 h for the full 364. Pass A
+# (eval_config_preprint_era5only_scores.yml) banks the score JSONs first, because run_evaluation.py
+# plots BEFORE it scores and a plotting exception would otherwise discard the whole run.
+#
+# `run_ids: {}` IS DELIBERATE AND MUST STAY. The pipeline mints run ids at launch, so none can be
+# listed here. `--run-ids <id>` rebuilds the block as `{id: existing.get(id, {})}`
+# (run_evaluation.py:150-152); an unknown id yields an EMPTY per-run dict, which is fine --
+# `streams` falls back to `default_streams` (run_evaluation.py:345) and `results_base_dir` falls
+# back to the private config's run path (wegen_reader.py:54-56). The key must EXIST though, or the
+# assignment raises on a struct-mode config.
+#
+# summary_dir is ABSOLUTE on purpose: launch-slurm runs from
+# /iopsstor/scratch/cscs/thunter/slurm/slurm_weathergen_<runid>_dir/, so a relative path buries
+# the figures inside the throwaway snapshot.
+#
+# INFERENCE GEOMETRY these runs are produced with -- identical to every other run in the
+# comparison, which is what makes the sample indices transferable:
+#   start 2023-06-01T00:00, end 2023-09-12T00:00, shuffle False, samples_per_mini_epoch 368,
+#   output.num_samples 368, time_window_step 06:00:00, forecast.num_steps 40,
+#   8 ranks (2 nodes x 4 GPUs), data_loading.num_workers 2.
+#
+# tp is in METRES, and for ERA5_TP it is a 1-HOUR accumulation, NOT the 6-hour accumulation IMERG
+# and OPERAN report. These scores are therefore ~6x smaller for arithmetic reasons alone, and the
+# colour levels below are the 6h family levels divided by six. This arm is comparable ACROSS THE
+# FOUR BACKBONES -- which is its purpose -- but its absolute numbers must not share an axis with
+# the operan-only or IMERG arms. See config/streams/preprint_era5only_*/era5_tp.yml. SEEPS is a SKILL here -- calc_seeps returns 1.0 - seeps_error --
+# so higher is better and it must DECREASE with lead time. `psd` must never be enabled:
+# detect_grid_type knows only octahedral and regular, N320 is reduced Gaussian, and the failure
+# surfaces far away as KeyError: 'global'.
+#####################################
+
+max_workers: 4                      # plotting pass: fewer workers, much larger per-worker RSS
+
+global_plotting_options:
+  image_format: "png"
+  animation_format: "mp4"  # mp4 as requested; needs the `_pad_frame` fix in
+                           # plot_orchestration.py, which pads every frame to the sequence
+                           # maximum. Without it the ffmpeg writer raises "All images in a movie
+                           # should have same size", because frames are saved with
+                           # bbox_inches="tight" and vary by a few px.
+  fps: 3                   # 40 fsteps at 3 fps = ~13 s per rollout animation
+  dpi_val: 150
+  n_bins: 60
+  log_y: true              # precip histograms are unreadable with linear counts
+  ERA5_TP:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:
+      # levels in metres/1h -- ERA5_TP is a 1-HOUR accumulation, so the 6h scale would put
+      # almost everything in the first bin. Divided by 6 and rounded. BoundaryNorm is built as
+      # BoundaryNorm(levels, cmap.N, extend="both") (plotter.py:737), so it needs
+      # len(levels)+1 colors: 8 interior bins plus under- and over-flow.
+      levels: [0.00002, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]
+      colors:
+        - "none"           # under <0.02 mm  (dry, transparent)
+        - "#BEDAE5"        #  0.02 -  0.1  mm
+        - "#80B5CC"        #  0.1  -  0.2  mm
+        - "#5691B3"        #  0.2  -  0.5  mm
+        - "#4B6E9C"        #  0.5  -  1    mm
+        - "#424B83"        #  1    -  2    mm
+        - "#45596D"        #  2    -  5    mm
+        - "#5B9E4C"        #  5    - 10    mm
+        - "#F4A83A"        # 10    - 20    mm
+        - "#C7212F"        # over   >20 mm  (extreme)
+
+evaluation:
+  metrics:
+    - rmse
+    - mae
+    - bias
+    - seeps              # IMERG only in practice -- see the per-stream climatology notes below
+  summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/preprint_era5only/summary/"
+  summary_plots: true
+  ratio_plots: false
+  heat_maps: false
+  score_cards: false
+  bar_plots: false
+  plot_ensemble: "members"
+  plot_score_maps: true
+  plot_score_animations: true
+  plot_score_init_timeseries: true
+  print_summary: true
+  log_scale: false
+  add_grid: false
+
+default_streams:
+  ERA5_TP:
+    regions: ["global", "nhem", "shem"]
+    channels: ["tp"]
+    # NO CLIMATOLOGY EXISTS for this store on N320, so `seeps` comes back NaN for
+    # this stream. That is a warning, not a failure (wegen_reader.py:161 sets the
+    # climatology to NaN); rmse / mae / bias are unaffected. Only IMERG has a
+    # matching N320 climatology today.
+    evaluation:
+      forecast_step: "all"           # fsteps 1-40 = the full +240 h rollout
+      sample: [196, 204, 357, 365]
+      ensemble: "mean"               # no-op at ens_size 1
+    plotting:
+      sample: [196, 204, 357, 365]
+      forecast_step: "all"
+      ensemble: "mean"
+      plot_maps: true
+      plot_bias: true
+      plot_target: true
+      plot_histograms: true
+      plot_animations: true
+      plot_timeseries: true
+
+run_ids: {}

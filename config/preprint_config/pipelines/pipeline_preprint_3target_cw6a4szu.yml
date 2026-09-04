@@ -1,0 +1,144 @@
+# PREPRINT precipitation experiment -- 3-TARGET (IMERG + OPERAN + ERA5, tp only) -- backbone `cw6a4szu`.
+#
+# Strict sequence -- no `parallelize`, so each stage waits on the one before:
+#
+#   1. train2s16ep  2 forecast steps, 16 mini epochs, from `cw6a4szu`
+#   2. train8s8ep   8 forecast steps,  8 mini epochs, from stage 1 at chkpt00015
+#   3. infer3month  3 months of initialisations at 40 forecast steps (+240 h)
+#   4. evalscores   scoring pass over all 364 shared inits, every plot switch off
+#   5. evalevents   Doksuri and Daniel, with maps / bias / histograms / mp4 animations
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/preprint_config/pipelines/pipeline_preprint_3target_cw6a4szu.yml | tee launch_preprint_3target_cw6a4szu.log
+#
+# HOW THE RUN IDS CHAIN. No stage pins a `run_id:`. launch-slurm mints one per stage
+# (`run_id = p.run_id if p.run_id else get_run_id()`, launch-slurm.py:825) and each later stage
+# names the earlier one SYMBOLICALLY as `STAGE.<name>`, which _validate_stage resolves to that
+# stage's minted id before submission (:832-839). The slurm `--dependency` chain means a stage
+# never starts before the run it reads from has finished. The ids are printed once per stage at
+# submit time in the "Resolved parameters for stage '<name>'" block -- hence the `| tee`.
+#
+# WHY STAGE 1 PINS `mini_epoch: 8` FOR THIS BACKBONE (and the other three do not).
+#   cw6a4szu has NO `cw6a4szu_latest.chkpt` -- its models dir holds only
+#   `cw6a4szu_chkpt00008.chkpt`. The launcher's default mini_epoch is -1, which
+#   model_interface turns into `<run>_latest.chkpt` (model_interface.py:262-264) and which
+#   load_run_config turns into `model_<run>_latest.json`, silently falling back to
+#   `model_cw6a4szu.json` -- the istep 0 config from BEFORE cw6a4szu trained (config.py:244-246).
+#   Run sr6zw61d died on exactly this: FileNotFoundError on cw6a4szu_latest.chkpt, after building
+#   the model and correctly leaving the OPERAN_TP decoder trainable.
+#   nhv6tkln_fix, aets3ku5_fix and f7ug724z_fix DO ship `<run>_latest.chkpt` and only that, so -1
+#   is right for them and pinning a number would break them instead.
+#
+# WHY `mini_epoch: 15` ON STAGE 2 / `mini_epoch: 7` ON STAGE 3
+#   Stage 1 runs 16 mini epochs, so `chkpt00015` is its final, fully-cooled-down state; stage 2
+#   runs 8, so `chkpt00007` is its. The launcher defaults to -1 -> `<run>_latest.chkpt`, which
+#   train() rewrites every train_logging.checkpoint = 250 batches and is NOT that state.#
+# DECODER MEMORY -- max_num_targets IS 135520 (25% of the 542080-point N320 grid) IN THE STREAM
+# FILES, and both training stages use it, so no per-stage override is needed. That number is
+# measured, not guessed: the decoder checkpoints all 12 of its blocks, so memory scales at
+# 14.1 KiB per point-step (streams x targets x forecast steps). At 3 streams x 8 steps that is
+# 43.87 GiB of decoder plus a ~23 GiB non-decoder baseline -- about 67 GiB of the 95 GiB card.
+# 162624 (30%) measures 52.65 GiB and is the next rung; 180693 (33%) reaches ~82 GiB and is too
+# close to the edge. The full table and its derivation are in the stream files.
+# Training-only: Trainer.inference() forces max_num_targets back to -1 (trainer.py:397,403), so
+# stage 3 still scores full 542080-point N320 maps.
+#
+# WHY `end_date` IS 2023-09-12 AND `samples_per_mini_epoch` IS 368
+#   check_samples subtracts the whole forecast horizon from the index range -- 42 windows at 40
+#   steps / 6 h -- so `end_date=2023-08-31T00` yields only 322 inits ending 2023-08-20T00,
+#   silently dropping the last 11 days. 2023-09-12T00 gives 370 available; 368 are requested,
+#   spanning 2023-06-01T06 .. 2023-09-01T00 every 6 h. These are the SAME settings every other
+#   run in the comparison used, which is what makes the eval configs' sample indices
+#   transferable -- including the case-study samples (196, 204 = Doksuri; 357, 365 = Daniel).
+#   Do not vary nodes or data_loading.num_workers here: the sample index -> init time map depends
+#   on both.
+#
+# MEMORY / WALLTIME. Inference takes `--time=06:00:00` and inherits the slurm template's
+# `--exclusive --mem=450G` with no --mem override -- exactly the configuration the inference runs
+# that completed used.
+#
+# BOTH TRAINING STAGES RUN `chain_jobs: 2`, so each gets two sequential slurm jobs and twice the
+# walltime it asks for: 2 x 8 h for stage 1 and 2 x 12 h for stage 2, against the ~12 h and ~24 h
+# scaled from the proven runs (8 h covered 8 mini epochs at 2 steps, and 2 mini epochs at 8).
+# Shorter individual jobs also queue sooner than one long one.
+#
+# CHAINING IS SAFE HERE, and the `mini_epoch` pins above still work:
+#   - all jobs in a chain share ONE run_id (launch-slurm.py:468-470), so `STAGE.<name>` and
+#     `chkpt00015` / `chkpt00007` still resolve to this stage's run;
+#   - job 2+ passes no config files (`current_extra_paths = ""`, :471) and instead inherits the
+#     config SAVED with the checkpoint -- which is what carries the `options` overrides below
+#     forward, so max_num_targets stays retuned across the chain;
+#   - `general.istep: 0` does NOT restart the chain. The trainer increments `cf.general.istep`
+#     in the live config (trainer.py:795) and saves that, so job 2 recovers the true step count
+#     and `mini_epoch_base = istep / len(data_loader)` resumes where job 1 stopped. Verified on
+#     run xqlk2nkf: config file says istep 0, saved chkpt00016 config says istep 8430.
+# If a chained job lands after training already finished, its mini-epoch range is empty and it
+# exits without writing a numbered checkpoint, so it cannot clobber the pinned one.
+#
+# WHY TWO EVALUATION STAGES
+#   run_evaluation.py plots BEFORE it scores, so a plotting exception discards the whole run.
+#   Stage 4 runs with every plotting switch off to bank the score JSONs; stage 5 then loads only
+#   the four case-study samples and does the figures.
+#
+# ANIMATIONS ARE MP4. That needs the `_pad_frame` fix in plot_orchestration.py (frames are saved
+# with bbox_inches="tight" and vary by a few px, which makes the ffmpeg writer raise "All images
+# in a movie should have same size"). That fix must be committed, or present in the snapshot,
+# when this pipeline runs.
+#####################################
+
+stages:
+  - name: train2s16ep
+    stage: train
+    from_run_id: cw6a4szu
+    mini_epoch: 8
+    config_files:
+      - config/preprint_config/config_preprint_3target_cw6a4szu_2step_16ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=08:00:00"
+
+  - name: train8s8ep
+    stage: train
+    from_run_id: STAGE.train2s16ep
+    mini_epoch: 15
+    config_files:
+      - config/preprint_config/config_preprint_3target_cw6a4szu_8step_8ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s8ep
+    nodes: 2
+    mini_epoch: 7
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI,OPERAN_TP,ERA5_TP]"
+      - "data_loading.num_workers=2"
+
+  - name: evalscores
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_3target_scores.yml
+    slurm_args:
+      - "--time=03:00:00"
+
+  - name: evalevents
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_3target_events.yml
+    slurm_args:
+      - "--time=01:00:00"

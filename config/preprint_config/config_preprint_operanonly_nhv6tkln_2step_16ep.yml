@@ -1,0 +1,204 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# PREPRINT experiment -- OPERAN-ONLY precipitation (tp only)
+# Backbone `nhv6tkln_fix`, 2 forecast steps, 16 mini epochs.
+# Family: T/JEPA -- temporal objective (JEPA loss_extra_args temporal=True, target correspondence 'independent').
+#
+# Tensor-by-tensor against cw6a4szu_chkpt00008: 1195 of 1419 tensors bit-identical, all 224 differences in module.forecast_engine.* -- i.e. cw6a4szu's ENCODER with a different forecast engine.
+#
+# WHAT IS TRAINED. The encoder and the pretrained forecast engine are frozen; only the
+# diagnostic precipitation decoder(s) train. Target stream(s): OPERAN_TP.
+# All of them are N320, single-channel `tp`, and share an identical decoder shape
+# (embed_target_coords dim 512, target_readout 4 layers / 4 heads, pred_head 1 layer), so any
+# difference between them is a difference in the TARGET, not in decoder capacity.
+#
+# None of these target streams exists in the pretrained checkpoint, so each decoder is created
+# fresh and loads no weights (model_interface loads with strict=False).#
+# LOSS SHARE. LossPhysical divides by ctr_streams, the number of streams that actually produced
+# predictions (loss_module_physical.py:337,346). Forcing streams have no physical decoder and are
+# not counted, so ctr_streams is 1 here and each target carries weight 1/1.
+# With a single target, ctr_streams is 1 and OPERAN_TP carries the full physical loss -- the same
+# gradient scale the single-target IMERG runs had. That is what makes this arm the clean control
+# for the 3-target arm.#
+# DECODER MEMORY. max_num_targets is 135520 -- 25% of the 542080-point N320 grid -- set in the
+# stream files and used at BOTH depths, so no per-stage override is needed.
+#
+# That is measured, not guessed. The decoder wraps all 12 of its blocks in torch.utils.checkpoint
+# (engines.py:967-977), so it recomputes rather than storing per-layer activations and memory
+# scales at 14.1 KiB per point-step, where point-steps = streams x targets x forecast steps.
+# Here that is 1 x 135520 x 2 = 271,040 point-steps = 3.7 GiB of decoder, on top of a
+# ~23 GiB non-decoder baseline (frozen params, encoder/FE activations, optimizer state) derived
+# from run wx9bzx7q's failure point. Well inside the 95 GiB card.
+#
+# The earlier 36139 was anchored to the last KNOWN-GOOD configuration rather than to a measured
+# ceiling, and left roughly 60 GiB of the card unused. 162624 (30%) measures 52.65 GiB of decoder
+# and is the next rung; 180693 (33%) reaches ~82 GiB total and is too close to wx9bzx7q's ~90 GiB
+# failure point. The full measured table is in the stream files.
+#
+# Training-only: Trainer.inference() forces max_num_targets back to -1 (trainer.py:397,403), so
+# evaluation always scores full 542080-point N320 maps.
+#
+# LEARNING RATE. lr_max 1e-4 with `parallel_scaling_policy: "sqrt"` -- effective peak
+# 1e-4 * sqrt(8) = 2.83e-4 at world size 8, the value every IMERG finetune in this comparison
+# used. A higher-LR arm is prepared but COMMENTED OUT below.
+#
+# `parallel_scaling_policy: "sqrt"` is set EXPLICITLY and matters: the checkpoints say "const" in
+# their own configs, and inheriting that would make lr_max 1e-4 mean a peak of 1e-4 here against
+# 2.83e-4 everywhere else -- a 2.8x lower LR than the runs this is meant to be compared with.
+#
+# LR SCHEDULE LENGTH. num_steps_warmup 256 / num_steps_cooldown 512 is the family's
+# 3.125% / 6.25% shape over this stage's 512 x 16 = 8192 optimizer steps.
+# lr_steps is linear in num_mini_epochs, so the shape holds at any --nodes N.
+#
+# num_workers 8 -> 512 batches per mini epoch. Per-mini-epoch length is
+# ((samples_per_mini_epoch // world_size) // (batch_size * num_workers)) * batch_size *
+# num_workers, so 4096 / world 8 gives 512 batches at 8 workers and 510 at 6.
+#
+# LOSS KEY IS `forecast` and the MODEL-INPUT BRANCH IS `forecasting` -- this backbone's own keys.
+# Both are dicts and the merge UNIONS them, so a wrong name ADDS a block instead of overriding:
+# a second LossPhysical trips the `len(LossPhysical blocks) == 1` assert in
+# validation_io.write_output, and a second enabled model_input branch silently doubles
+# batch_size (train/utils.py get_batch_size_from_config).
+#
+# `general.istep: 0` resets the mini-epoch counter. Without it, mini_epoch_base is recovered from
+# the parent's istep, this value becomes an absolute stop point, and a value below the base trains
+# nothing at all while still writing a checkpoint (run re0jivry did exactly that).
+#
+# Intended entry point is the pipeline:
+#   config/preprint_config/pipelines/pipeline_preprint_operanonly_nhv6tkln.yml
+#####################################
+
+streams_directory: "./config/streams/preprint_operanonly_nhv6tkln/"
+
+# The inherited ERA5 output stream is suppressed in the streams DIRECTORY, not here.
+# It cannot be done from this file: _load_streams_in_config does
+# `config.streams = load_streams(streams_directory)`, an ASSIGNMENT that overwrites any
+# `streams:` block declared here before the merge with the checkpoint config happens.
+# (Pipeline `options:` DO work, because from_dotlist overrides merge last -- that is how the
+# 8-step stage retunes max_num_targets.)
+
+freeze_modules: '.*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*'
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
+  multiprocessing_method: "spawn"
+
+  desc: "preprint_operanonly_from_nhv6tkln_fix_2step_16ep"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off -- these backbones carry deep_ssl.enabled False already; pinned for
+  # identity with the rest of the raina IMERG finetune family.
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 16
+  samples_per_mini_epoch: 4096
+
+  # Identical to every other finetune in the comparison.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    # HIGHER-LR ARM -- comment the line above and uncomment this one to run it.
+    # 3x the family value; effective peak 3e-4 * sqrt(8) = 8.49e-4 at world size 8.
+    # lr_max: 3e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 2
+    policy: "fixed"
+
+# Validate at the training depth so the curve is comparable within the stage.
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Same 6-month window every other run in this family validates on. shuffle True is what makes
+  # the width real: with shuffle False the sampler takes the FIRST contiguous 256 slots, i.e.
+  # July-August only. MultiStreamDataSampler.reset() reseeds from the constant
+  # data_loader_rng_seed at the top of every mini epoch, so the SAME 256 samples are drawn each
+  # epoch and the curve stays epoch-to-epoch comparable.
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 2
+    policy: "fixed"
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Host RAM is the binding constraint (the trainer builds a train AND a val DataLoader, each with
+# num_workers, per rank). The extra target streams add little to that -- one channel each against
+# the 74-channel ERA5 forcing read -- so these are the proven IMERG-only values. If workers get
+# OOM-killed, drop via --options data_loading.num_workers=N rather than editing this file.
+data_loading:
+  num_workers: 8
+
+wgtags:
+  org: null
+  issue: null
+  exp: preprint_operanonly_2step_16ep
+  grid: null
