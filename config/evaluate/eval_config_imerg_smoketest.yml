@@ -1,0 +1,96 @@
+# SMOKE TEST for the extended metric set -- one run, 4 samples, 3 forecast steps.
+#
+# Purpose: prove that every metric in eval_config_imerg_metrics_extended.yml computes, stores and
+# reloads end-to-end BEFORE committing ~11 x 3 h of compute to the full pass. It is deliberately
+# tiny, so it runs on a login node in a few minutes.
+#
+# metrics_dir IS REDIRECTED, AND THAT IS THE WHOLE POINT. metric_list_to_json writes to
+# reader.metrics_dir, which defaults to <results_base_dir>/evaluation -- i.e. the REAL score
+# cache shared with the full evaluation. Writing 4-sample scores there would leave partial JSONs
+# next to the good ones. wegen_reader.py:73-74 reads `metrics_dir` from the per-run config, so
+# pointing it at a scratch directory keeps the real cache untouched and makes this test
+# throwaway: delete the directory and nothing else changes.
+#
+# Run:
+#   uv run evaluation --config config/evaluate/eval_config_imerg_smoketest.yml
+#
+# Run it TWICE. The first pass computes and writes; the second must report
+# "All checks passed ... present in metric file" for every metric and load from cache without
+# touching the zarr. If the second pass recomputes, the cache key is unstable and the full run
+# would silently recompute everything too -- that is the main thing this test is checking.
+#####################################
+
+max_workers: 4
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+
+evaluation:
+  metrics:
+    - ets:
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+    - fbi:
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+    - pss:
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+    # acc / fact / tact removed: SEEPS-only climatology has no 'mean' statistic
+    # grad_amplitude REMOVED: broken in the package, not a data problem. calc_geo_spatial_diff's
+    # inner check_for_coords calls `coord_names_expected.index()` with NO argument
+    # (score.py:1733), so list.index() always raises TypeError; it also returns None while the
+    # caller unpacks two values. It additionally needs lat/lon DIMS (rlat/lat/latitude), which
+    # this unstructured ipoint data does not have. Dead code -- do not re-enable without fixing.
+    # qq_analysis REMOVED -- two independent disqualifiers, both measured in the smoke test:
+    #  1. IT CAN NEVER CACHE-HIT. store_metrics_for_region writes its per-fstep quantiles into the
+    #     DataArray attrs, so the stored attrs look like {'fstep_1/p_quantiles': [...], ...} while
+    #     the config parameters are {}. load_single_score requires
+    #     `score_version["attrs"] == parameters` (wegen_reader.py:290), which is therefore always
+    #     False -- every run reloads all forecast archives and recomputes it, which would turn the
+    #     cheap comparison pass back into a ~650 GB / multi-hour job.
+    #  2. SIZE. 100 quantiles per fstep land in that attrs blob: 556 KB at 4 samples x 3 fsteps x
+    #     1 region, extrapolating to ~2 GB per run and ~22 GB over the eleven runs, against ~5 KB
+    #     for every threshold metric.
+    # Score it separately on a small sample/fstep subset if the extreme tail is needed.
+
+  summary_plots: false
+  ratio_plots: false
+  heat_maps: false
+  score_cards: false
+  bar_plots: false
+  plot_score_maps: false
+  plot_score_animations: false
+  plot_score_init_timeseries: false
+
+  summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/smoketest/summary/"
+  print_summary: true
+  plot_ensemble: "members"
+  log_scale: false
+  add_grid: false
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global"]
+    channels: ["tp"]
+    climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+    evaluation:
+      forecast_step: [1, 2, 3]
+      sample: [0, 1, 2, 3]
+      ensemble: "mean"
+    plotting:
+      sample: [0]
+      forecast_step: [1]
+      ensemble: "mean"
+      plot_maps: false
+      plot_bias: false
+      plot_target: false
+      plot_histograms: false
+      plot_animations: false
+      plot_timeseries: false
+
+run_ids:
+  m745z8wi:
+    label: "Forecast:dy0jlrmw"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/m745z8wi"
+    runplot_base_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/smoketest/plots/m745z8wi/"
+    # keeps the 4-sample scores OUT of the real cache -- see header
+    metrics_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/smoketest/metrics/m745z8wi/"

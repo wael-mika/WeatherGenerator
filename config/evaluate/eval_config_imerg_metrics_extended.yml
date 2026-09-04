@@ -1,0 +1,275 @@
+# EXTENDED METRIC SET for the 11-run IMERG intercomparison -- built for comparison against
+# IFS and GraphCast.
+#
+# This is a SCORING pass (pass A style: every plot switch off) that adds the metrics the first
+# two passes did not compute. Unlike eval_config_imerg_compare_all11.yml, this one DOES reload
+# the forecast archives -- the metrics below are not cached -- so it is the expensive one:
+# budget ~650 GB peak RSS and ~1 h per run, and DO NOT run it on a login node.
+#
+# The 364-init sample list, the run_ids block and ce4rujvd's per-run override are copied verbatim
+# from the scoring config so that everything stays on the same matched initialisations.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY THESE METRICS
+#
+# The existing set (rmse / mae / bias / seeps / ets@20mm) cannot distinguish a genuinely skilful
+# forecast from one that has collapsed to a near-dry field: at +240 h the two S/JEPA runs have the
+# BEST global RMSE of all eleven while their SEEPS is ~0.02 and their ETS is exactly 0.000. RMSE
+# rewards a model for giving up. The additions below are chosen to make that failure mode, and the
+# extremes behaviour that IFS/GraphCast papers are judged on, directly visible.
+#
+#   fbi  (frequency bias index, = forecast event count / observed event count)
+#        THE essential companion to ETS. FBI < 1 means the model under-forecasts the event, > 1
+#        over-forecasts, 1 is unbiased. ETS alone cannot tell "missed everything" from
+#        "over-forecast everything"; FBI can. This is the single most useful addition here --
+#        it is what turns the S/JEPA collapse from an anomaly into a measurement.
+#   pss  (Peirce / Hanssen-Kuipers skill score) = POD - POFD. Unlike ETS it is not degraded by
+#        rare events, so it stays meaningful at the high thresholds where ETS -> 0.
+#   acc  (anomaly correlation coefficient) -- the headline deterministic NWP score, and the one
+#        most consistently reported for IFS and GraphCast. Needs the climatology, which is
+#        already configured below for SEEPS.
+#   fact / tact  (forecast and target activity = std-dev of the anomaly w.r.t. climatology).
+#        Their RATIO is the damping diagnostic: a model that blurs toward climatology has
+#        fact/tact -> 0 while its RMSE keeps improving. Quantifies exactly what SEEPS hints at.
+#   grad_amplitude  (ratio of the spatial-gradient amplitude of forecast vs truth) -- a direct
+#        blurring measure: ~1 means realistic sharpness, << 1 means smoothed.
+#   qq_analysis  -- quantile-quantile of forecast vs observed distribution, for the extreme tail.
+#
+#
+# CLIMATOLOGY LIMIT -- acc / fact / tact CANNOT BE SCORED HERE (found by the smoke test, not by
+# reading the code). The only IMERG climatology available,
+#   nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr
+# is SEEPS-specific: its `statistic` dimension holds exactly
+#   ['prob_dry', 'light_heavy_threshold']
+# and its attrs say "description: SEEPS climatology". But calc_acc (score.py:1097) and
+# _calc_act -- which backs both calc_fact and calc_tact (score.py:1011) -- both do
+#   c.sel(statistic="mean", drop=True)
+# so all three die with `KeyError: 'mean'`.
+#
+# THIS KILLS THE WHOLE RUN, NOT JUST THE METRIC. The smoke test aborted with ZERO score JSONs
+# written -- the failure propagates out of the joblib pool and out of calc_scores_per_stream
+# before anything is banked. One unusable metric therefore costs the entire ~3 h pass for that
+# run, which is exactly why this file was smoke-tested before submitting eleven of them.
+#
+# To get acc / fact / tact, a climatology carrying a `mean` statistic on the same N320 grid has
+# to be generated first; the ERA5 climatologies under thunter/shared_work/assets/climatology are
+# o96 and carry ERA5 channels, so they are not a substitute.
+#
+# DELIBERATELY EXCLUDED:
+#   psd  -- would be the standard blurring spectrum, but detect_grid_type only knows octahedral
+#        and regular grids; this data is N320 REDUCED GAUSSIAN, so it fails far downstream as
+#        `KeyError: 'global'`. Do not enable it on this data.
+#   crps / ssr / spread / rank_histogram -- probabilistic, and every one of these runs is
+#        ens_size 1. get_score logs a warning and returns None for them, so they would simply be
+#        skipped; they are omitted rather than left in to fail quietly.
+#   rps / rpss -- quintile-category scores; defensible, but they duplicate what SEEPS already
+#        measures for precipitation and they need the same climatology, so they are left out to
+#        keep the (expensive) pass focused.
+#
+# ---------------------------------------------------------------------------------------------
+# THRESHOLDS. tp is in METRES per 6 h, so 0.001 = 1 mm/6h. The list below is the conventional
+# precip verification ladder -- 0.1, 1, 5, 10, 20, 50 mm/6h -- covering drizzle through extreme.
+#
+# A LIST of thresholds now works. parse_metric_params expands `thresh: [a, b]` into one metric
+# per value, named `<metric>_thr<value>` (e.g. `ets_thr0.001`), each scored, cached and plotted
+# independently; base_metric_name() maps those names back to the `ets` implementation and to the
+# correct "is lower better?" answer. A SCALAR thresh is still accepted and unchanged.
+#
+# NOTE: the previously cached scalar-thresh `ets` lives in `<run>_..._ets_chkpt00000.json`, while
+# `ets_thr0.02` writes to `<run>_..._ets_thr0.02_chkpt00000.json`. They are different cache keys,
+# so ets@20mm IS recomputed by this file rather than reused. That is intentional -- it keeps the
+# whole threshold ladder in one consistently-named family.
+#
+# Run on a COMPUTE node, one run id at a time to cap peak memory (see
+# docs/run_eval_all11_compute.md; --no-register is REQUIRED):
+#
+#   for r in m745z8wi tvmzluy6 fvenw2nq xt069k3n b96m0co5 csuff3rz \
+#            sctxzwwe lf7aj7df ce4rujvd han9w7yt hmw4u8bu; do
+#     ../WeatherGenerator-private/hpc/launch-slurm.py --stage evaluation \
+#         --eval-config config/evaluate/eval_config_imerg_metrics_extended.yml \
+#         --run-ids $r --account=ch17 --no-register --mem=0 --time=03:00:00
+#   done
+#
+# Then read the results across runs with the cheap comparison pass, which needs no reload:
+#   uv run evaluation --config config/evaluate/eval_config_imerg_compare_extended.yml
+#####################################
+
+max_workers: 16          # memory dial: halve to 8 if a run is OOM-killed; do NOT drop samples
+
+global_plotting_options:
+  image_format: "png"
+  dpi_val: 150
+
+evaluation:
+  metrics:
+    # --- kept so the extended pass is self-contained ---
+    # - rmse
+    # - mae
+    # - bias
+    # - seeps                # SKILL (1 - seeps_error): higher is better, decreases with lead time
+
+    # --- contingency-table family, full threshold ladder (metres/6h) ---
+    - ets:                 # equitable threat score; higher better, -1/3 .. 1
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+    - fbi:                 # frequency bias index; 1 is unbiased, <1 under-forecast
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+    - pss:                 # Peirce skill score (POD - POFD); higher better
+        thresh: [0.0001, 0.001, 0.005, 0.01, 0.02, 0.05]
+
+    # --- structure / damping diagnostics ---
+    # acc / fact / tact ARE DELIBERATELY ABSENT -- see header "CLIMATOLOGY LIMIT".
+    # grad_amplitude REMOVED: broken in the package, not a data problem. calc_geo_spatial_diff's
+    # inner check_for_coords calls `coord_names_expected.index()` with NO argument
+    # (score.py:1733), so list.index() always raises TypeError; it also returns None while the
+    # caller unpacks two values. It additionally needs lat/lon DIMS (rlat/lat/latitude), which
+    # this unstructured ipoint data does not have. Dead code -- do not re-enable without fixing.
+    # qq_analysis REMOVED -- two independent disqualifiers, both measured in the smoke test:
+    #  1. IT CAN NEVER CACHE-HIT. store_metrics_for_region writes its per-fstep quantiles into the
+    #     DataArray attrs, so the stored attrs look like {'fstep_1/p_quantiles': [...], ...} while
+    #     the config parameters are {}. load_single_score requires
+    #     `score_version["attrs"] == parameters` (wegen_reader.py:290), which is therefore always
+    #     False -- every run reloads all forecast archives and recomputes it, which would turn the
+    #     cheap comparison pass back into a ~650 GB / multi-hour job.
+    #  2. SIZE. 100 quantiles per fstep land in that attrs blob: 556 KB at 4 samples x 3 fsteps x
+    #     1 region, extrapolating to ~2 GB per run and ~22 GB over the eleven runs, against ~5 KB
+    #     for every threshold metric.
+    # Score it separately on a small sample/fstep subset if the extreme tail is needed.
+
+  # --- SCORING ONLY: bank the JSONs first, compare afterwards with the cheap pass ---
+  summary_plots: false
+  ratio_plots: false
+  heat_maps: false
+  score_cards: false
+  bar_plots: false
+  plot_score_maps: false
+  plot_score_animations: false
+  plot_score_init_timeseries: false
+
+  summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/extended/summary/"
+  print_summary: true
+  plot_ensemble: "members"
+  log_scale: false
+  add_grid: false
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global", "nhem", "shem"]
+    channels: ["tp"]
+    climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+    evaluation:
+      forecast_step: "all"           # fsteps 1-40 = the full +240 h rollout
+      # THE 364 INITS COMMON TO ALL RUNS ON THIS GEOMETRY (see eval_config_imerg.yml header).
+      sample: [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+        40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+        60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+        80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+        120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139,
+        140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159,
+        160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179,
+        180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199,
+        200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219,
+        220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239,
+        240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259,
+        260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 276, 277, 278, 279, 280,
+        281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300,
+        301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320,
+        322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341,
+        342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361,
+        362, 363, 364, 365
+      ]
+      ensemble: "mean"               # no-op at ens_size 1; collapses members if present
+    # plotting: block kept (schema wants the key) but every flag is false -- see header.
+    plotting:
+      sample: [196, 204, 357, 365]
+      forecast_step: "all"
+      ensemble: "mean"
+      plot_maps: false
+      plot_bias: false
+      plot_target: false
+      plot_histograms: false
+      plot_animations: false
+      plot_timeseries: false
+
+run_ids:
+  # 2 -> 8 STEPS (original 8-run via-2-step comparison, see eval_config_imerg.yml)
+  m745z8wi:
+    label: "Forecast:dy0jlrmw"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/m745z8wi"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/m745z8wi/"
+
+  tvmzluy6:
+    label: "Forecast:oywmz4sz"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/tvmzluy6"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/tvmzluy6/"
+
+  fvenw2nq:
+    label: "MTM:dwzio194, W/O FE, CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/fvenw2nq"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/fvenw2nq/"
+
+  xt069k3n:
+    label: "MTM: f7ug724z W/ FE, CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/xt069k3n"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/xt069k3n/"
+
+  b96m0co5:
+    label: "MTM: xq65fhca W/O FE, CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/b96m0co5"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/b96m0co5/"
+
+  csuff3rz:
+    label: "MTM: ra1xax01"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/csuff3rz"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/csuff3rz/"
+
+  sctxzwwe:
+    label: "S/JEPA:lnm4ud42, W/O CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/sctxzwwe"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/sctxzwwe/"
+
+  lf7aj7df:
+    label: "S/JEPA:whzrt2cc, W/ CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/lf7aj7df"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/lf7aj7df/"
+
+  ce4rujvd:
+    label: "T/JEPA:cw6a4szu, CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/ce4rujvd"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/ce4rujvd/"
+    # PARTIAL RUN, REALIGNED - see eval_config_imerg.yml's header for the full story.
+    # A per-run `streams:` REPLACES `default_streams` wholesale (run_evaluation.py:345), so
+    # every key is repeated below, plotting included (all off, same as the default block).
+    streams:
+      IMERG_ANEMOI:
+        regions: ["global", "nhem", "shem"]
+        channels: ["tp"]
+        climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+        evaluation:
+          forecast_step: "all"
+          sample: "0-363"            # all of them = the 364 common inits, ce4rujvd's own space
+          ensemble: "mean"
+        plotting:
+          sample: [196, 204, 355, 363]
+          forecast_step: "all"
+          ensemble: "mean"
+          plot_maps: false
+          plot_bias: false
+          plot_target: false
+          plot_histograms: false
+          plot_animations: false
+          plot_timeseries: false
+
+  # NEW BACKBONES (2026-08-28 pipeline) -- same 368-sample/40-step/8-rank geometry as above,
+  # confirmed against config_command_line.yaml; default_streams' 364-sample list applies as-is.
+  han9w7yt:
+    label: "T/JEPA: nhv6tkln, CW"
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/han9w7yt"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/han9w7yt/"
+
+  hmw4u8bu:
+    label: "ST/JEPA:aets3ku5 "
+    results_base_dir: "/iopsstor/scratch/cscs/thunter/shared_work/results/hmw4u8bu"
+    runplot_base_dir: "./plots/imerg_diag_comparison_3months_11/score_maps/hmw4u8bu/"
