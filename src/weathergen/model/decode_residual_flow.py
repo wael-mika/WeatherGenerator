@@ -114,6 +114,13 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             freeze_after=int(cf.get("flow_residual_scale_steps", 1000)),
         )
 
+        # Diagnostic only, off by default and free when off. Answers the two questions that
+        # cannot be settled from validation aggregates: is the velocity learned at all (does it
+        # correlate with its own target u = r - y0?), and does the Euler integration preserve the
+        # unit variance the linear path guarantees, or does it blow up?
+        self.debug_trace = bool(cf.get("flow_debug_trace", False))
+        self._trace_n = 0
+
         self.embed_state = torch.nn.Linear(num_channels, dims_embed[0])
         self.embed_mu = torch.nn.Linear(num_channels, dims_embed[0])
         # Default init on purpose -- do NOT zero-init. This head is the only path from the block
@@ -195,6 +202,14 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
                         y = y + dt * 0.5 * (v1 + v2)
                     else:
                         y = y + dt * v1
+                    if self.debug_trace and self._trace_n < 30 and i_step % 6 == 0:
+                        self._trace_n += 1
+                        logger.info(
+                            "FLOWTRACE sample step=%02d | y.std=%s | v.std=%s",
+                            i_step,
+                            [round(x, 3) for x in y.std(0).tolist()],
+                            [round(x, 3) for x in v1.std(0).tolist()],
+                        )
                 # no output clamp: targets are z-normalised here, not in [0, 1]
                 preds.append(mu.float() + rs.float() * y)
         return torch.stack(preds, 0)
@@ -240,6 +255,25 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             latent = (1.0 - mask) * latent + mask * self.null_cond.expand_to(latent)
 
         v = self.velocity(y_t, t, mu_c, latent, base, latent_lens, output_lens, coordinates)
+
+        if self.debug_trace and self._trace_n < 3:
+            self._trace_n += 1
+            with torch.no_grad():
+                u = (r - y0).float()  # the CFM target velocity on the linear path
+                vf = v.float()
+                fin = torch.isfinite(u).all(-1) & torch.isfinite(vf).all(-1)
+                uc, vc = u[fin], vf[fin]
+                uc = uc - uc.mean(0)
+                vc = vc - vc.mean(0)
+                corr = (uc * vc).mean(0) / (uc.std(0) * vc.std(0)).clamp_min(1e-12)
+                logger.info(
+                    "FLOWTRACE train | r.std=%s | u.std=%s | v.std=%s | corr(v,u)=%s",
+                    [round(x, 3) for x in r.float().std(0).tolist()],
+                    [round(x, 3) for x in u.std(0).tolist()],
+                    [round(x, 3) for x in vf.std(0).tolist()],
+                    [round(x, 3) for x in corr.tolist()],
+                )
+
         return residual_to_physical(mu_c.float(), y0, v.float(), rs)
 
 

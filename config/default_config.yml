@@ -135,6 +135,12 @@ flow_residual_scale: null
 flow_residual_scale_ema: 0.999
 flow_residual_scale_steps: 1000
 
+# Diagnostic trace for the residual corrector: logs r/u/v standard deviations and corr(v, u) on a
+# few training steps, and sd(y) along the sampling ODE. Answers "is the velocity learned" and
+# "does the integration preserve the unit variance the linear path guarantees" -- neither of which
+# can be read off the validation aggregates. Off by default and free when off.
+flow_debug_trace: False
+
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
 fe_num_blocks: 6
