@@ -116,6 +116,14 @@ class Tokenizer:
             .to(torch.float32)
         )
 
+        # neighbour cell ids and cell centers, used by the soft-blend decode
+        # (decode_soft_blend_k): target points near a cell boundary are decoded under
+        # their k nearest cells and the predictions blended with continuous weights.
+        self.hpy_nbr_ids_target = torch.from_numpy(temp.astype(np.int64))
+        self.hpy_ctrs_target = vertsmm.to(torch.float32)
+        # mean center-to-center spacing at hl_target, in chord length on the unit sphere
+        self.hpy_cell_spacing_target = float(np.sqrt(4.0 * np.pi / num_healpix_cells))
+
     def compute_source_centroids(self, source_tokens_cells: list[torch.Tensor]) -> torch.Tensor:
         source_means = [
             (

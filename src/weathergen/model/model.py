@@ -49,6 +49,43 @@ logger = logging.getLogger(__name__)
 type StreamName = str
 
 
+def _blend_maps(batch, stream_name, step, t_coords_lens, ref, batch_size):
+    """Replica -> original point map for soft-blend decode, or ``None`` when blending is off.
+
+    Returns ``(idxs_glob, ws_glob, lens_orig, n_tot)``: a flat scatter index from the replicated
+    point axis back to the original one, the matching continuous weights (which sum to 1 per
+    original point -- see ``blend_replicate_targets``), the per-sample original lengths, and the
+    total.
+
+    Factored out of the fold-back so a GENERATIVE decoder can obtain the same map *before* it
+    samples and apply it to the velocity at each ODE step, keeping ``y_t`` single-valued per
+    original point. Blending finished samples would re-smooth the fine structure; blending the
+    velocity is legitimate because ``v`` is a conditional expectation.
+    """
+    blend_idxs = [
+        batch.samples[i_b].streams_data[stream_name].target_blend_idx[step]
+        for i_b in range(batch_size)
+    ]
+    if ref.numel() == 0 or not any(b is not None for b in blend_idxs):
+        return None
+    blend_ws = [
+        batch.samples[i_b].streams_data[stream_name].target_blend_weights[step]
+        for i_b in range(batch_size)
+    ]
+    idxs_glob, ws_glob, lens_orig, n_tot = [], [], [], 0
+    for b, w, n_rep in zip(blend_idxs, blend_ws, t_coords_lens, strict=True):
+        if b is None:
+            # sample without blending info (e.g. empty target): identity map
+            b = torch.arange(n_rep, dtype=torch.int64, device=ref.device)
+            w = torch.ones(n_rep, dtype=ref.dtype, device=ref.device)
+        n_orig = int(b.max().item()) + 1 if len(b) > 0 else 0
+        idxs_glob.append(b + n_tot)
+        ws_glob.append(w)
+        lens_orig.append(n_orig)
+        n_tot += n_orig
+    return torch.cat(idxs_glob), torch.cat(ws_glob).to(ref.dtype), lens_orig, n_tot
+
+
 class ModelOutput:
     """
     Representation of model output
@@ -484,12 +521,13 @@ class Model(torch.nn.Module):
                     elif cf.decoder_type == "ResidualFlow":
                         # Deterministic readout kept intact, with a flow-matching corrector on
                         # its residual. See decode_residual_flow.ResidualFlowPointDecoder.
-                        assert int(si.get("decode_soft_blend_k", 1) or 1) == 1, (
-                            f"stream {stream_name}: decode_soft_blend_k must be off for "
-                            "ResidualFlow. Blending averages independent samples inside the "
-                            "transition band, which re-smooths exactly the fine structure the "
-                            "corrector produces."
-                        )
+                        # Soft blend IS allowed here, because ResidualFlowBranch.sample applies it
+                        # to the VELOCITY at each shared ODE step rather than to the finished
+                        # sample. Averaging independent samples would re-smooth the fine structure
+                        # the corrector exists to produce; averaging velocities is legitimate,
+                        # since v is a conditional expectation and the state stays single-valued
+                        # per original point. Training still scores the replicated points, so the
+                        # blend is sampling-only.
                         if not cf.pred_self_attention and is_root():
                             logger.warning(
                                 "ResidualFlow with pred_self_attention: False -- the corrector's "
@@ -929,6 +967,10 @@ class Model(torch.nn.Module):
                 )
                 tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
 
+                # set by a decoder that has already folded soft-blend replicas back itself, so the
+                # generic fold-back below does not blend a second time
+                pre_blended = False
+
                 if self.cf.decoder_type == "Linear":
                     pred = self.target_token_engines[stream_name](
                         tc_tokens,
@@ -984,6 +1026,14 @@ class Model(torch.nn.Module):
                             tte.num_channels,
                             tc_tokens.shape[0],
                         )
+                    # Soft blend, if enabled, is applied INSIDE the sampler on the velocity --
+                    # never on the finished sample. `pred` then already lives on the original
+                    # point axis, so the generic fold-back below must be skipped for it.
+                    rf_blend = (
+                        None
+                        if self.training
+                        else _blend_maps(batch, stream_name, step, t_coords_lens, mu, batch_size)
+                    )
                     pred = tte.correct(
                         mu=mu,
                         det_tokens=det_tokens,
@@ -994,7 +1044,11 @@ class Model(torch.nn.Module):
                         coordinates=t_coords,
                         target=tgt,
                         ens_size=self.streams[stream_name]["pred_head"]["ens_size"],
+                        blend=rf_blend,
                     )
+                    if rf_blend is not None:
+                        t_coords_lens = rf_blend[2]
+                        pre_blended = True
                 else:
                     tc_tokens = self.target_token_engines[stream_name](
                         latent=tokens_nbors,
@@ -1006,6 +1060,31 @@ class Model(torch.nn.Module):
 
                     # final prediction head to map back to physical space
                     pred = self.pred_heads[stream_name](tc_tokens)
+
+            # soft-blend decode: combine replicated per-cell predictions back to the
+            # original points with the tokenizer's continuous blend weights (see
+            # blend_replicate_targets). Downstream (loss, output writer) then sees the
+            # original single-assignment point count and ordering.
+            #
+            # NOTE this blends the FINAL PREDICTION, which is correct for a deterministic readout
+            # (every replica is an estimate of the same conditional mean) but WRONG for a
+            # generative one: averaging independent samples re-smooths exactly the fine structure
+            # the generator exists to produce. Generative decoders must blend the VELOCITY at each
+            # shared ODE step instead -- see `_blend_maps` and the `blend` argument threaded into
+            # the samplers. The asserts in `Model.create` enforce that split.
+            blend = (
+                None
+                if pre_blended
+                else _blend_maps(batch, stream_name, step, t_coords_lens, pred, batch_size)
+            )
+            if blend is not None:
+                idxs_glob, ws_glob, lens_orig, n_tot = blend
+                blended = torch.zeros(
+                    (pred.shape[0], n_tot, pred.shape[-1]), dtype=pred.dtype, device=pred.device
+                )
+                blended.index_add_(1, idxs_glob, pred * ws_glob.view(1, -1, 1))
+                pred = blended
+                t_coords_lens = lens_orig
 
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)

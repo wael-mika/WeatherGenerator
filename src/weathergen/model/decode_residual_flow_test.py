@@ -206,6 +206,64 @@ def test_base_gate_starts_closed():
     assert dec.flow.base_gate.gate.detach().item() == 0.0, "reset_parameters must re-close it"
 
 
+def test_soft_blend_is_applied_in_velocity_space_not_to_samples(inputs):
+    """Blending must not smooth away the fine structure the corrector exists to produce.
+
+    ``decode_soft_blend_k`` decodes a boundary-zone point under several host cells and recombines
+    them. Doing that to finished SAMPLES averages independent draws and re-smooths -- which is what
+    the old assert in ``Model.create`` banned. Doing it to the VELOCITY at a shared ODE step is
+    legitimate, because ``v`` is a conditional expectation and the state stays single-valued.
+
+    Here every original point has two replicas at weight 0.5. Averaging two independent samples
+    would cut the injected spread by ~sqrt(2); averaging their velocities must not.
+    """
+    dec = _build(flow_state_only_query=True, flow_mu_in_aux=True).eval()
+    io = inputs
+    n = io["n"]
+    n_orig = n // 2
+    idx = torch.arange(n, device=DEV) % n_orig
+    w = torch.full((n,), 0.5, device=DEV)
+
+    def _run(blend):
+        torch.manual_seed(5)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            det = dec.det_forward(
+                latent=io["latent"],
+                output=io["output"],
+                latent_lens=io["latent_lens"],
+                output_lens=io["output_lens"],
+                coordinates=io["coordinates"],
+            )
+            return dec.correct(
+                mu=det[:, :C].float(),
+                det_tokens=det,
+                coord_tokens=io["output"],
+                latent=io["latent"],
+                latent_lens=io["latent_lens"],
+                output_lens=io["output_lens"],
+                coordinates=io["coordinates"],
+                ens_size=4,
+                blend=blend,
+            ).float()
+
+    vel_blended = _run((idx, w, [n_orig], n_orig))  # same 4-tuple model._blend_maps returns
+    assert vel_blended.shape == (4, n_orig, C), "blended output must live on the original axis"
+    assert torch.isfinite(vel_blended).all()
+
+    # the same map applied to finished samples, i.e. what we are NOT doing
+    raw = _run(None)
+    sample_blended = torch.zeros_like(vel_blended).index_add_(
+        1, idx, raw * w.view(1, -1, 1).to(raw.dtype)
+    )
+
+    spread_vel = (vel_blended - vel_blended.mean(0)).std()
+    spread_smp = (sample_blended - sample_blended.mean(0)).std()
+    assert spread_vel > spread_smp, (
+        f"velocity blending must preserve more spread than sample blending: "
+        f"{spread_vel:.4f} vs {spread_smp:.4f}"
+    )
+
+
 def test_eval_pass_does_not_calibrate(inputs):
     """Sampling must integrate with exactly the scale training settled on, never re-estimate it."""
     dec = _build().eval()

@@ -307,6 +307,68 @@ def tokenize_apply_mask_source(
     return tokens_cells, tokens_per_cell
 
 
+def blend_replicate_targets(
+    coords,
+    geoinfos,
+    datetimes_enc,
+    masked_points_per_cell,
+    blend,
+):
+    """Replicate target points into their k nearest decode cells for soft-blended decoding.
+
+    Each point is assigned to up to ``blend["k"]`` of its 9 candidate cells (own cell + 8
+    neighbours), with continuous weights ``softmax(-d / (tau * cell_spacing))`` over the
+    candidate cell-center distances d. Points deep inside a cell keep a single replica with
+    weight ~1; only boundary-zone points are replicated, so the discrete switch of the
+    per-cell decode at HEALPix boundaries is replaced by a smooth interpolation.
+
+    Returns
+        coords_r, geoinfos_r, datetimes_enc_r : replicated per-point arrays, host-cell-major
+        counts_r : replicated points per cell (int32, num_cells)
+        blend_idx : for each replica, index of its original point (int64)
+        blend_w : blend weight per replica (float32); weights per original point sum to 1
+    """
+    ctrs, nctrs, nbr_ids = blend["ctrs"], blend["nctrs"], blend["nbr_ids"]
+    num_cells = ctrs.shape[0]
+
+    pos = s2tor3(*theta_phi_to_standard_coords(coords)).to(torch.float32)
+    own = torch.repeat_interleave(torch.arange(num_cells), masked_points_per_cell.to(torch.int64))
+    # candidate cells: own (col 0) + 8 neighbours; nctrs is [8, num_cells, 3]
+    cand_ids = torch.cat([own.unsqueeze(-1), nbr_ids[own]], dim=-1)
+    cand_ctrs = torch.cat([ctrs[own].unsqueeze(1), nctrs[:, own, :].transpose(0, 1)], dim=1)
+    d = (pos.unsqueeze(1) - cand_ctrs).norm(dim=-1)
+    # missing neighbours are self-references in the table; exclude the duplicates
+    dup = cand_ids == cand_ids[:, :1]
+    dup[:, 0] = False
+    d = d.masked_fill(dup, torch.inf)
+
+    d_top, top = torch.topk(d, k=blend["k"], dim=-1, largest=False)
+    w = torch.softmax(-d_top / (blend["tau"] * blend["cell_spacing"]), dim=-1)
+    # drop negligible replicas (deep-cell points collapse to a single replica)
+    keep = w >= blend.get("w_min", 0.02)
+    keep[:, 0] = True
+    w = torch.where(keep, w, torch.zeros((), dtype=w.dtype))
+    w = w / w.sum(-1, keepdim=True)
+    host = torch.gather(cand_ids, 1, top)
+
+    keep = w > 0.0
+    pt = torch.arange(len(pos)).unsqueeze(-1).expand_as(host)
+    host, pt, w = host[keep], pt[keep], w[keep]
+    # host-cell-major ordering, as the per-cell decode grouping requires
+    order = torch.argsort(host, stable=True)
+    host, pt, w = host[order], pt[order], w[order]
+    counts_r = torch.bincount(host, minlength=num_cells).to(torch.int32)
+
+    return (
+        coords[pt],
+        geoinfos[pt],
+        datetimes_enc[pt],
+        counts_r,
+        pt.to(torch.int64),
+        w.to(torch.float32),
+    )
+
+
 def tokenize_apply_mask_target(
     stream_id,
     hl,
@@ -320,6 +382,7 @@ def tokenize_apply_mask_target(
     hpy_verts_local,
     hpy_nctrs,
     enc_time,
+    blend=None,
 ):
     """
     Apply masking to the data.
@@ -335,8 +398,8 @@ def tokenize_apply_mask_target(
         coords = torch.zeros([0, rdata.coords.shape[-1]])
         dt = np.array([], dtype=np.datetime64)
         masked_points_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
-        # data, datetimes, coords, coords_local, masked_points_per_cell
-        return do, dt, coords, coords, masked_points_per_cell
+        # data, datetimes, coords, coords_local, masked_points_per_cell, blend_idx, blend_w
+        return do, dt, coords, coords, masked_points_per_cell, None, None
 
     # convert to token level, forgetting about cells
     idxs_tokens = [i for t in idxs_cells for i in t]
@@ -374,15 +437,26 @@ def tokenize_apply_mask_target(
         ]
     ).to(dtype=torch.int32)
 
+    # optional soft-blend decode: replicate boundary-zone points into their k nearest
+    # cells; the decoder queries below then use the replicated, host-cell-major grouping
+    # while data/coords keep the original single-assignment ordering.
+    blend_idx, blend_w = None, None
+    coords_q, geoinfos_q, datetimes_enc_q = coords, geoinfos, datetimes_enc
+    points_per_cell_q = masked_points_per_cell
+    if blend is not None and len(coords) > 0:
+        (coords_q, geoinfos_q, datetimes_enc_q, points_per_cell_q, blend_idx, blend_w) = (
+            blend_replicate_targets(coords, geoinfos, datetimes_enc, masked_points_per_cell, blend)
+        )
+
     # compute encoding of target coordinates used in prediction network
     if torch.tensor(idxs_lens).sum() > 0:
         coords_local = get_target_coords_local(
             stream_id,
             hl,
-            masked_points_per_cell,
-            coords,
-            geoinfos,
-            datetimes_enc,
+            points_per_cell_q,
+            coords_q,
+            geoinfos_q,
+            datetimes_enc_q,
             hpy_verts_rots,
             hpy_verts_local,
             hpy_nctrs,
@@ -391,7 +465,7 @@ def tokenize_apply_mask_target(
     else:
         coords_local = torch.tensor([])
 
-    return data, datetimes, coords, coords_local, masked_points_per_cell
+    return data, datetimes, coords, coords_local, points_per_cell_q, blend_idx, blend_w
 
 
 def get_source_coords_local(

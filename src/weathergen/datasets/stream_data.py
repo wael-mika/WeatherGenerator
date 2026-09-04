@@ -99,6 +99,10 @@ class StreamData:
         ]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
         self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
+        # soft-blend decode (decode_soft_blend_k): replica -> original-point map and weights;
+        # None when blending is disabled for the stream
+        self.target_blend_idx = [None for _ in range(output_steps)]
+        self.target_blend_weights = [None for _ in range(output_steps)]
 
         # source tokens per cell
         self.source_tokens_cells = [None for _ in range(self.input_steps)]
@@ -122,6 +126,8 @@ class StreamData:
         self.target_tokens = _pin_tensor_list(self.target_tokens)
         self.idxs_inv = _pin_tensor_list(self.idxs_inv)
         self.target_coords_raw = _pin_tensor_list(self.target_coords_raw)
+        self.target_blend_idx = _pin_tensor_list(self.target_blend_idx)
+        self.target_blend_weights = _pin_tensor_list(self.target_blend_weights)
 
         # Pin source tensors
         self.source_tokens_cells = _pin_tensor_list(self.source_tokens_cells)
@@ -148,6 +154,14 @@ class StreamData:
         self.target_coords = [t.to(dv, non_blocking=True) for t in self.target_coords]
         self.target_coords_lens = [t.to(dv, non_blocking=True) for t in self.target_coords_lens]
         self.target_tokens = [t.to(dv, non_blocking=True) for t in self.target_tokens]
+        self.target_blend_idx = [
+            t.to(dv, non_blocking=True) if isinstance(t, torch.Tensor) else t
+            for t in self.target_blend_idx
+        ]
+        self.target_blend_weights = [
+            t.to(dv, non_blocking=True) if isinstance(t, torch.Tensor) else t
+            for t in self.target_blend_weights
+        ]
 
         # move to device if source data is present
         if not np.array([s is None for s in self.source_tokens_cells]).all():
@@ -299,6 +313,8 @@ class StreamData:
         target_coords: torch.Tensor,
         target_coords_per_cell: torch.Tensor,
         is_spoof: bool,
+        blend_idx: torch.Tensor | None = None,
+        blend_weights: torch.Tensor | None = None,
     ) -> None:
         """
         Add data for target for one input.
@@ -328,6 +344,8 @@ class StreamData:
 
         self.target_coords[fstep] = target_coords
         self.target_coords_lens[fstep] = target_coords_per_cell
+        self.target_blend_idx[fstep] = blend_idx
+        self.target_blend_weights[fstep] = blend_weights
 
         self.target_is_spoof[fstep] = is_spoof
 

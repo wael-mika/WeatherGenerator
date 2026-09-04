@@ -275,38 +275,92 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         )
         return v_u + self.guidance * (v_c - v_u)
 
-    def sample(self, mu, latent, base, latent_lens, output_lens, coordinates, ens_size):
+    def sample(self, mu, latent, base, latent_lens, output_lens, coordinates, ens_size, blend=None):
         """Integrate the residual ODE and add it back -> ``[ens_size, N, num_channels]``.
 
         ``mu`` is computed once by the caller; members differ only in the base noise, so the
         deterministic stack is never re-run.
+
+        **Soft-blend decode, done in VELOCITY space.** With ``decode_soft_blend_k > 1`` a
+        boundary-zone point is decoded under several neighbouring HEALPix cells, and the per-cell
+        estimates are recombined with continuous weights so the decode is continuous across cell
+        boundaries. Blending finished SAMPLES would be wrong -- averaging independent draws
+        re-smooths exactly the fine structure a generator exists to produce, which is what the
+        asserts in ``Model.create`` guard against. Blending the VELOCITY at a shared ODE step is
+        legitimate, because ``v`` is a conditional expectation and the mean of two valid estimates
+        of it is a valid estimate. This is MultiDiffusion (Bar-Tal et al. 2023) on a tiled decoder.
+
+        The state therefore stays SINGLE-VALUED per original point: ``y`` lives on the original
+        axis, is gathered out to the replicas to evaluate ``v``, and the velocity is folded back
+        before every step. ``blend`` is exactly what ``model._blend_maps`` returns:
+        ``(idx, weights, per_sample_lengths, n_original)``. Taking its tuple verbatim rather than
+        a repacked subset keeps one source of truth for the shape -- repacking it silently broke
+        the first soft-blend run with a 3-vs-4 unpack error.
         """
         n = base.shape[0]
         rs = self.r_scale.value().to(mu.dtype)
         dt = 1.0 / self.num_steps
         preds = []
+
+        if blend is not None:
+            idx, w, _lens, n_state = blend
+            w = w.to(torch.float32).view(-1, 1)
+            # mu is a conditional mean, so it is blended once, directly
+            mu = torch.zeros(
+                (n_state, mu.shape[-1]), dtype=torch.float32, device=mu.device
+            ).index_add_(0, idx, mu.float() * w)
+        else:
+            idx = w = None
+            n_state = n
+
+        def _fold(v):
+            """Replica velocity -> one velocity per original point."""
+            if idx is None:
+                return v
+            out = torch.zeros((n_state, v.shape[-1]), dtype=v.dtype, device=v.device)
+            return out.index_add_(0, idx, v * w)
+
+        def _expand(y):
+            return y if idx is None else y[idx]
+
         with torch.no_grad():
             for _ in range(ens_size):
-                y = torch.randn((n, self.num_channels), device=base.device, dtype=torch.float32)
+                y = torch.randn(
+                    (n_state, self.num_channels), device=base.device, dtype=torch.float32
+                )
                 for i_step in range(self.num_steps):
                     t = torch.full((n, 1), i_step * dt, device=base.device, dtype=torch.float32)
-                    v1 = self.guided_velocity(
-                        y, t, mu, latent, base, latent_lens, output_lens, coordinates
-                    ).float()
-                    if self.solver == "heun":
-                        t_next = torch.full(
-                            (n, 1), (i_step + 1) * dt, device=base.device, dtype=torch.float32
-                        )
-                        v2 = self.guided_velocity(
-                            y + dt * v1,
-                            t_next,
-                            mu,
+                    mu_rep = _expand(mu)
+                    v1 = _fold(
+                        self.guided_velocity(
+                            _expand(y),
+                            t,
+                            mu_rep,
                             latent,
                             base,
                             latent_lens,
                             output_lens,
                             coordinates,
                         ).float()
+                    )
+                    if self.solver == "heun":
+                        t_next = torch.full(
+                            (n, 1), (i_step + 1) * dt, device=base.device, dtype=torch.float32
+                        )
+                        # the predictor step is taken on the SINGLE-VALUED state, then expanded,
+                        # so both stages see a consistent y
+                        v2 = _fold(
+                            self.guided_velocity(
+                                _expand(y + dt * v1),
+                                t_next,
+                                mu_rep,
+                                latent,
+                                base,
+                                latent_lens,
+                                output_lens,
+                                coordinates,
+                            ).float()
+                        )
                         y = y + dt * 0.5 * (v1 + v2)
                     else:
                         y = y + dt * v1
@@ -496,8 +550,15 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
         coordinates,
         target=None,
         ens_size=1,
+        blend=None,
     ):
-        """Apply the corrector to a deterministic prediction ``mu`` of shape ``[N, C]``."""
+        """Apply the corrector to a deterministic prediction ``mu`` of shape ``[N, C]``.
+
+        ``blend`` is the soft-blend replica->original map from ``model._blend_maps``, applied in
+        VELOCITY space inside ``sample`` (see its docstring). It is sampling-only: during training
+        the loss is scored on the replicated points, which is correct because each replica is a
+        genuine decode of that point under a different host cell.
+        """
         base = det_tokens if self.flow.cond_on_tokens else coord_tokens
         kv = self.flow.kv_for(latent)
         if self.flow.detach_cond:
@@ -513,9 +574,15 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
         if not self.training:
             if ens_size == 0:
                 # evaluate this checkpoint as a purely deterministic model
-                return mu.unsqueeze(0)
+                if blend is None:
+                    return mu.unsqueeze(0)
+                idx, w, _lens, n_orig = blend
+                folded = torch.zeros(
+                    (n_orig, mu.shape[-1]), dtype=torch.float32, device=mu.device
+                ).index_add_(0, idx, mu.float() * w.to(torch.float32).view(-1, 1))
+                return folded.unsqueeze(0)
             return self.flow.sample(
-                mu_cond, kv, base, latent_lens, output_lens, coordinates, ens_size
+                mu_cond, kv, base, latent_lens, output_lens, coordinates, ens_size, blend=blend
             )
 
         assert target is not None, (
