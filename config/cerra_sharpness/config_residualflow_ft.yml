@@ -97,6 +97,20 @@ decoder_type: ResidualFlow
 flow_detach_cond: True
 flow_num_layers: 2
 
+# *** THE FIX. Both were False for every arm before 2026-09-04, and both are why they failed. ***
+# The decode blocks keep the RAW, un-normalised query as their residual (attention.py:370,404), so
+# with the old query -- `base + embed_mu(mu) + embed_state(y_t)`, all three DETACHED -- the large
+# `det_tokens` vector reached vel_head additively through every block. Measured on the trained
+# o3zkj546 weights: ||det_tokens|| ~50 vs ||embed_state(y_t)|| ~24, and the y_t-INDEPENDENT part of
+# the velocity is 0.62-1.05x the state-dependent part at every t. A velocity that does not track
+# its own state is not a flow: y(1) ~ y0 + drift.
+# With these on, the residual stream carries the STATE and the conditioning modulates it -- the
+# standard diffusion-transformer arrangement. `mu` rides in the AdaLN aux, the latent stays in the
+# cross-attention KV, and `det_tokens` survives behind a zero-initialised gate the corrector has
+# to earn. See ResidualFlowBranch.velocity.
+flow_state_only_query: True
+flow_mu_in_aux: True
+
 # Per-channel residual scale, calibrated online over the first 1000 steps and then frozen so the
 # loss weighting is stationary. Do NOT pin a global scalar here: measured CERRA residual stds
 # span 0.32 (2t) to 0.85 (tp), and one scalar leaves the small-residual channels in the regime
