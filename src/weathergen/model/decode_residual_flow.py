@@ -35,6 +35,43 @@ logger = logging.getLogger(__name__)
 FLOW_COND_MODES = ("mu", "mu+tokens", "mu+tokens+latent")
 
 
+def _colwise_corr(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Per-channel Pearson correlation of two ``[N, C]`` tensors, over finite rows."""
+    fin = torch.isfinite(a).all(-1) & torch.isfinite(b).all(-1)
+    a, b = a[fin], b[fin]
+    if a.shape[0] < 2:
+        return torch.full((a.shape[-1],), float("nan"), device=a.device)
+    a = a - a.mean(0)
+    b = b - b.mean(0)
+    return (a * b).mean(0) / (a.std(0) * b.std(0)).clamp_min(1e-12)
+
+
+class GatedResidual(torch.nn.Module):
+    """LayerNorm plus a scalar gate initialised at zero, for the query's conditioning path.
+
+    The gate starts closed, so the corrector begins as a pure function of the ODE state and has to
+    *earn* any dependence on the conditioning. That is the opposite of adding an ungated,
+    unnormalised conditioning vector into the residual stream, which is what broke the level-5
+    arms -- see `ResidualFlowBranch.velocity`.
+
+    Its own module (not a bare Parameter on the branch) because of the reinit-root rule in the
+    class docstring below.
+    """
+
+    def __init__(self, dim: int, norm_eps: float = 1e-5):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(dim, eps=norm_eps, elementwise_affine=False)
+        self.gate = torch.nn.Parameter(torch.zeros(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        with torch.no_grad():
+            self.gate.zero_()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.gate * self.norm(x)
+
+
 class ResidualFlowBranch(TargetPredictionEngineClassic):
     """The corrector itself: a small second decode stack predicting the residual velocity.
 
@@ -64,12 +101,21 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
     ):
         dim_time = int(cf.get("flow_dim_time", 32))
         assert dim_time % 2 == 0, f"flow_dim_time must be even, got {dim_time}"
+
+        # --- the two knobs that fix the constant-drift defect; see `velocity` for the analysis ---
+        # Both default to the OLD behaviour so existing checkpoints stay bit-identical.
+        self.state_only_query = bool(cf.get("flow_state_only_query", False))
+        self.mu_in_aux = bool(cf.get("flow_mu_in_aux", False))
+
         # the time embedding rides along with the coordinate frame in the AdaLN conditioning,
-        # so this stack -- unlike the inherited deterministic one -- is built for the widened aux
+        # so this stack -- unlike the inherited deterministic one -- is built for the widened aux.
+        # With `flow_mu_in_aux` the deterministic prediction rides along too, so that it conditions
+        # by MODULATION instead of by addition into the residual stream.
+        dim_aux = dim_coord_in + dim_time + (num_channels if self.mu_in_aux else 0)
         super().__init__(
             cf,
             dims_embed,
-            dim_coord_in + dim_time,
+            dim_aux,
             tr_dim_head_proj,
             tr_mlp_hidden_factor,
             softcap,
@@ -121,6 +167,12 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         self.debug_trace = bool(cf.get("flow_debug_trace", False))
         self._trace_n = 0
 
+        # Normalised, zero-gated conditioning path for the query. Its own module because
+        # `load_model_state` reinitialises missing checkpoint keys by calling reset_parameters()
+        # on the highest-level module covering them, and a bare Parameter here would make that
+        # root the whole branch, which has no reset_parameters.
+        self.base_gate = GatedResidual(dims_embed[0])
+
         self.embed_state = torch.nn.Linear(num_channels, dims_embed[0])
         self.embed_mu = torch.nn.Linear(num_channels, dims_embed[0])
         # Default init on purpose -- do NOT zero-init. This head is the only path from the block
@@ -144,11 +196,67 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         return latent
 
     def velocity(self, y_t, t, mu, latent, base, latent_lens, output_lens, coordinates):
-        """One evaluation of ``v_theta(y_t, t, mu, cond)`` -> ``[N, num_channels]``."""
-        q = base + self.embed_mu(mu.to(base.dtype)) + self.embed_state(y_t.to(base.dtype))
-        aux = torch.cat([coordinates, flow_time_embedding(t, self.dim_time)], dim=-1)
+        """One evaluation of ``v_theta(y_t, t, mu, cond)`` -> ``[N, num_channels]``.
+
+        **Why the query is composed the way it is.** The blocks keep the RAW, un-normalised query
+        as their residual (``attention.py:370,404``: ``x_q_in = x_q`` before the AdaLN, then
+        ``outs = x_q_in + outs``), so anything added into ``q`` reaches ``vel_head`` additively
+        through every block. The original form,
+
+            q = base + embed_mu(mu) + embed_state(y_t)          # all three DETACHED
+
+        therefore injected ``det_tokens`` -- large, detached, and constant with respect to both
+        ``y_t`` and ``t`` -- straight into the velocity. Measured on ``o3zkj546``:
+        ``||det_tokens|| ~ 50`` against ``||embed_state(y_t)|| ~ 24``, contributing a velocity of
+        std ~0.8 where the correct velocity has std sqrt(2).
+
+        A velocity with a large ``y_t``-independent component is not a flow. On the linear path the
+        correct velocity is proportional to the state, ``v* = (2t-1) y_t / ((1-t)^2 + t^2)``, which
+        integrates to variance exactly 1; a constant drift instead gives ``y(1) ~ y0 + c``, so the
+        sample amplitude is set by ``c`` and not by ``r_scale``. That is precisely what the level-5
+        arms produced: injected amplitude ~0.7 in normalised units on every channel while
+        ``r_scale`` spanned 0.07-0.62, cell-structured because ``det_tokens`` is a per-cell decode
+        product, and unchanged by three different loss weightings because ``c`` does not depend on
+        the loss.
+
+        With ``flow_state_only_query`` the residual stream carries the STATE, and the conditioning
+        modulates it -- the standard diffusion-transformer arrangement. The conditioning still
+        reaches the network, by the two routes that are gated or normalised:
+          * cross-attention to the cell's latents (unchanged), and
+          * the AdaLN ``aux``, which carries ``mu`` when ``flow_mu_in_aux`` is set.
+        ``base`` remains available through a zero-initialised gate, so the corrector can learn to
+        use it but does not start swamped by it.
+        """
+        state = self.embed_state(y_t.to(base.dtype))
+        if self.state_only_query:
+            q = state + self.base_gate(base)
+            if not self.mu_in_aux:
+                # mu has nowhere else to go, so keep it -- but normalised and gated like base
+                q = q + self.base_gate(self.embed_mu(mu.to(base.dtype)))
+        else:
+            q = base + self.embed_mu(mu.to(base.dtype)) + state
+
+        parts = [coordinates, flow_time_embedding(t, self.dim_time)]
+        if self.mu_in_aux:
+            parts.append(mu.to(coordinates.dtype))
+        aux = torch.cat(parts, dim=-1)
+
         tokens = super().forward(latent, q, latent_lens, output_lens, aux)
-        return self.vel_head(tokens)
+        v = self.vel_head(tokens)
+
+        if self.debug_trace and self._trace_n < 40:
+            self._trace_n += 1
+            with torch.no_grad():
+                logger.info(
+                    "FLOWTRACE q | ||base||=%.3f ||embed_mu||=%.3f ||embed_state||=%.3f "
+                    "gate=%.4f | corr(v,y_t)=%s",
+                    float(base.float().norm(dim=-1).mean()),
+                    float(self.embed_mu(mu.to(base.dtype)).float().norm(dim=-1).mean()),
+                    float(state.float().norm(dim=-1).mean()),
+                    float(self.base_gate.gate),
+                    [round(x, 3) for x in _colwise_corr(v.float(), y_t.float()).tolist()],
+                )
+        return v
 
     def guided_velocity(self, y_t, t, mu, latent, base, latent_lens, output_lens, coordinates):
         """Velocity with classifier-free guidance applied (sampling only)."""

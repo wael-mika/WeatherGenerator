@@ -147,6 +147,65 @@ def test_training_pass_calibrates_the_residual_scale(inputs, freeze_base):
     )
 
 
+@pytest.mark.parametrize("state_only", [False, True])
+def test_velocity_actually_depends_on_the_state(inputs, state_only):
+    """The velocity MUST vary with ``y_t``. Nothing asserted this, and that is how the level-5
+    arms shipped.
+
+    On the linear path the correct velocity is proportional to the state
+    (``v* = (2t-1) y_t / ((1-t)^2 + t^2)``, which integrates to variance exactly 1). A velocity
+    with a large ``y_t``-independent component is not a flow at all: ``y(1) ~ y0 + c``, so the
+    sample amplitude is set by the drift ``c`` rather than by ``r_scale``. That is exactly what
+    ``o3zkj546``/``ntsa83cj``/``y4uyvah7`` produced -- injected amplitude ~0.7 in normalised units
+    on every channel while ``r_scale`` spanned 0.07-0.62.
+
+    This is deliberately a *sensitivity* test, not a correlation threshold: an untrained network
+    has no reason to correlate with the CFM target, but it must at least respond to its own input.
+    """
+    dec = _build(flow_state_only_query=state_only, flow_mu_in_aux=state_only).eval()
+    io = inputs
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        det = dec.det_forward(
+            latent=io["latent"],
+            output=io["output"],
+            latent_lens=io["latent_lens"],
+            output_lens=io["output_lens"],
+            coordinates=io["coordinates"],
+        )
+        mu = det[:, :C].float()
+        kw = dict(
+            t=torch.full((io["n"], 1), 0.5, device=DEV),
+            mu=mu,
+            latent=dec.flow.kv_for(io["latent"]),
+            base=det,
+            latent_lens=io["latent_lens"],
+            output_lens=io["output_lens"],
+            coordinates=io["coordinates"],
+        )
+        torch.manual_seed(11)
+        y = torch.randn(io["n"], C, device=DEV)
+        v_a = dec.flow.velocity(y_t=y, **kw).float()
+        v_b = dec.flow.velocity(y_t=-y, **kw).float()
+
+    drift = 0.5 * (v_a + v_b)  # the y_t-independent part, since y_t -> -y_t is odd
+    swing = 0.5 * (v_a - v_b)  # the part that responds to the state
+    ratio = drift.norm() / swing.norm().clamp_min(1e-12)
+    assert torch.isfinite(v_a).all()
+    assert swing.norm() > 0, "velocity is completely blind to y_t"
+    if state_only:
+        # gate starts at zero, so at init the query IS the state and there is nothing else to drift
+        assert ratio < 1.0, f"state-only query still carries a large drift: {ratio:.2f}"
+
+
+def test_base_gate_starts_closed():
+    """The conditioning path must start shut, so the corrector cannot begin swamped by it."""
+    dec = _build(flow_state_only_query=True, flow_mu_in_aux=True)
+    assert dec.flow.base_gate.gate.detach().item() == 0.0
+    dec.flow.base_gate.gate.data.fill_(0.7)
+    dec.flow.base_gate.reset_parameters()
+    assert dec.flow.base_gate.gate.detach().item() == 0.0, "reset_parameters must re-close it"
+
+
 def test_eval_pass_does_not_calibrate(inputs):
     """Sampling must integrate with exactly the scale training settled on, never re-estimate it."""
     dec = _build().eval()

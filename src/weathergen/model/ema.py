@@ -33,6 +33,9 @@ class EMAModel:
         self.batch_size = 1
         # Build a name → param map once
         self.src_params = dict(self.original_model.named_parameters())
+        # ...and the same for buffers. Buffers are calibration STATE, not weights to average, so
+        # they are copied rather than interpolated -- see `update`.
+        self.src_buffers = dict(self.original_model.named_buffers())
 
         self.reset()
 
@@ -102,6 +105,26 @@ class EMAModel:
                 assert False, f"{name}: All parameters of the EMA model must be in the base model."
 
             p_ema.lerp_(p_src, 1.0 - beta)
+
+        # *** Buffers must be COPIED, not left frozen at their construction-time values. ***
+        # They carry calibration state, not weights, so averaging them is meaningless -- but
+        # leaving them stale is worse, because `state_dict()` below returns the EMA model, so the
+        # stale value is what gets CHECKPOINTED and what `validate_with_ema` evaluates with.
+        #
+        # This silently broke the residual-flow campaign. `ResidualScale` calibrates the
+        # per-channel residual scale during training and the live model reached
+        # count=1000, scale=[0.31, 0.096, 0.33, 0.077, 0.62, 0.26, 0.28, 0.070] -- but every
+        # checkpoint of o3zkj546/ntsa83cj/y4uyvah7 stored count=0, scale=[1]*8, and validation ran
+        # with that. The corrector was therefore trained in units of r_scale and sampled with
+        # r_scale = 1.0, i.e. 1.6x (tp) to 14x (z_850) too large, which is exactly the measured
+        # over-dispersion and exactly why `tp` -- whose true scale 0.62 is closest to 1.0 -- was
+        # the only channel that looked sane.
+        for name, b_ema in self.ema_model.named_buffers():
+            b_src = self.src_buffers.get(name, None)
+            b_src = self.src_buffers.get("module." + name, None) if b_src is None else b_src
+            if b_src is None:
+                continue  # EMA-only buffer; nothing to track
+            b_ema.copy_(b_src)
 
     @torch.no_grad()
     def forward_eval(self, *args, **kwargs):

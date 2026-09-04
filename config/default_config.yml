@@ -135,6 +135,25 @@ flow_residual_scale: null
 flow_residual_scale_ema: 0.999
 flow_residual_scale_steps: 1000
 
+# Corrector query composition. Both default to the ORIGINAL behaviour so existing checkpoints stay
+# bit-identical; both must be True for the fix.
+#   flow_state_only_query  the query carries the ODE STATE and the conditioning modulates it,
+#                          instead of the conditioning being ADDED into it. The decode blocks keep
+#                          the raw, un-normalised query as their residual (attention.py:370,404),
+#                          so with the old form the detached `det_tokens` -- large, and constant in
+#                          both y_t and t -- reached vel_head additively through every block and
+#                          became a drift the flow cannot be correct with. Measured on o3zkj546:
+#                          ||det_tokens|| ~50 vs ||embed_state(y_t)|| ~24, a velocity contribution
+#                          of std ~0.8 against a correct std of sqrt(2). `base` survives behind a
+#                          zero-initialised gate.
+#   flow_mu_in_aux         mu rides in the AdaLN aux, i.e. conditions by modulation rather than by
+#                          addition. Widens the corrector's aux by num_channels; the corrector is
+#                          always freshly initialised on warm start, so this is safe there, but it
+#                          does change `flow.tte.*` shapes and so breaks RESUMING an older
+#                          corrector run.
+flow_state_only_query: False
+flow_mu_in_aux: False
+
 # Diagnostic trace for the residual corrector: logs r/u/v standard deviations and corr(v, u) on a
 # few training steps, and sd(y) along the sampling ODE. Answers "is the velocity learned" and
 # "does the integration preserve the unit variance the linear path guarantees" -- neither of which
