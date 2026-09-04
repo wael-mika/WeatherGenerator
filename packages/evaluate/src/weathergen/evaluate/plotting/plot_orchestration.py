@@ -19,6 +19,7 @@ import numpy as np
 import omegaconf as oc
 import xarray as xr
 from joblib import delayed
+from numpy.typing import NDArray
 from PIL import Image
 from tqdm import tqdm
 
@@ -469,6 +470,20 @@ def _scatter_plot_single(
 # ---------------------------------------------------------------------------
 
 
+def _pad_frame(frame: NDArray, height: int, width: int) -> NDArray:
+    """Pad an image array to ``height`` x ``width`` with white, anchored top-left.
+
+    Used to make animation frames uniform: the mp4 writer requires every frame to have
+    identical dimensions, but matplotlib's tight bounding box makes them vary slightly.
+    """
+    pad_h = height - frame.shape[0]
+    pad_w = width - frame.shape[1]
+    if pad_h == 0 and pad_w == 0:
+        return frame
+    pad_width = [(0, pad_h), (0, pad_w)] + [(0, 0)] * (frame.ndim - 2)
+    return np.pad(frame, pad_width, mode="constant", constant_values=255)
+
+
 def _build_single_animation(
     output_dir: Path,
     run_id: str,
@@ -531,6 +546,15 @@ def _build_single_animation(
 
     if animation_format.lower() == "mp4":
         frames = [imageio.imread(p) for p in image_paths]
+        # Frames are saved with bbox_inches="tight", so their pixel dimensions vary by a few
+        # pixels depending on content (tick-label widths, title length). The GIF writer
+        # tolerates that; the ffmpeg writer raises "All images in a movie should have same
+        # size". Pad every frame to the largest height/width in the sequence -- padding
+        # rather than resizing keeps the plots free of resampling artefacts.
+        max_h = max(f.shape[0] for f in frames)
+        max_w = max(f.shape[1] for f in frames)
+        if any(f.shape[0] != max_h or f.shape[1] != max_w for f in frames):
+            frames = [_pad_frame(f, max_h, max_w) for f in frames]
         fps = 1000 / duration_ms if duration_ms > 0 else 2
         imageio.mimsave(out_path, frames, fps=fps, ffmpeg_params=["-crf", "18"])
     else:

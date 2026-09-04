@@ -1086,6 +1086,15 @@ class Plotter:
         cbar.set_label(f"Variable: {varname}", fontsize=7)
         cbar.ax.tick_params(labelsize=6)
         cbar.outline.set_linewidth(0.3)
+        if isinstance(opts["norm"], mpl.colors.BoundaryNorm):
+            # Discrete levels are labelled with their raw values, which for small-magnitude
+            # variables (precip in metres: 0.0001 ... 0.1) run into each other on a shrunk
+            # horizontal bar. Pin one tick per boundary and slant them so every level stays
+            # readable however many levels the config defines.
+            cbar.set_ticks(list(opts["norm"].boundaries))
+            cbar.ax.set_xticklabels(
+                [f"{b:g}" for b in opts["norm"].boundaries], rotation=45, ha="right"
+            )
         plt.title(title, fontsize=8)
 
         # save
