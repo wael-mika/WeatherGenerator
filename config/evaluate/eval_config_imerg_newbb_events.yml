@@ -1,0 +1,134 @@
+# IMERG evaluation for the nhv6tkln / f2esyc18 backbones -- PASS B, the two case-study events.
+#
+# Driven by the `evalevents` stage of
+# config/raina_config/pipelines_final/pipeline_imerg_<backbone>_<lr>.yml, one invocation per
+# inference run. Standalone equivalent:
+#   uv run evaluation --config config/evaluate/eval_config_imerg_newbb_events.yml --run-ids <INFERENCE_RUN_ID>
+#
+# WHY TWO PASSES. run_evaluation.py calls plot_data BEFORE scoring (run_evaluation.py:259), so any
+# plotting exception discards the whole run -- job 821431 burned ~1 h and wrote zero score JSONs
+# that way. This file is pass B of two: the four Doksuri / Daniel initialisations only, with maps, bias, histograms and
+# animations on.
+#
+# `run_ids: {}` IS DELIBERATE AND MUST STAY. The pipeline mints run ids at launch, so none can be
+# listed here. `--run-ids <id>` rebuilds the block as `{id: existing.get(id, {})}`
+# (run_evaluation.py:150-152), i.e. an unknown id yields an EMPTY per-run dict, which is fine:
+# `streams` then falls back to `default_streams` (run_evaluation.py:345) and `results_base_dir`
+# falls back to the private config's run path (wegen_reader.py:54-56). The key must exist though,
+# or the assignment raises on a struct-mode config -- hence the empty mapping rather than omitting
+# it. `runplot_base_dir` defaults to `results_base_dir`, so per-run figures land in
+# <shared_work>/results/<run_id>/.
+#
+# summary_dir is ABSOLUTE on purpose: launch-slurm runs from
+# /iopsstor/scratch/cscs/thunter/slurm/slurm_weathergen_<runid>_dir/, so a relative path buries
+# the figures inside the throwaway snapshot.
+#
+# INFERENCE GEOMETRY these runs are produced with -- identical to the nine via-2-step runs and to
+# m745z8wi / ce4rujvd / csuff3rz, which is what makes the sample indices below transferable:
+#   start 2023-06-01T00:00, end 2023-09-12T00:00, shuffle False, samples_per_mini_epoch 368,
+#   output.num_samples 368, time_window_step 06:00:00, forecast.num_steps 40,
+#   8 ranks (2 nodes x 4 GPUs), data_loading.num_workers 2.
+#
+# tp is in METRES per 6 h window: 0.001 = 1 mm/6h.
+# SEEPS is a SKILL here -- calc_seeps returns 1.0 - seeps_error -- so higher is better and it must
+# DECREASE with lead time. `psd` must never be enabled: detect_grid_type knows only octahedral and
+# regular, N320 is reduced Gaussian, and the failure surfaces far away as KeyError: 'global'.
+#
+# THE TWO EVENTS. Samples 196 and 204 are Typhoon Doksuri initialisations, 357 and 365 Storm
+# Daniel -- the same four the earlier comparison used, and they transfer unchanged because the
+# inference geometry is identical (see above). Global sample indices follow rank-file
+# concatenation order (rank0000 -> 0..45, rank0001 -> 46..91, ...), so they are NOT chronological;
+# verify with playground/scripts/build_matched_sample_lists.py before publishing, and see
+# playground/scripts/track_cyclones.py for the precipitation-centroid tracking that goes with
+# these cases.
+#
+# `evaluation.sample` IS RESTRICTED TO THE SAME FOUR. Two reasons: it drops the load from ~634 GB
+# to ~10 GB and minutes, and subsetting `plotting.sample` without subsetting `evaluation.sample`
+# crashes -- _process_stream intersects the two and an empty intersection hits plot_samples[-1]
+# (plot_orchestration.py:1093,1103). Scores from this pass are case-study only; the real numbers
+# come from the scoring pass.
+#
+# animation_format IS "mp4". That REQUIRES the `_pad_frame` fix in
+# packages/evaluate/.../plotting/plot_orchestration.py, which pads every frame to the sequence
+# maximum (top-left anchored, white fill -- padding not resizing, so no resampling artefacts).
+# Without it the ffmpeg writer raises `ValueError: All images in a movie should have same size`,
+# because frames are saved with bbox_inches="tight" and their pixel size varies by a few px with
+# tick-label width; that killed job 821431 AFTER an hour and before any score JSON was written.
+# Short smoke runs pass because their frames happen to be uniform. The fix is in the working tree
+# (restored from the `raina evaluation` stash) and must be committed before this pass runs.
+#####################################
+
+max_workers: 4
+
+global_plotting_options:
+  image_format: "png"
+  animation_format: "mp4"   # needs the _pad_frame fix in plot_orchestration.py -- see header
+                           # binary (no system ffmpeg needed); "gif" is the code default.
+  fps: 3                   # 40 fsteps at 3 fps = ~13 s per rollout animation
+  dpi_val: 150
+  n_bins: 60
+  log_y: true            # precip histograms are unreadable with linear counts
+  IMERG_ANEMOI:
+    marker_size: 1.5
+    scale_marker_size: true
+    marker: "o"
+    tp:                  # levels in metres/6h: 0.1 mm ... 100 mm
+      # BoundaryNorm is built as BoundaryNorm(levels, cmap.N, extend="both") in
+      # plotter.py:737, so it needs len(levels)+1 colors: (len(levels)-1) interior bins
+      # plus the under- and over-flow extensions. The previous 8-level/8-color pair was
+      # one colour short and raised ValueError at plot time.
+      #
+      # 9 levels -> 8 interior bins -> 10 colors.
+      # Extended to 0.05 (50 mm/6h) and 0.1 (100 mm/6h) so that the Doksuri and Daniel
+      # case studies do not saturate: everything above 20 mm/6h used to fall in one bin.
+      levels: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+      colors:
+        - "none"           # under  <0.1 mm  (dry, transparent)
+        - "#BEDAE5"        #   0.1 -   0.5 mm
+        - "#80B5CC"        #   0.5 -   1   mm
+        - "#5691B3"        #   1   -   2   mm
+        - "#4B6E9C"        #   2   -   5   mm
+        - "#424B83"        #   5   -  10   mm
+        - "#45596D"        #  10   -  20   mm
+        - "#5B9E4C"        #  20   -  50   mm
+        - "#F4A83A"        #  50   - 100   mm
+        - "#C7212F"        # over  >100 mm  (extreme)
+evaluation:
+  metrics:
+    - rmse
+    - bias
+  summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/newbackbones/events/"
+  summary_plots: false
+  ratio_plots: false
+  heat_maps: false
+  score_cards: false
+  bar_plots: false
+  plot_ensemble: "members"
+  plot_score_maps: false
+  plot_score_animations: false
+  plot_score_init_timeseries: false
+  print_summary: true
+  log_scale: false
+  add_grid: false
+
+default_streams:
+  IMERG_ANEMOI:
+    regions: ["global"]
+    channels: ["tp"]
+    climatology_path: "/iopsstor/scratch/cscs/walmikae/wg_from_jsc/climatology/nasa-imerg-grib-n320-1998-2024-6h-v1_climatology.zarr"
+    evaluation:
+      forecast_step: "all"
+      sample: [196, 204, 357, 365]   # MUST stay a superset of plotting.sample -- see header
+      ensemble: "mean"
+    plotting:
+      sample: [196, 204, 357, 365]   # Doksuri x2, Daniel x2
+      forecast_step: "all"
+      ensemble: "mean"
+      plot_maps: true
+      plot_bias: true
+      plot_target: true              # overlay the IMERG observation for visual comparison
+      plot_histograms: true
+      plot_animations: true          # gif, see header
+      plot_timeseries: false
+
+run_ids: {}

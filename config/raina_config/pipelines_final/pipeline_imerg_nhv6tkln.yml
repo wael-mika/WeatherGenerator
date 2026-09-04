@@ -1,0 +1,127 @@
+# nhv6tkln (T/JEPA -- temporal objective) -- IMERG decoder finetune, 3-month inference, evaluation and event plots.
+#
+# One of TWO pipelines. nhv6tkln_fix and aets3ku5_fix share architecture, pretraining budget
+# (istep 2048, 8 mini epochs x 8192), pretraining depth (forecast.num_steps 8) and a
+# byte-identical resolved stream set; the ONLY difference is the JEPA objective, temporal vs
+# spatial. Everything below is identical between the two files except the backbone name.
+#
+# nhv6tkln_fix is cw6a4szu's ENCODER with a different forecast engine: compared tensor by tensor
+# against cw6a4szu_chkpt00008, 1195 of 1419 tensors are bit-identical and all 224 that differ are
+# module.forecast_engine.*. So this run is also a forecast-engine ablation against ce4rujvd.
+#
+# Strict sequence -- no `parallelize`, so each stage waits on the one before:
+#
+#   1. train2s8ep   2 forecast steps, 8 mini epochs, from `nhv6tkln_fix`
+#   2. train8s2ep   8 forecast steps, 2 mini epochs, from stage 1 at chkpt00007
+#   3. infer3month  3 months of initialisations at 40 forecast steps (+240 h)
+#   4. evalscores   scoring pass over all 364 shared inits, every plot switch off
+#   5. evalevents   Doksuri and Daniel, with maps / bias / histograms / mp4 animations
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/raina_config/pipelines_final/pipeline_imerg_nhv6tkln.yml | tee launch_nhv6tkln.log
+#
+# HOW THE RUN IDS CHAIN. No stage pins a `run_id:`. launch-slurm mints one per stage
+# (`run_id = p.run_id if p.run_id else get_run_id()`, launch-slurm.py:825) and each later stage
+# names the earlier one SYMBOLICALLY as `STAGE.<name>`, which _validate_stage resolves to that
+# stage's minted id before submission (:832-839). So stage 2 continues from stage 1's training run
+# and stage 3 infers from stage 2's, without anyone knowing the ids in advance -- and the slurm
+# `--dependency` chain means a stage never starts before the run it reads from has finished.
+#
+# TO RECORD THE IDS: they are printed at submit time, once per stage, in the
+# "Resolved parameters for stage '<name>'" block as `run_id:` and `from_run_id:` -- that is the
+# ONLY place they appear before the jobs start, hence the `| tee` above. Afterwards recover them
+# from the slurm job names (`sacct --name=weathergen_* --format=JobID,JobName%40,State`), from
+# `logs/<runid>/`, or from the `models/` and `results/` directory mtimes. Write them into
+# playground/docs/imerg_via2step_8step_plan.md as the runs land.
+#
+# LEARNING RATE. lr_max 1e-4 with `parallel_scaling_policy: "sqrt"`, i.e. an effective peak of
+# 2.83e-4 at world size 8 -- the same as every other IMERG finetune in the comparison. The 3e-4
+# arm is prepared but commented out inside both training configs; to run it, copy this file, flip
+# the two lr_max lines in the configs it points at, and launch the copy.
+#
+# WHY `mini_epoch: 7` ON STAGE 2 / `mini_epoch: 1` ON STAGE 3
+#   Stage 1 runs 8 mini epochs, so `chkpt00007` is its final, fully-cooled-down state -- the same
+#   convention as the eight original via-2-step parents; stage 2 runs 2, so `chkpt00001` is its.
+#   The launcher defaults to -1 -> `<run>_latest.chkpt`, which train() rewrites every
+#   train_logging.checkpoint = 250 batches and is NOT that state.
+#
+# WHY `end_date` IS 2023-09-12 AND `samples_per_mini_epoch` IS 368
+#   check_samples subtracts the whole forecast horizon from the index range -- 42 windows at 40
+#   steps / 6 h -- so `end_date=2023-08-31T00` yields only 322 inits ending 2023-08-20T00,
+#   silently dropping the last 11 days. 2023-09-12T00 gives 370 available; 368 are requested,
+#   spanning 2023-06-01T06 .. 2023-09-01T00 every 6 h. These are the SAME settings the nine
+#   via-2-step runs and m745z8wi / ce4rujvd / csuff3rz used, which is what makes the eval configs'
+#   sample indices transferable -- including the four case-study samples (196, 204 = Doksuri;
+#   357, 365 = Daniel). Do not vary nodes or data_loading.num_workers here: the sample index ->
+#   init time map depends on both.
+#
+# MEMORY / WALLTIME ARE THE ONES THAT ALREADY WORKED. The inference stage takes only
+# `--time=06:00:00` and inherits the slurm template's `--exclusive --mem=450G` -- no --mem
+# override, exactly as on the inference runs that completed. The evaluation stages inherit it too.
+#
+# WHY TWO EVALUATION STAGES
+#   run_evaluation.py plots BEFORE it scores, so a plotting exception discards the whole run
+#   (job 821431 burned ~1 h and wrote zero score JSONs). Stage 4 runs with every plotting switch
+#   off to bank the score JSONs; stage 5 then loads only the four case-study samples (~10 GB and
+#   minutes, against ~634 GB and ~1 h for the full set) and does the figures.
+#
+# ANIMATIONS ARE MP4. That needs the `_pad_frame` fix in plot_orchestration.py, which pads every
+# frame to the sequence maximum -- without it the ffmpeg writer raises "All images in a movie
+# should have same size", because frames are saved with bbox_inches="tight" and vary by a few px.
+# That fix is in the working tree (restored from the `raina evaluation` stash); it must be
+# committed, or present in the snapshot, when this pipeline runs.
+#####################################
+
+stages:
+  - name: train2s8ep
+    stage: train
+    from_run_id: nhv6tkln_fix
+    config_files:
+      - config/raina_config/config_finetune_imerg_diag_mse_nhv6tkln_2step_8ep.yml
+    nodes: 2
+    slurm_args:
+      - "--time=08:00:00"
+
+  - name: train8s2ep
+    stage: train
+    from_run_id: STAGE.train2s8ep
+    mini_epoch: 7
+    config_files:
+      - config/raina_config/config_finetune_imerg_diag_mse_nhv6tkln_8step_2ep.yml
+    nodes: 2
+    slurm_args:
+      - "--time=08:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s2ep
+    nodes: 2
+    mini_epoch: 1
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
+
+  - name: evalscores
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_imerg_newbb_scores.yml
+    slurm_args:
+      - "--time=03:00:00"
+
+  - name: evalevents
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_imerg_newbb_events.yml
+    slurm_args:
+      - "--time=01:00:00"

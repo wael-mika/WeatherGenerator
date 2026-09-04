@@ -1,0 +1,273 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG decoder finetune for the `aets3ku5_fix` backbone -- 8 forecast steps, 2 mini epochs.
+# Family: S/JEPA -- spatial objective (no temporal flag, target correspondence 'subset').
+#
+# LINEAGE. run_history [lhpmzkam -> g248a1sz -> f2esyc18], istep 2048, 8 mini epochs x 8192 at
+# forecast.num_steps 8. It is the 8-STEP CONTINUATION of `f2esyc18_fix`, which trained only to
+# num_steps 2 -- the last entry of its run_history is literally ['f2esyc18', 0]. Use this one,
+# not f2esyc18_fix: with the 2-step checkpoint the 8-step stage would have been asking the
+# forecast engine for depth it had never seen, and the pairing against nhv6tkln_fix would have
+# confounded the JEPA objective with pretraining depth.
+#
+# THE PAIR IS SYMMETRIC. nhv6tkln_fix and aets3ku5_fix have the same architecture (use_xsa,
+# ae_global 5 x 2048, ae_local 4 x 1024, 64 register tokens, fe 16 blocks, healpix L5, N320,
+# with_fsdp False, spawn), the same pretraining budget (istep 2048, 8 mini epochs x 8192) and the
+# same pretraining DEPTH (forecast.num_steps 8), and their resolved stream sets are byte-identical.
+# The only thing that differs is the JEPA objective, temporal vs spatial. That is the comparison.
+#
+# STAGE 2 OF 2 IS CHAINED, NOT OPTIONAL. `pipeline_imerg_aets3ku5.yml` runs
+#     2 forecast steps / 6 mini epochs  ->  8 forecast steps / 2 mini epochs  ->  inference  ->  eval
+#
+# LEARNING RATE. lr_max 1e-4 -- the value every other IMERG decoder finetune in this comparison
+# used, so these runs are directly comparable with m745z8wi / fvenw2nq / ce4rujvd / csuff3rz and
+# the nine via-2-step runs. A higher-LR arm is prepared but COMMENTED OUT in the
+# learning_rate_scheduling block below; uncomment the 3e-4 line (and comment the 1e-4 one) to run
+# it, and give that run its own pipeline copy so the two arms do not overwrite each other.
+#
+# `parallel_scaling_policy: "sqrt"` is set EXPLICITLY below and matters. BOTH checkpoints say
+# "const" in their own configs, and the rest of the IMERG family runs "sqrt" -- inheriting "const"
+# would make lr_max 1e-4 mean a peak of 1e-4 here against 1e-4*sqrt(8) = 2.83e-4 everywhere else,
+# i.e. a 2.8x lower LR than the runs these are meant to be compared with.
+#
+# LR SCHEDULE LENGTH. num_steps_warmup 32 / num_steps_cooldown 64 is the family's
+# 3.125% / 6.25% shape over this stage's 510 x 2 = 1020 optimizer steps. lr_steps is
+# linear in num_mini_epochs, so the shape holds at any --nodes N.
+#
+# num_workers 6 -> 510 batches per mini epoch. Per-mini-epoch length is
+# ((samples_per_mini_epoch // world_size) // (batch_size * num_workers)) * batch_size *
+# num_workers, so 4096 / world 8 gives 512 batches at 8 workers and 510 at 6. 6 matches the nine via-2-step 8-step runs and is the memory-safe value at 8 steps.
+#
+# LOSS KEY IS `forecast`. Both backbones carry `physical` and `student-teacher` as type Disabled,
+# so `forecast` is the single live LossPhysical -- verified in each checkpoint's saved config.
+# Declaring the MSE under any other key would ADD a second LossPhysical and trip the
+# `len(LossPhysical blocks) == 1` assert in validation_io.write_output.
+#
+# MODEL-INPUT BRANCH IS `forecasting` (with `random_easy` disabled) -- both backbones' own keys.
+# model_input is a dict and the merge UNIONS it, so a wrong name ADDS an enabled branch instead of
+# overriding, which silently doubles batch_size (train/utils.py get_batch_size_from_config).
+#
+# FREEZE: encoder and forecast engine frozen, IMERG decoder only. Checked against the real
+# parameter names in the checkpoint: keys are module.encoder.*, module.forecast_engine.* and
+# module.{embed_target_coords,target_token_engines,pred_heads}.<STREAM>.*, so this regex freezes
+# the pretrained model and leaves the freshly created IMERG_ANEMOI decoder trainable.
+# `.*ERA5.*` is deliberately ABSENT: in these checkpoints every decoder module is owned by the
+# ERA5 diagnostic output stream, and including the term resolves to zero trainable parameters.
+#
+# TARGET IS IMERG ONLY -- config/streams/imerg_diag_aets3ku5/, generated from this backbone's own
+# saved stream set with the diagnostic ERA5 output neutralised and an explicit `target: []` on
+# every forcing stream.
+#
+# Run (or use the pipeline, which is the intended entry point):
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id <2-STEP-RUN> --config config/raina_config/config_finetune_imerg_diag_mse_aets3ku5_8step_2ep.yml --mini-epoch 5 --nodes 2
+#   (paste as ONE line -- literal backslash continuations break parse_known_args)
+#
+# START FROM MINI EPOCH 5. The 2-step stage runs 6 mini epochs, so `chkpt00005` is its final,
+# fully-cooled-down state; the launcher's default -1 resolves to `<run>_latest.chkpt`, which
+# train() rewrites every 250 batches and is NOT that state. `general.istep: 0` resets the counter.
+#####################################
+# THE PARENT IS `xqlk2nkf` AT chkpt00007 (istep 4096).
+#
+# `xqlk2nkf_chkpt00007.chkpt` was RESTORED FROM JUPITER on 2026-08-20 -- 4,711,706,738 bytes,
+# byte-exact, with its .optim and json. It had been deleted from Santis, which is why an earlier
+# revision of this file regenerated the 2-step stage from `cw6a4szu` instead. That is no longer
+# needed and `config_finetune_imerg_diag_mse_cw6a4szu_2step_8ep.yml` has been deleted.
+# Do NOT fall back to `xqlk2nkf_latest.chkpt`: it is istep 8430 (chkpt00016), twice the training
+# every other cell gets.
+#
+# TWO CAVEATS. Neither blocks the run; both belong in any write-up of the comparison.
+#
+#   1. SAME istep, DIFFERENT POINT IN THE LR SCHEDULE. xqlk2nkf ran **16** mini epochs on a
+#      256/512 schedule, so chkpt00007 is HALFWAY down its cosine at lr 1.34e-4 -- near peak.
+#      The other eight parents ran 8 mini epochs on 128/256, so their chkpt00007 is the END of
+#      the schedule at lr ~7e-9 (bom5igqp 8.3e-9, q7vren93 6.9e-9, sslfnnb4 6.9e-10). The sample
+#      count matches exactly (4096 optimizer steps x 8 ranks), but this decoder arrives "hot"
+#      where the others arrive annealed. chkpt00007 matches on training AMOUNT, which is the axis
+#      this comparison controls; there is no checkpoint that matches on both.
+#
+#   2. NOT CODE-MATCHED. launch-slurm runs the PARENT SNAPSHOT's code and only overlays config/.
+#      `slurm_weathergen_xqlk2nkf_dir/.../src/weathergen` hashes to 8b3a217820b5 against
+#      193332f51fc5 for all eight other 2-step parents -- 18 files differ, including trainer.py
+#      (188 changed lines), model.py (174), multi_stream_data_sampler.py (27) and
+#      lr_scheduler.py. Closing that needs a reseeded 2-step run, i.e. the re-training being
+#      deliberately skipped.
+# ###################################################################################
+#####################################
+
+streams_directory: "./config/streams/imerg_diag_aets3ku5/"
+
+# The inherited ERA5 output stream is suppressed in the streams DIRECTORY, not here:
+# config/streams/imerg_diag_cw6a4szu/era5.yml carries `reconstruct: false`.
+# It cannot be done from this file -- _load_streams_in_config does
+# `config.streams = load_streams(streams_directory)`, an assignment that overwrites any
+# `streams:` block declared here before the merge with the checkpoint config happens.
+
+# Decoder probe: encoder AND the pretrained 16-block forecast engine frozen. The IMERG decoder
+# modules (target_token_engines.*, pred_heads.*, embed_target_coords.*) are IMERG-fresh here and
+# must stay trainable -- see the header for why `.*ERA5.*` must not appear in this regex.
+freeze_modules: ".*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
+  # This is also cw6a4szu's own setting.
+  multiprocessing_method: "spawn"
+
+  desc: "imerg_diag_mse_from_aets3ku5_8step_2ep"
+  run_id: ???
+  run_history: []
+
+# logging frequency in the training loop (in number of batches)
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off (cw6a4szu carries deep_ssl.enabled False already; pinned for identity
+  # with the af90zz71/srdrwfy6 finetune configs).
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  # Exactly 16 mini epochs, 0..15. This is a plain count here, NOT an absolute stop point,
+  # because `general.istep: 0` above resets the step counter: the training loop is
+  # range(mini_epoch_base, num_mini_epochs) with mini_epoch_base = int(istep / len(data_loader)),
+  # so istep 0 => base 0. Resetting istep also means the optimizer momentum buffers are not
+  # restored (trainer only calls _load_optimizer_state when istep != 0) and the LR scheduler
+  # starts from step 0 with a full warmup -- both correct for a finetune whose decoder is
+  # freshly initialised anyway.
+  #
+  # DO NOT drop `general.istep: 0` and set this to a raw count: without the reset the base is
+  # recovered from the parent's istep and this value becomes an absolute stop point, so a value
+  # below the base trains nothing at all (run re0jivry did exactly that and still wrote a
+  # checkpoint). The whole raina IMERG family resets istep for this reason.
+  num_mini_epochs: 2
+  samples_per_mini_epoch: 4096
+
+  # Kept identical to the other IMERG finetunes for comparability.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # time_window_step/len NOT overridden: native 6h/6h of this checkpoint.
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    # HIGHER-LR ARM -- comment the line above and uncomment this one to run it.
+    # 3x the family value; effective peak 3e-4 * sqrt(8) = 8.49e-4 at world size 8.
+    # lr_max: 3e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 32
+    num_steps_cooldown: 64
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # grad_clip 1.0 is cw6a4szu's native value.
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Latent JEPA loss OFF; plain MSE on the only output stream (IMERG). cw6a4szu carries loss
+  # blocks named "physical", "student-teacher" and "forecast"; the physical block is renamed
+  # here to the same "forecast" key the family uses so the merge stays idempotent.
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  # 2 steps -- the SHALLOW variant, comparable with every other 2-step IMERG diagnostic
+  # finetune in the family. cw6a4szu's native depth is 8 (see the _8step companion config);
+  # training shallower than native is always safe -- the forecast engine is simply asked for
+  # fewer autoregressive steps than it already handles, and it is frozen here regardless.
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+
+# Validate at the training depth so the curve is comparable with the 2-step variant's.
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Validation window WIDENED from 3 to 6 months. The old window (2023-10-01 -> 2023-12-31) is
+  # contained in this one, so nothing that was scored before is dropped -- boreal summer and
+  # early autumn are added on top. Sample count is unchanged at 256, so validation costs the same;
+  # the 256 are simply drawn from twice as much time.
+  #
+  # shuffle: True is what makes that widening real. With shuffle False the sampler takes the
+  # FIRST contiguous 256 slots of the window, which after widening would still be July-August
+  # only -- a narrower period than before, not a wider one.
+  #
+  # This does NOT make the validation curve noisy. MultiStreamDataSampler.reset() reseeds from
+  # the constant self.data_loader_rng_seed at the top of every mini epoch
+  # (multi_stream_data_sampler.py:306) before permuting, so the SAME 256 samples are drawn every
+  # epoch and the curve stays epoch-to-epoch comparable. The seed mutation at :941 applies only
+  # inside the forked worker copies and never reaches this permutation.
+  #
+  # NOT comparable with runs validated on the old 3-month window (lf97ve7d, ti7k7l5s, vpj2sbpa,
+  # o8m370eh, w1flta02, bif4t205 and earlier).
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 8
+    policy: "fixed"
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# cw6a4szu carries 8. Host RAM is the binding constraint (the trainer builds a train AND a val
+# DataLoader, each with num_workers, per rank). If workers get OOM-killed, drop to 6 then 4 via
+# --options data_loading.num_workers=N rather than editing this file.
+data_loading:
+  # 8. This stream set sustained 8 workers at the much heavier 8-step depth (run r2iy7iko),
+  # and a 2-step rollout reads a quarter of the per-sample target volume, so 8 is comfortable.
+  # NOTE cw6a4szu's IASI stream is METOP_ABC_IASI (17 channels); the fx276yn3 family uses
+  # METOP_IASI_PC (210 channels) and needs 6 workers instead -- that 12x channel difference,
+  # not the parent checkpoint, is what decides the ceiling. See run to4xs0gh, which died at 8.
+  num_workers: 6
+
+wgtags:
+  org: null
+  issue: null
+  exp: imerg_diag_mse_8step_2ep
+  grid: null
