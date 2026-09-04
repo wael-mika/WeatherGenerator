@@ -1,0 +1,87 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# IMERG as the ONLY output stream for the MTM-family decoder finetunes (parents j6nb50v9 and
+# ra1xax01, which share an identical stream set). The zarr has a single variable named 'tp'.
+#
+# THIS FAMILY'S config.py REPLACES the inherited streams. Unlike the fx276yn3/cw6a4szu
+# family, these snapshots DO carry the `base_config.streams = None` guard, so
+# `streams_directory` assigns the stream set outright instead of unioning with the
+# checkpoint's. Consequently this directory must declare EVERY stream the run needs -- the
+# 9 forcing inputs are dumped verbatim from the parent config into analysis/geos/avhrr/
+# synop.yml -- and the inherited ERA5 output stream is removed simply by not being here.
+# That is what makes IMERG the only target; no `reconstruct: false` or emptied channel
+# lists are needed (and `reconstruct` does not exist in this code anyway).
+#
+# stream_id 40 collides with none of the inherited ids (0, 1, 10-14, 20, 22, 30).
+#
+# DECODER SHAPE copied from the ERA5 output stream it replaces (embed_target_coords dim 512,
+# target_readout 4 layers / 4 heads, pred_head 1 layer): those are the hyperparameters this
+# family's now-frozen encoder and forecast engine were trained to be read by.
+#
+# max_num_targets 108416 is likewise ERA5's own value, so per-step decoder load matches what
+# these checkpoints already ran with. TRAINING-only: trainer.inference() forces it back to -1,
+# so evaluation still scores full N320 maps.
+
+IMERG_ANEMOI:
+  type: anemoi
+  filenames: [nasa-imerg-grib-n320-1998-2024-6h-v1.zarr]
+  stream_id: 40
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  # 135520 = 25% of the N320 grid (542080 points). MEASURED on a GH200, not guessed.
+  #
+  # The decoder wraps every one of its 12 blocks in torch.utils.checkpoint
+  # (engines.py:967-977, TargetPredictionEngineClassic -- which is what decoder_type
+  # "PerceiverIOCoordConditioning" actually selects, model.py:524-526). So it recomputes instead
+  # of storing per-layer activations, and memory scales with block boundaries, not internals.
+  # Measured marginal cost: 14.1 KiB per point-step, where point-steps = streams x targets x
+  # forecast steps. Linear across the whole range tested.
+  #
+  # Peak allocated at 3 streams x 8 forecast steps, against the 95 GiB card:
+  #     36139  (6.7%)  11.87 GiB decoder  -> ~35 GiB total   (the old value: 60 GiB wasted)
+  #     108416 (20%)   35.17 GiB          -> ~58 GiB
+  #     135520 (25%)   43.87 GiB          -> ~67 GiB   <-- this setting, ~28 GiB headroom
+  #     162624 (30%)   52.65 GiB          -> ~76 GiB   <-- next rung if this proves safe
+  #     180693 (33%)   58.42 GiB          -> ~82 GiB   too close to the edge
+  # The ~23 GiB non-decoder baseline is derived from run wx9bzx7q, which died with 86.32 GiB
+  # allocated while asking for 4.04 GiB more at 1 stream x 542080 x 8 steps; the same geometry
+  # measures 67.05 GiB of decoder, leaving ~23 GiB for frozen params, encoder/FE activations and
+  # optimizer state.
+  #
+  # WHY NOT PUSH FURTHER. The probe measures the decoder stack only. The real trainer also keeps
+  # per-point predictions, targets and coords across all steps for the loss, and those scale with
+  # this number too -- so the figures above are a LOWER bound on the N-scaling. 25% keeps enough
+  # room for the terms the probe does not capture.
+  #
+  # Splitting the budget across streams is cheaper than concentrating it: one stream at 542080
+  # costs 16.2 KiB per point-step against 14.1 KiB when the same total is split three ways,
+  # because the varlen attention transient follows the LARGEST single sequence.
+  #
+  # Training-only: Trainer.inference() forces max_num_targets back to -1 (trainer.py:397,403),
+  # so evaluation always scores the full 542080-point N320 map.
+  max_num_targets: 135520
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Precipitation cannot be negative. Applied to predictions only, in physical units, after
+  # denormalization (validation_io._apply_output_clamp). NOTE this is a CODE feature on
+  # develop-ssl-diffusion-v1; --from-run-id runs the PARENT snapshot's code, so for these MTM
+  # parents the key is simply ignored. Harmless, and correct if the run ever uses newer code.
+  output_clamp:
+    min: 0.0

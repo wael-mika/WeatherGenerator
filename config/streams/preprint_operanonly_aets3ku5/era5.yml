@@ -1,0 +1,176 @@
+# IMERG diagnostic-decoder stream set for the `aets3ku5_fix` backbone.
+#
+# Generated from that checkpoint's own stream directory
+# (config/streams/gjl6a0kb_reproduction_n320_new_channels_forecast_iasi_channels_mnt_cw/):
+# its nine forcing inputs verbatim, the diagnostic ERA5 output stream neutralised in era5.yml,
+# and IMERG_ANEMOI (stream_id 40) added as the only output.
+#
+# aets3ku5_fix's resolved stream set is BYTE-IDENTICAL to nhv6tkln_fix's and to cw6a4szu's --
+# every field of all ten streams compared equal, and all three name the same parent stream
+# directory -- so this directory is a verbatim copy of config/streams/imerg_diag_cw6a4szu/ with
+# only this header changed. In particular the diagnostic ERA5 stream carries
+# max_num_targets 108416 here, so imerg_anemoi.yml inherits the correct cap; that is NOT true of
+# the earlier f2esyc18_fix checkpoint, whose ERA5 stream said 542080.
+#
+# The per-file headers below were written for the cw6a4szu twin; every statement in them was
+# re-checked against aets3ku5_fix's saved config and holds unchanged.
+#
+# aets3ku5_fix's diagnostic ERA5 OUTPUT stream, carried over VERBATIM from its own stream dir
+# (gjl6a0kb_reproduction_n320_new_channels_forecast_iasi_channels_mnt_cw/era5.yml) except for the
+# emptied `target` list and the `reconstruct: false` line at the end.
+#
+# WHY THIS FILE EXISTS AT ALL. Leaving era5.yml out of this directory does NOT remove the stream:
+# `streams` is a dict, so the merge with the inherited checkpoint config UNIONS it and ERA5 comes
+# straight back with its decoder, adding a LossPhysical.ERA5.mse term next to IMERG and halving
+# IMERG's gradient (loss = loss / ctr_streams). This branch's config.py guards against that
+# (base_config.streams = None), but --from-run-id runs the PARENT SNAPSHOT's code, which predates
+# the guard. Diagnosed on the fx276yn3 twin in runs zk8jugvb and x5uptfho.
+#
+# Putting `streams: {ERA5: {reconstruct: false}}` in the finetune config does NOT work either:
+# _load_streams_in_config does `config.streams = load_streams(streams_directory)`, an ASSIGNMENT
+# that overwrites any explicit streams block in the same file before the merge happens. The
+# override has to live in the streams DIRECTORY, i.e. here.
+#
+# `reconstruct: false` removes the physical decoder (model.py consults
+# utils.is_stream_reconstructed at decoder construction). It is NOT marked forcing: that would
+# feed these 81 channels to the encoder as input, which this checkpoint never saw (ERA5 was
+# output-only, and ERA5_in already supplies the input).
+
+ERA5 :
+  type : anemoi
+  filenames : ['aifs-ea-an-oper-0001-mars-n320-1979-2024-1h-v2-with-era51.zarr']
+  stream_id : 1
+  # SOURCE emptied too, for the same reason the target side was. This stream is
+  # `diagnostic: True`, and masking.py:460-461 forces the source mask to
+  # torch.zeros(num_cells) for any diagnostic stream -- at BOTH stages, since
+  # is_stream_diagnostic(stream_cfg, stage) treats train and val symmetrically
+  # (utils.py:69-86). So these 81 channels never reached the encoder either: they were read
+  # from zarr and thrown away. That was 81 of 215 source channels, 38% of the per-sample
+  # anemoi read volume, for nothing.
+  #
+  # Emptying them is safe for the checkpoint. EmbeddingEngine gives every `diagnostic` stream
+  # `torch.nn.Identity()` and skips it (engines.py:55-56, :98), so ERA5 has NO source-embed
+  # weights in the checkpoint to mismatch, whatever the channel count. Precedent: IMERG_ANEMOI
+  # is a `type: anemoi`, `diagnostic: true` stream that already runs with an empty source list
+  # (verified resolved to [] in the live run ti7k7l5s).
+  #
+  # As with the target side, `source` alone is NOT enough -- the reader consults the
+  # pre-resolved stream_info[str(stage) + "_source_channels"] (data_reader_anemoi.py:113-114),
+  # which is stored in the checkpoint config and survives the merge. get_source() then does
+  # _get(idx, self.source_idx) (data_reader_base.py:388), so an empty source_idx is what
+  # actually stops the read. Both stages must be emptied explicitly.
+  source : []
+  train_source_channels : []
+  val_source_channels : []
+  # Targets emptied: with reconstruct:false this stream has no decoder and no loss term, so
+  # reading its 81 channels only burns host RAM -- 81 ch x 542080 pts x 4B x 8 steps =
+  # 1.41 GB per sample, ~11 GB across the dataloader workers, all discarded. That is what
+  # SIGKILLed a worker in the fx276yn3 twin run h4rw3fa7.
+  target : []
+  # AND the pre-resolved channel lists, which are what the reader ACTUALLY consults:
+  #     stream_info.get(str(stage) + "_target_channels")   (data_reader_anemoi.py:117-122)
+  # Those are stored in the checkpoint config (81 channels here) and survive the merge
+  # independently of `target`, so emptying `target` alone changed nothing -- runs e7dltovv and
+  # efc7zcfy still logged all 81 ERA5 target channels. Both stages must be emptied explicitly.
+  train_target_channels : []
+  val_target_channels : []
+  geoinfo_channels : ['z', 'lsm', 'slor', 'sdor', 'insolation', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day', 'cos_latitude', 'sin_latitude', 'cos_longitude', 'sin_longitude']
+  loss_weight : 1.
+  location_weight : cosine_latitude
+  token_size : 32
+  tokenize_spacetime : False
+  max_num_targets: 108416
+  diagnostic: True
+  embed : 
+    net : transformer
+    num_tokens : 1
+    num_heads : 4
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords :
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 4
+    num_heads : 4
+  pred_head :
+    ens_size : 1
+    num_layers : 1
+  target_channel_weights: null
+  channel_weights :
+    2t : 10.0
+    10u : 2.0
+    10v : 2.0
+    q_10: 1.0
+    q_50: 1.0
+    q_100: 1.0
+    q_150: 1.0
+    q_200: 1.0
+    q_250: 1.0
+    q_300: 1.0
+    q_400: 1.0
+    q_500: 1.0
+    q_600: 1.0
+    q_700: 1.0
+    q_850: 1.0
+    q_925: 1.0
+    q_1000: 1.0
+    t_10: 5.0
+    t_50: 5.0
+    t_100: 5.0
+    t_150: 5.0
+    t_200: 5.0
+    t_250: 5.0
+    t_300: 5.0
+    t_400: 5.0
+    t_500: 5.0
+    t_600: 5.0
+    t_700: 5.0
+    t_850: 5.0
+    t_925: 5.0
+    t_1000: 5.0
+    u_10: 1.0
+    u_50: 1.0
+    u_100: 1.0
+    u_150: 1.0
+    u_200: 1.0
+    u_250: 1.0
+    u_300: 1.0
+    u_400: 1.0
+    u_500: 1.0
+    u_600: 1.0
+    u_700: 1.0
+    u_850: 1.0
+    u_925: 1.0
+    u_1000: 1.0
+    v_10: 1.0
+    v_50: 1.0
+    v_100: 1.0
+    v_150: 1.0
+    v_200: 1.0
+    v_250: 1.0
+    v_300: 1.0
+    v_400: 1.0
+    v_500: 1.0
+    v_600: 1.0
+    v_700: 1.0
+    v_850: 1.0
+    v_925: 1.0
+    v_1000: 1.0
+    z_10: 10.0
+    z_50: 10.0
+    z_100: 10.0
+    z_150: 10.0
+    z_200: 10.0
+    z_250: 10.0
+    z_300: 10.0
+    z_400: 10.0
+    z_500: 10.0
+    z_600: 10.0
+    z_700: 10.0
+    z_850: 10.0
+    z_925: 10.0
+    z_1000: 10.0
+
+  # See header: disables the physical decoder for this stream.
+  reconstruct: false

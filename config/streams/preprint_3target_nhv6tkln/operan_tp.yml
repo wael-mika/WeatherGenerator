@@ -1,0 +1,102 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# OPERAN precipitation as a DIAGNOSTIC OUTPUT stream (preprint multi-target experiment).
+#
+# WHAT THIS IS. The ECMWF operational analysis on the model's own N320 grid, 6-hourly, single
+# channel `tp`. Store aifs-od-an-oper-0001-mars-n320-2016-2025-6h-v1-for-single-v2.zarr covers
+# 2016-01-01T00 .. 2025-07-31T18, i.e. the whole 2016-2022 training window, the 2023 validation
+# window and the 2023 test window, with no gap at either end.
+#
+# `type: anemoi`, NOT `anemoi_operan`. The operan reader exists to simulate INPUT latency: it
+# rewrites each timestamp through `nominal_time_mapping` and then keeps only the single latest
+# record that would really have been available at the input cut-off
+# (data_reader_anemoi_operan.py:118-128). That is exactly right for a forcing stream and exactly
+# wrong for a target, which must be the analysis VALID AT the verification time. The forcing copy
+# of this store is still read through `anemoi_operan` in analysis.yml; this file is a separate
+# stream with its own id and its own decoder.
+#
+# UNITS. tp is in METRES accumulated over the 6 h window -- the same convention and, importantly,
+# the same accumulation period as IMERG (mean 0.741 mm/6h, stdev 2.60 mm/6h here against IMERG's
+# 0.676 / 3.26). So OPERAN_TP and IMERG_ANEMOI are directly comparable quantities. ERA5_TP is
+# NOT -- see the header of era5_tp.yml.
+#
+# stream_id 41: 40 is IMERG_ANEMOI, 42 is ERA5_TP, and none of the inherited forcing streams
+# uses anything above 30.
+#
+# DECODER SHAPE IS IDENTICAL TO IMERG_ANEMOI's, deliberately. Both read the same N320 grid and
+# emit one channel, so giving them the same embed / embed_target_coords / target_readout /
+# pred_head makes the per-target comparison a comparison of the TARGET, not of decoder capacity.
+#
+# This stream does not exist in any of the four pretrained checkpoints, so its decoder is created
+# fresh and loads no weights (model_interface loads with strict=False). It is therefore trainable
+# under every backbone's freeze regex -- but see the f7ug724z configs for the `.*ERA5.*` trap that
+# does bite ERA5_TP.
+
+OPERAN_TP:
+  type: anemoi
+  filenames: [aifs-od-an-oper-0001-mars-n320-2016-2025-6h-v1-for-single-v2.zarr]
+  stream_id: 41
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+
+  # 135520 = 25% of the N320 grid (542080 points). MEASURED on a GH200, not guessed.
+  #
+  # The decoder wraps every one of its 12 blocks in torch.utils.checkpoint
+  # (engines.py:967-977, TargetPredictionEngineClassic -- which is what decoder_type
+  # "PerceiverIOCoordConditioning" actually selects, model.py:524-526). So it recomputes instead
+  # of storing per-layer activations, and memory scales with block boundaries, not internals.
+  # Measured marginal cost: 14.1 KiB per point-step, where point-steps = streams x targets x
+  # forecast steps. Linear across the whole range tested.
+  #
+  # Peak allocated at 3 streams x 8 forecast steps, against the 95 GiB card:
+  #     36139  (6.7%)  11.87 GiB decoder  -> ~35 GiB total   (the old value: 60 GiB wasted)
+  #     108416 (20%)   35.17 GiB          -> ~58 GiB
+  #     135520 (25%)   43.87 GiB          -> ~67 GiB   <-- this setting, ~28 GiB headroom
+  #     162624 (30%)   52.65 GiB          -> ~76 GiB   <-- next rung if this proves safe
+  #     180693 (33%)   58.42 GiB          -> ~82 GiB   too close to the edge
+  # The ~23 GiB non-decoder baseline is derived from run wx9bzx7q, which died with 86.32 GiB
+  # allocated while asking for 4.04 GiB more at 1 stream x 542080 x 8 steps; the same geometry
+  # measures 67.05 GiB of decoder, leaving ~23 GiB for frozen params, encoder/FE activations and
+  # optimizer state.
+  #
+  # WHY NOT PUSH FURTHER. The probe measures the decoder stack only. The real trainer also keeps
+  # per-point predictions, targets and coords across all steps for the loss, and those scale with
+  # this number too -- so the figures above are a LOWER bound on the N-scaling. 25% keeps enough
+  # room for the terms the probe does not capture.
+  #
+  # Splitting the budget across streams is cheaper than concentrating it: one stream at 542080
+  # costs 16.2 KiB per point-step against 14.1 KiB when the same total is split three ways,
+  # because the varlen attention transient follows the LARGEST single sequence.
+  #
+  # Training-only: Trainer.inference() forces max_num_targets back to -1 (trainer.py:397,403),
+  # so evaluation always scores the full 542080-point N320 map.
+  max_num_targets: 135520
+
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Precipitation cannot be negative. Applied to PREDICTIONS ONLY, in physical units, after
+  # denormalization (validation_io._apply_output_clamp), so the training loss -- computed in
+  # normalized space -- is untouched and targets are never clamped.
+  #
+  # Must NOT be done as pred_head.final_activation: the head emits NORMALIZED values and physical
+  # zero sits at normalized -(mean/stdev) = -0.285 for this store, so a relu head would floor the
+  # output at 0.741 mm/6h everywhere and make "dry" unpredictable.
+  output_clamp:
+    min: 0.0

@@ -1,0 +1,54 @@
+# IMERG diagnostic-decoder stream set for the `nhv6tkln_fix` backbone.
+#
+# Generated from that checkpoint's own stream directory
+# (config/streams/gjl6a0kb_reproduction_n320_new_channels_forecast_iasi_channels_mnt_cw/):
+# its nine forcing inputs verbatim, the diagnostic ERA5 output stream neutralised in era5.yml,
+# and IMERG_ANEMOI (stream_id 40) added as the only output.
+#
+# nhv6tkln_fix's resolved stream set is BYTE-IDENTICAL to cw6a4szu's -- every field of all ten
+# streams compared equal -- and it names the same parent stream directory, so this directory is a
+# verbatim copy of config/streams/imerg_diag_cw6a4szu/ with only this header changed.
+# The per-file headers below were written for the cw6a4szu twin; every statement in them was
+# re-checked against nhv6tkln_fix's saved config and holds unchanged.
+#
+# # (C) Copyright 2024 WeatherGenerator contributors.
+# #
+# # This software is licensed under the terms of the Apache Licence Version 2.0
+# # which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+# #
+# # In applying this licence, ECMWF does not waive the privileges and immunities
+# # granted to it by virtue of its status as an intergovernmental organisation
+# # nor does it submit to any jurisdiction.
+
+SurfaceCombined :
+  type : obs
+  stream_id : 30
+  filenames : ['observations-ea-ofb-0001-1979-2025-combined-surface-v5.zarr']
+  # filenames : ['observations-ea-ofb-0001-1979-2023-combined-surface-v2.zarr']
+  # filenames : ['observations-ea-ofb-0001-1979-2022-combined-surface-v5-fixed-land-spatial80-min1km-lat60S70N-lsm09-min10.zarr', 'observations-ea-ofb-0001-2023-combined-surface-v5-fixed-land-heldout20-min1km-lat60S70N-lsm09-min10.zarr']
+  source: ['obsvalue_tsts_0', 'obsvalue_t2m_0', 'obsvalue_td2m_0', 'obsvalue_u10m_0', 'obsvalue_v10m_0', 'obsvalue_pmsl_0', 'obsvalue_ps_0']
+  target: ['obsvalue_tsts_0', 'obsvalue_t2m_0', 'obsvalue_td2m_0', 'obsvalue_u10m_0', 'obsvalue_v10m_0', 'obsvalue_pmsl_0', 'obsvalue_ps_0']
+  geoinfo_channels : ['stalt', 'lsm', 'cos_sza', 'cos_local_time', 'sin_local_time', 'cos_julian_day', 'sin_julian_day']
+  loss_weight : 1.0
+  token_size : 256
+  tokenize_spacetime : False
+  max_num_targets: -1
+  # diagnostic: True
+  forcing: True
+  embed : 
+    net : transformer
+    num_tokens : 1
+    num_heads : 2
+    dim_embed : 512
+    num_blocks : 2
+  embed_target_coords : 
+    net : linear
+    dim_embed : 512
+  target_readout :
+    num_layers : 1
+    num_heads : 4
+    self_attention: False
+    mlp_hidden_factor: 1
+  pred_head : 
+    ens_size : 1
+    num_layers : 1

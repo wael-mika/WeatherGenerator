@@ -1,0 +1,47 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# GOES_ABI_IR: input-only (forcing) stream reproduced VERBATIM from the
+# saved config of pretrained run f7ug724z
+# (/e/scratch/weatherai/shared_work/models/f7ug724z/model_f7ug724z_latest.json),
+# minus runtime-derived keys. Do not edit by hand -- regenerate from the
+# checkpoint config if the source run changes.
+
+GOES_ABI_IR:
+# IMERG-ONLY OVERRIDE (added after generation, do not drop when regenerating):
+# this parent RECONSTRUCTS its input streams -- the saved config resolves non-empty
+# train_target_channels/val_target_channels for 8-10 streams. gen_stream_dir.py strips those
+# runtime-derived keys, and an ABSENT `target` means "select every channel"
+# (data_reader_anemoi.select_channels: `... if channels is not None else True`;
+# data_reader_obs.select_channels is identical), so the stream would be reconstructed again.
+# An EXPLICIT empty list selects nothing -- np.array([]).any() is False -- which is what makes
+# IMERG the sole target. Emptying `target` alone is sufficient HERE only because these _fix
+# snapshots REPLACE the streams dict (config.py `base_config.streams = None`); under a union
+# merge the resolved lists survive from the checkpoint and must be emptied too.
+  target: []
+  target_exclude: []
+  type: obs
+  stream_id: 11
+  filenames: [observations-file-2017-2024-abi-goes16-IR-o256-v2.zarr]
+  geoinfo_channels: [cos_local_time, sin_local_time, cos_julian_day, sin_julian_day, zenith, cos_sza]
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  masking_override:
+    model_input:
+      masking_strategy: random
+      masking_strategy_config: {rate: 1.0}
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  forcing: true
+  embed: {net: linear}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {num_layers: 2, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+  target_channel_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
