@@ -18,6 +18,20 @@
 # never starts before the run it reads from has finished. The ids are printed once per stage at
 # submit time in the "Resolved parameters for stage '<name>'" block -- hence the `| tee`.
 #
+# WALLTIME IS MEASURED, NOT ESTIMATED (2026-09-04). Stage 1 costs ~67 min per mini epoch at
+# 2 forecast steps on 2 nodes -- measured from the checkpoint mtimes of run xdr87pab:
+# chkpt00000 10:20:52, chkpt00001 11:27:36, chkpt00002 12:34:48, i.e. 66m44s and 67m12s.
+# 16 mini epochs therefore need ~18 h of training, plus ~11 min of uv sync / model load per job.
+#   stage 1: chain_jobs 3 x 8 h = 24 h capacity against ~18 h needed.
+#   stage 2: chain_jobs 3 x 12 h = 36 h capacity. An 8-step mini epoch has NOT been measured yet;
+#            if it costs 2-3x a 2-step one, 8 of them need 18-27 h, so 2 x 12 h would have been
+#            marginal and 3 x 12 h is the safe choice until there is a measurement.
+#
+# GETTING THIS WRONG IS NOT MERELY SLOW. Stage 2 pins `mini_epoch: 15` and stage 3 pins
+# `mini_epoch: 7`; if a training stage runs out of wall time before writing that numbered
+# checkpoint, the next stage dies with FileNotFoundError and -- because every dependency is
+# `afterany` -- the rest of the pipeline runs and fails behind it.
+#
 # WHY `mini_epoch: 15` ON STAGE 2 / `mini_epoch: 7` ON STAGE 3
 #   Stage 1 runs 16 mini epochs, so `chkpt00015` is its final, fully-cooled-down state; stage 2
 #   runs 8, so `chkpt00007` is its. The launcher defaults to -1 -> `<run>_latest.chkpt`, which
@@ -46,10 +60,7 @@
 # `--exclusive --mem=450G` with no --mem override -- exactly the configuration the inference runs
 # that completed used.
 #
-# BOTH TRAINING STAGES RUN `chain_jobs: 2`, so each gets two sequential slurm jobs and twice the
-# walltime it asks for: 2 x 8 h for stage 1 and 2 x 12 h for stage 2, against the ~12 h and ~24 h
-# scaled from the proven runs (8 h covered 8 mini epochs at 2 steps, and 2 mini epochs at 8).
-# Shorter individual jobs also queue sooner than one long one.
+# BOTH TRAINING STAGES RUN `chain_jobs: 3` -- see the measured walltime note above.
 #
 # CHAINING IS SAFE HERE, and the `mini_epoch` pins above still work:
 #   - all jobs in a chain share ONE run_id (launch-slurm.py:468-470), so `STAGE.<name>` and
@@ -82,7 +93,7 @@ stages:
     config_files:
       - config/preprint_config/config_preprint_3target_aets3ku5_2step_16ep.yml
     nodes: 2
-    chain_jobs: 2
+    chain_jobs: 3
     slurm_args:
       - "--time=08:00:00"
 
@@ -93,7 +104,7 @@ stages:
     config_files:
       - config/preprint_config/config_preprint_3target_aets3ku5_8step_8ep.yml
     nodes: 2
-    chain_jobs: 2
+    chain_jobs: 3
     slurm_args:
       - "--time=12:00:00"
 

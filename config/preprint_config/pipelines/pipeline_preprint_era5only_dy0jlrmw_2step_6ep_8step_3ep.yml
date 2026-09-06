@@ -1,0 +1,114 @@
+# PREPRINT era5only -- backbone `dy0jlrmw_wmfix` -- 2 steps x 6 mini epochs, then 8 steps x 3.
+#
+# A shorter-curriculum variant of pipeline_preprint_era5only_dy0jlrmw.yml (which runs 2 steps x 16 then
+# 8 steps x 8). Same target stream, same inference geometry and the same two-pass evaluation, so
+# the runs stay comparable with the rest of the era5only arm.
+#
+#   1. train2s6ep  2 forecast steps, 6 mini epochs, from `dy0jlrmw_wmfix`
+#   2. train8s3ep  8 forecast steps, 3 mini epochs, from stage 1 at chkpt00005
+#   3. infer3month  3 months of initialisations at 40 forecast steps (+240 h)
+#   4. evalscores   scoring pass over all 364 shared inits, every plot switch off
+#   5. evalevents   Doksuri and Daniel, with maps / bias / histograms / mp4 animations
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/preprint_config/pipelines/pipeline_preprint_era5only_dy0jlrmw_2step_6ep_8step_3ep.yml | tee launch_era5only_dy0jlrmw_2step_6ep.log
+#
+# CHECKPOINT PINS. Stage 1 runs 6 mini epochs, so its final state is `chkpt00005`; stage 2 runs
+# 3, so its final state is `chkpt00002`. The launcher's default of -1 means `<run>_latest.chkpt`,
+# which train() rewrites every 250 batches and is NOT that state. `dy0jlrmw_wmfix` itself ships only
+# `_latest.chkpt`, so stage 1 correctly takes the default and pins nothing.
+#
+# WALLTIME. Measured rates per mini epoch on 2 nodes: 2 steps ~67 min, 8 steps ~113 min on the
+# nhv6tkln lineage but ~227 min on the cw6a4szu lineage (an unexplained environmental difference,
+# not a config one). 4 steps is not measured; ~82 min is the interpolation.
+#   stage 1 estimate ~6.7 h, stage 2 estimate ~5.7 h.
+# chain_jobs 3 gives 24 h and 36 h respectively -- enough even if these land on the slow side and
+# take twice the estimate. A surplus chained job is harmless: with istep already at
+# num_mini_epochs the training range is empty and it exits in seconds without writing checkpoints.
+#
+# A TRAINING STAGE RUNNING OUT OF TIME IS A PIPELINE-KILLER, NOT A SLOWDOWN. Stage 2 pins
+# `mini_epoch: 5` and inference pins `mini_epoch: 2`; if a numbered checkpoint is never written
+# the next stage dies with FileNotFoundError and, because every dependency is `afterany`, the rest
+# of the chain runs and fails behind it. That is how pipeline qljz42id was lost on 2026-09-05.
+# To extend a running stage instead of losing it, submit another train_continue with the SAME
+# run id and repoint BOTH the next stage and that stage's cleanup job with `scontrol update`.#
+# dy0jlrmw COMES FROM A DIFFERENT FAMILY than nhv6tkln/aets3ku5: its saved streams_directory is
+# `streams_preprint/era5_georing_avhrr_synop_lowres_linear/`, its live loss block is `physical`
+# (not `forecast`), and its own freeze regex contains `.*ERA5.*`, which re.fullmatch also matches
+# against `pred_heads.ERA5_TP`. The configs narrow it to `.*\.ERA5|.*\.ERA5\..*`; in the
+# era5only arm ERA5_TP is the ONLY trainable decoder, so the original pattern would have trained
+# nothing at all while still writing checkpoints.
+#
+# THE PARENT IS `dy0jlrmw_wmfix`, NOT `dy0jlrmw`. The weight files under models/dy0jlrmw/ (and
+# /dy0jlrmw_fix/, /f7ug724z/, /f7ug724z_fix/) were deleted around 2026-09-04 -- only the
+# model_*_latest.json configs remain. `dy0jlrmw_wmfix` is the same run: identical istep (12752),
+# identical run_history and streams_directory, weights intact. f7ug724z has no surviving copy,
+# which is why it has no pipeline here.
+#
+# PARENT IS `dy0jlrmw_wmfix`, NOT `dy0jlrmw_jup`. launch-slurm takes the CODE for a stage from the
+# PARENT'S slurm snapshot (`slurm_weathergen_<parent>_dir/WeatherGenerator`); only `config/**` is
+# overlaid from the working tree (launch-slurm.py:1266-1273). `dy0jlrmw_jup`'s snapshot predates
+# the aliased-module fix in model_interface.load_model -- it still does `all_modules[path]` rather
+# than `.get(path)` plus the alias guard -- so every rank died with
+#     KeyError: 'target_token_engines.OPERAN_TP.tte.5.lnorm.embed_aux.0'
+# MLP registers its norm as BOTH `.lnorm` and `.layers.0`; named_modules() deduplicates that, so
+# the old code indexed a key that is absent. Runs mpz6e3rq and vkhy3jpa were lost this way.
+# `dy0jlrmw_wmfix` is the SAME checkpoint (byte-identical weights, istep 12752) seeded with a
+# CURRENT source snapshot -- the same thing nhv6tkln_fix and aets3ku5_fix are.
+#####################################
+
+stages:
+  - name: train2s6ep
+    stage: train
+    from_run_id: dy0jlrmw_wmfix
+    config_files:
+      - config/preprint_config/config_preprint_era5only_dy0jlrmw_2step_6ep.yml
+    nodes: 2
+    chain_jobs: 3
+    slurm_args:
+      - "--time=08:00:00"
+
+  - name: train8s3ep
+    stage: train
+    from_run_id: STAGE.train2s6ep
+    mini_epoch: 5
+    config_files:
+      - config/preprint_config/config_preprint_era5only_dy0jlrmw_8step_3ep.yml
+    nodes: 2
+    chain_jobs: 3
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[ERA5_TP]"
+      - "data_loading.num_workers=2"
+
+  - name: evalscores
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_era5only_scores.yml
+    slurm_args:
+      - "--time=03:00:00"
+
+  - name: evalevents
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_era5only_events.yml
+    slurm_args:
+      - "--time=01:00:00"

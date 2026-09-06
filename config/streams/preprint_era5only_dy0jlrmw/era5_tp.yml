@@ -1,0 +1,107 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# ERA5 precipitation as a DIAGNOSTIC OUTPUT stream (preprint multi-target experiment).
+#
+# ##################################################################################
+# # READ THIS FIRST: ERA5 tp IS NOT THE SAME QUANTITY AS IMERG tp OR OPERAN tp.    #
+# ##################################################################################
+#
+# The only N320 ERA5 store available is
+# aifs-ea-an-oper-0001-mars-n320-1979-2024-1h-v2-with-era51.zarr, which is 1-HOURLY, and its `tp`
+# is the 1-HOUR accumulation: mean 0.000120 m, stdev 0.000480 m. IMERG and OPERAN tp are 6-HOUR
+# accumulations (mean 0.000676 and 0.000741 m). The three means agree once put on a common basis
+# (0.120 x 24 = 2.9 mm/day; 0.676 x 4 = 2.7; 0.741 x 4 = 3.0), which confirms the reading.
+#
+# `frequency: 06:00:00` below subsamples the store to 00/06/12/18 UTC. anemoi's `frequency`
+# SELECTS every Nth record, it does not aggregate, so what this stream serves is the 1-hour
+# accumulation ENDING at the nominal time -- roughly one sixth of the water that fell in the
+# 6 h window IMERG and OPERAN report, and a different statistic (an instantaneous-ish rate rather
+# than a window total).
+#
+# WITHOUT `frequency` IT IS WORSE, NOT BETTER: the 6 h window would pull all six hourly records,
+# giving 6 x 542080 target points per step -- a 6x decoder blow-up on top of the 3x from having
+# three target streams. The setting is required.
+#
+# WHAT THIS MEANS FOR THE EXPERIMENT. As an AUXILIARY multi-task signal this is fine: each stream
+# is normalized by its own statistics, so the ERA5_TP head simply learns its own target. What it
+# is NOT is an ERA5-vs-IMERG precipitation comparison -- the two heads predict different
+# quantities and their scores must never be put on the same axis. If the preprint needs a
+# like-for-like third target, the fix is a 6h-accumulated N320 ERA5 store, which does not exist
+# yet; OPERAN_TP is the like-for-like comparison that IS available today.
+#
+# stream_id 42. Note the NAME: `ERA5_TP`, not `ERA5`. The inherited ERA5 output stream keeps
+# id 1 and stays neutralised in era5.yml; this is a separate, newly created stream.
+#
+# THE NAME COLLIDES WITH f7ug724z's FREEZE REGEX. That backbone's freeze_modules contains
+# `.*ERA5.*`, and apply_fct_to_blocks does re.fullmatch against MODULE names
+# (model/utils.py:56-60), so `pred_heads.ERA5_TP` matches and the head would be frozen at its
+# random initialisation and never trained. The f7ug724z preprint configs therefore narrow that
+# term to `.*\.ERA5|.*\.ERA5\..*`. The other three backbones have no ERA5 term and are unaffected.
+
+ERA5_TP:
+  type: anemoi
+  filenames: [aifs-ea-an-oper-0001-mars-n320-1979-2024-1h-v2-with-era51.zarr]
+  stream_id: 42
+
+  # REQUIRED -- see header. Subsamples the 1-hourly store to the model's 6 h cadence.
+  # data_reader_anemoi.py:69-71 forwards this to anemoi_datasets.open_dataset(frequency=...).
+  frequency: 06:00:00
+
+  source: []
+  source_exclude: []
+  target: [tp]
+  target_exclude: []
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+
+  # 135520 = 25% of the N320 grid (542080 points). MEASURED on a GH200, not guessed.
+  #
+  # The decoder wraps every one of its 12 blocks in torch.utils.checkpoint
+  # (engines.py:967-977, TargetPredictionEngineClassic -- which is what decoder_type
+  # "PerceiverIOCoordConditioning" actually selects, model.py:524-526). So it recomputes instead
+  # of storing per-layer activations, and memory scales with block boundaries, not internals.
+  # Measured marginal cost: 14.1 KiB per point-step, where point-steps = streams x targets x
+  # forecast steps. Linear across the whole range tested.
+  #
+  # Peak allocated at 3 streams x 8 forecast steps, against the 95 GiB card:
+  #     36139  (6.7%)  11.87 GiB decoder  -> ~35 GiB total   (the old value: 60 GiB wasted)
+  #     108416 (20%)   35.17 GiB          -> ~58 GiB
+  #     135520 (25%)   43.87 GiB          -> ~67 GiB   <-- this setting, ~28 GiB headroom
+  #     162624 (30%)   52.65 GiB          -> ~76 GiB   <-- next rung if this proves safe
+  #     180693 (33%)   58.42 GiB          -> ~82 GiB   too close to the edge
+  # The ~23 GiB non-decoder baseline is derived from run wx9bzx7q, which died with 86.32 GiB
+  # allocated while asking for 4.04 GiB more at 1 stream x 542080 x 8 steps; the same geometry
+  # measures 67.05 GiB of decoder, leaving ~23 GiB for frozen params, encoder/FE activations and
+  # optimizer state.
+  #
+  # WHY NOT PUSH FURTHER. The probe measures the decoder stack only. The real trainer also keeps
+  # per-point predictions, targets and coords across all steps for the loss, and those scale with
+  # this number too -- so the figures above are a LOWER bound on the N-scaling. 25% keeps enough
+  # room for the terms the probe does not capture.
+  #
+  # Splitting the budget across streams is cheaper than concentrating it: one stream at 542080
+  # costs 16.2 KiB per point-step against 14.1 KiB when the same total is split three ways,
+  # because the varlen attention transient follows the LARGEST single sequence.
+  #
+  # Training-only: Trainer.inference() forces max_num_targets back to -1 (trainer.py:397,403),
+  # so evaluation always scores the full 542080-point N320 map.
+  max_num_targets: 135520
+
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Physical zero sits at normalized -(mean/stdev) = -0.251 for this store.
+  output_clamp:
+    min: 0.0

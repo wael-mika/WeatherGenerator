@@ -1,0 +1,96 @@
+# PREPRINT 3-TARGET (IMERG + OPERAN + ERA5, tp only) -- cw6a4szu -- RESUME PIPELINE.
+#
+# WHY THIS FILE EXISTS. The original pipeline `qljz42id` died on 2026-09-05: its 2-step stage
+# (`v43l9geb`) ran all three chained 8 h jobs to TIMEOUT and wrote chkpt00000..chkpt00014 -- 15 of
+# the 16 mini epochs. Its last checkpoint landed 10:48 and the next was due ~12:12, but part3 timed
+# out at 11:45, so it finished **27 minutes short of chkpt00015**. Stage 2 (`rj177eai`) then died
+# in 77 s with `FileNotFoundError: v43l9geb_chkpt00015.chkpt`, and because every dependency is
+# `afterany`, inference (`zb2lrehq`) and both evaluation stages (`mf0w36y9`, `oidcd080`) ran and
+# FAILED behind it.
+#
+# THE 2-STEP TRAINING IS NOT REPEATED. `v43l9geb` completed 15 of 16 mini epochs with a fully
+# converged loss curve, so this pipeline starts from `v43l9geb` at **chkpt00014** and picks up at
+# the 8-step stage. That is one mini epoch short of the other arms (which reached chkpt00015 /
+# chkpt00016), a difference worth stating in the paper but far cheaper than redoing ~22 h of
+# training. To redo it properly instead, run the ORIGINAL pipeline with `chain_jobs: 4` on stage 1.
+#
+# WHY IT RAN OUT WHEN THE OTHER ARMS DID NOT. Measured from checkpoint mtimes, the 3-target 2-step
+# stage costs **84 min per mini epoch** against **67 min** for the single-target arms -- the extra
+# two decoders. 16 x 84 min = 22.4 h plus ~11 min of uv sync / model load per chained job, against
+# the 24 h that 3 x 8 h provides. It was always going to be marginal; 4 x 8 h or 3 x 12 h is not.
+#
+# STAGE 2 GETS `chain_jobs: 3`. The 8-step rate for the 3-target arm has NOT been measured. The
+# single-target 8-step arms measure 113 min/mini epoch (nhv6tkln) and 227 min/mini epoch
+# (cw6a4szu -- unexplained, and this run is on the slow cw6a4szu side). At 227 min x 8 mini epochs
+# that is 30.3 h, which 2 x 12 h would NOT cover; 3 x 12 h = 36 h does. If the 3-target decoders
+# make it slower still, extend it in place rather than letting it time out -- see below.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/preprint_config/pipelines/pipeline_preprint_3target_cw6a4szu_resume.yml | tee launch_3target_cw6a4szu_resume.log
+#
+# HOW TO EXTEND A RUNNING STAGE rather than lose the pipeline (this is what saved the other four):
+#   1. sbatch another train_continue with the SAME run id, depending on the current last part:
+#        --export=WEATHERGEN_HOME=<copydir>,RUN_ID=<r>,FROM_RUN_ID=<r>,HOME=$HOME,MODULEPATH,
+#                 LMOD_ROOT,WEATHERGEN_BASE_CONFIG=,WEATHERGEN_CONFIG_EXTRA=,
+#                 WEATHERGEN_MINI_EPOCH=-1,WEATHERGEN_STAGE=train_continue,WEATHERGEN_NSYS_PROFILING=0
+#        run from <copydir>, script <copydir>/../WeatherGenerator-private/hpc/santis/weathergen_slurm.sh
+#   2. Repoint BOTH the next stage and that stage's cleanup job:
+#        scontrol update jobid=<next stage part1> dependency=afterany:<new job>
+#        scontrol update jobid=<stage cleanup>    dependency=afterany:<new job>
+#   Copy the exact sbatch parameters off an existing part with `scontrol show job <id>`.
+#
+# A TRAINING STAGE RUNNING OUT OF TIME IS A PIPELINE-KILLER, NOT A SLOWDOWN: stage 1 below pins
+# `mini_epoch: 7` for inference, and if that numbered checkpoint is never written the rest of the
+# chain runs and fails behind it, exactly as qljz42id did.
+#
+# Everything else -- inference geometry, the two-pass evaluation, the case-study samples -- is
+# identical to the original pipeline, so this run stays comparable with the other arms.
+#####################################
+
+stages:
+  - name: train8s8ep
+    stage: train
+    # NOT `STAGE.<name>`: this pipeline has no 2-step stage. It names the dead pipeline's 2-step
+    # run explicitly, at its LAST written checkpoint (14, not 15 -- see the header).
+    from_run_id: v43l9geb
+    mini_epoch: 14
+    config_files:
+      - config/preprint_config/config_preprint_3target_cw6a4szu_8step_8ep.yml
+    nodes: 2
+    chain_jobs: 3
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s8ep
+    nodes: 2
+    mini_epoch: 7
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI,OPERAN_TP,ERA5_TP]"
+      - "data_loading.num_workers=2"
+
+  - name: evalscores
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_3target_scores.yml
+    slurm_args:
+      - "--time=03:00:00"
+
+  - name: evalevents
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_3target_events.yml
+    slurm_args:
+      - "--time=01:00:00"

@@ -72,7 +72,16 @@ evaluation:
     - rmse
     - mae
     - bias
-    - seeps              # IMERG only in practice -- see the per-stream climatology notes below
+    # seeps REMOVED. needs_climatology() returns True for seeps (clim_utils.py:278), which makes
+    # get_climatology() run for ERA5_TP -- and _get_climatology_filename AUTO-RESOLVES
+    # <store>_climatology.zarr from the stream filename, finding
+    #   assets/climatology/aifs-ea-an-oper-0001-mars-n320-1979-2024-1h-v2-with-era51_climatology.zarr
+    # That store contains only .zattrs/.zgroup -- no data arrays -- so align_clim_data dies with
+    #   AttributeError: 'Dataset' object has no attribute 'latitude'
+    # and the whole evaluation is lost (run h8j8mrpg, job 847082). There is no usable N320
+    # climatology for ERA5 tp, and SEEPS is a dry/light/heavy category score defined against IMERG's
+    # climatology anyway, so it is not meaningful for a 1-hour ERA5 accumulation. Dropping it makes
+    # needs_climatology() False and skips the whole path.
   summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/preprint_era5only/summary/"
   summary_plots: true
   ratio_plots: false

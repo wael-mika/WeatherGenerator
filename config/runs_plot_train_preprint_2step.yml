@@ -1,0 +1,66 @@
+# Training loss curves for the preprint 2-step (`train2s16ep`, 16 mini epochs)
+# finetunes across the operanonly / era5only / 3target arms.
+# Run ids taken from playground/preprint_run_ids.md (generated 2026-09-05).
+#
+# Run:
+# uv run plot_train -fy config/runs_plot_train_preprint_2step.yml \
+#   -o ./plots/preprint_2step_losses/ --legend-outside
+#
+# Notes:
+# - v43l9geb (3target:cw6a4szu) TIMEOUT'd ~27 min short of its final mini epoch
+#   (see "Dead runs" in preprint_run_ids.md), but its logged loss curve through
+#   chkpt00014 (15 of 16 mini epochs) is still valid for this plot.
+# - 3target:nhv6tkln, and the f7ug724z / aets3ku5 backbones for all three arms,
+#   had not been launched as of 2026-09-05 (see "Not launched" in preprint_run_ids.md).
+
+train:
+  plot:
+    # xqlk2nkf:
+    #   description: "IMERG:cw6a4szu"
+    # xdr87pab:
+    #   description: "operanonly:cw6a4szu"
+    # d7hq7uel:
+    #   description: "era5only:cw6a4szu"
+    # v43l9geb:
+    #   description: "3target:cw6a4szu"
+    # fzy7zjok:
+    #   description: "operanonly:nhv6tkln"
+    # kefgknyf:
+    #   description: "operanonly:nhv6tkln 4 steps"   
+    # t19lpgjj:
+    #   description: "era5only:nhv6tkln"
+    # nwxnqqu3:
+    #   description: "era5only:nhv6tkln 4 steps"
+    # auosbrds:
+    #   description: "operanonly:aets3ku5"
+    # g6899cx7:
+    #   description: "era5only:aets3ku5"
+    # xytntehs:
+    #   description: "operanonly:dy0jlrmw"
+    # x49v08g3:
+    #   description: "era5only:dy0jlrmw"
+### 8 Steps
+    jqtfi8kv:
+      description: "IMERG:cw6a4szu"
+    o4rttryd:
+      description: "operanonly:cw6a4szu"
+    gur21zfi:
+      description: "era5only:cw6a4szu"
+    hehc9gko:
+      description: "3target:cw6a4szu"
+    mh2bplr2:
+      description: "operanonly:nhv6tkln"
+    unw6ot5e:
+      description: "era5only:nhv6tkln"
+    mfxbjdue:
+      description: "era5only:nhv6tkln 4 steps"
+    # e2gnrwnw:
+    #   description: "operanonly:nhv6tkln 4 steps" 
+    gdiqz2hv:
+      description: "operanonly:aets3ku5"
+    fkuv2ecf:
+      description: "era5only:aets3ku5"
+    pkhg4k01:
+      description: "operanonly:dy0jlrmw"
+    vcpd4ciu:
+      description: "era5only:dy0jlrmw"

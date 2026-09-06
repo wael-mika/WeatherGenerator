@@ -117,7 +117,14 @@ evaluation:
     - rmse
     - mae
     - bias
-    - seeps              # IMERG only in practice -- see the per-stream climatology notes below
+    - seeps              # KEPT: IMERG_ANEMOI has a real N320 climatology. The metrics list is
+                         # GLOBAL (cfg.evaluation.metrics), so seeps cannot be requested for one
+                         # stream only -- get_climatology therefore runs for OPERAN_TP and ERA5_TP
+                         # too. OPERAN_TP has no climatology file (-> NaN, harmless) and ERA5_TP
+                         # auto-resolves a store containing only .zattrs/.zgroup, which used to
+                         # raise AttributeError and discard the whole scoring pass. get_climatology
+                         # now catches that and degrades to NaN for the offending stream, so IMERG
+                         # keeps a real SEEPS while the other two report NaN.
   summary_dir: "/iopsstor/scratch/cscs/walmikae/imerg_diag_eval_results/preprint_3target/summary/"
   summary_plots: true
   ratio_plots: false
