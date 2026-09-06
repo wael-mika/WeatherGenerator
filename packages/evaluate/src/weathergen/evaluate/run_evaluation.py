@@ -28,7 +28,6 @@ from weathergen.evaluate.io.csv_reader import CsvReader
 from weathergen.evaluate.io.merge_reader import WeatherGenMergeReader
 from weathergen.evaluate.io.wegen_reader import (
     WeatherGenJsonReader,
-    WeatherGenReader,
     WeatherGenZarrReader,
 )
 from weathergen.evaluate.plotting.plot_orchestration import (
@@ -397,7 +396,18 @@ def evaluate_from_config(cfg: dict, mlflow_client: MlflowClient | None) -> None:
         channels_set = collect_channels(scores_dict, metric, region, runs)
 
         for run_id, run in runs.items():
-            reader = WeatherGenReader(run, run_id, private_paths)
+            # WeatherGenReader is the ABSTRACT base: Reader declares get_samples,
+            # get_forecast_steps and get_ensemble as @abstractmethod and only the concrete
+            # WeatherGenZarrReader / WeatherGenJsonReader subclasses implement them. Instantiating
+            # the base raised
+            #   TypeError: Can't instantiate abstract class WeatherGenReader without an
+            #   implementation for abstract methods 'get_ensemble', 'get_forecast_steps',
+            #   'get_samples'
+            # and, because this block runs only under `if mlflow_client`, it killed the job AFTER
+            # the whole scoring pass had finished and its JSONs were already on disk (run
+            # gq1480k7, job 847067). Only inference_cfg is needed here, but the object still has to
+            # be constructible, so build the concrete reader the rest of the module uses.
+            reader = get_reader("zarr", run, run_id, private_paths)
             from_run_id = reader.inference_cfg["from_run_id"]
             parent_run = get_or_create_mlflow_parent_run(mlflow_client, from_run_id)
             _logger.info(f"MLFlow parent run: {parent_run}")

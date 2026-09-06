@@ -253,9 +253,28 @@ def get_climatology(reader, da_tars, stream: str) -> dict | None:
     clim_data_path = reader.get_climatology_filename(stream)
 
     if clim_data_path is not None:
-        clim_data = xr.open_dataset(clim_data_path)
-        _logger.info("Aligning climatological data with target structure...")
-        aligned = align_clim_data(da_tars, clim_data)
+        # A climatology that cannot be opened or aligned must NOT kill the evaluation. The
+        # metrics list is global (cfg.evaluation.metrics), so asking for `seeps` on behalf of one
+        # stream makes this run for EVERY stream, and _get_climatology_filename AUTO-RESOLVES
+        # <store>_climatology.zarr from the stream's filename. For ERA5_TP that resolves to
+        # assets/climatology/aifs-ea-an-oper-...-with-era51_climatology.zarr, which holds only
+        # .zattrs/.zgroup with no data arrays, so align_clim_data raised
+        #   AttributeError: 'Dataset' object has no attribute 'latitude'
+        # and discarded a completed 368-initialisation scoring pass (run h8j8mrpg, job 847082).
+        # Degrade to NaN climatology instead -- the same outcome wegen_reader already produces
+        # when the file is simply absent -- so climatology-free streams score NaN for seeps while
+        # streams that DO have one (IMERG) are unaffected.
+        try:
+            clim_data = xr.open_dataset(clim_data_path)
+            _logger.info("Aligning climatological data with target structure...")
+            aligned = align_clim_data(da_tars, clim_data)
+        except Exception as e:
+            _logger.warning(
+                f"Could not use climatology '{clim_data_path}' for stream '{stream}': "
+                f"{type(e).__name__}: {e}. Climatology-dependent metrics will be NaN for this "
+                f"stream; other streams and metrics are unaffected."
+            )
+            return None
         return {fstep: scale_z_channels(da, stream) for fstep, da in aligned.items()}
 
     return None
