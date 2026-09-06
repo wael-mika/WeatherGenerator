@@ -468,7 +468,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 continue
 
             if "target_coords" in mode:
-                (tc, tc_l, blend_idx, blend_w) = self.tokenizer.get_target_coords(
+                (tc, tc_l, blend_idx, blend_w, tc_q) = self.tokenizer.get_target_coords(
                     stream_info,
                     rdata,
                     token_data,
@@ -476,7 +476,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     target_mask,
                 )
                 stream_data.add_target_coords(
-                    self._stage, timestep_idx, tc, tc_l, rdata.is_spoof, blend_idx, blend_w
+                    self._stage,
+                    timestep_idx,
+                    tc,
+                    tc_l,
+                    rdata.is_spoof,
+                    blend_idx,
+                    blend_w,
+                    target_coords_query=tc_q,
                 )
 
             if "target_values" in mode:

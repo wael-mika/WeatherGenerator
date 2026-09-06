@@ -52,12 +52,17 @@ def sample_flow_time_for_points(
     mode: str = "uniform",
     logit_mean: float = 0.0,
     logit_std: float = 1.0,
+    scope: str | None = None,
 ) -> torch.Tensor:
     """Flow time for the training path -> ``[num_points, 1]``.
 
-    Default (``per_cell=False``) draws an independent ``t`` for every target point. That is
-    **inconsistent with the sampler**, which advances every point of a cell together on one shared
-    ``t``. Two consequences, both bad for a decoder whose purpose is to emit a joint sample:
+    ``scope`` selects how widely one draw of ``t`` is shared. ``per_cell`` is the older boolean
+    spelling and maps to ``"cell"`` / ``"point"``; pass ``scope`` to reach ``"global"``.
+
+    **point** -- an independent ``t`` for every target point. **Falsified** (density arm
+    ``f8as896p``): it is inconsistent with the sampler, which advances every point of a cell
+    together on one shared ``t``. Two consequences, both bad for a decoder whose purpose is to emit
+    a joint sample:
 
     * the states the ODE visits (all coordinates at the same ``t``) have vanishing probability
       under a training distribution of iid per-point times, so the velocity field is evaluated
@@ -67,15 +72,32 @@ def sample_flow_time_for_points(
       already resolved. No such neighbour exists at sampling time, and the learned coupling is
       then inert.
 
-    With ``per_cell=True``, ``t`` is drawn once per decode cell and broadcast over that cell's
-    points, which is exactly the state the sampler produces. Cells stay independent -- they are
-    independent in the network too (varlen groups, per-cell KV), and one draw per cell keeps
-    hundreds of distinct times per step, so the time marginal is still well covered.
+    **cell** -- one draw per decode cell, broadcast over that cell's points. Exactly the state the
+    sampler produces *within* a cell. Its stated precondition is that **cells stay independent**:
+    they are independent in the network (varlen groups, per-cell KV), so a jump in ``t`` across a
+    boundary is invisible. One draw per cell keeps hundreds of distinct times per step.
+
+    **global** -- one draw for the whole batch. Required by a spatially correlated source
+    (``correlated_source``), which breaks the precondition above: with a coherent ``y0`` the state
+    ``y_t = (1-t) y0 + t r`` is continuous across a boundary only if ``t`` is, so a per-cell ``t``
+    puts a discontinuity into the training state itself and the network learns to reproduce it.
+    Global is also strictly safer than per-cell w.r.t. the neighbour leak that sank ``point``,
+    since every point shares one time, and it is what ``sample`` already does at inference.
     """
-    if not per_cell:
+    if scope is None:
+        scope = "cell" if per_cell else "point"
+    assert scope in ("point", "cell", "global"), (
+        f"unknown flow_time_scope '{scope}' (use 'point', 'cell' or 'global')"
+    )
+    if scope == "point":
         return sample_flow_time(
             num_points, device, dtype, mode=mode, logit_mean=logit_mean, logit_std=logit_std
         )
+    if scope == "global":
+        t = sample_flow_time(
+            1, device, dtype, mode=mode, logit_mean=logit_mean, logit_std=logit_std
+        )
+        return t.expand(num_points, 1)
     # output_lens is a per-group count vector with a leading 0 (the attention cumsums it)
     counts = output_lens[1:].to(torch.long)
     assert int(counts.sum()) == num_points, (
@@ -86,6 +108,104 @@ def sample_flow_time_for_points(
         counts.shape[0], device, dtype, mode=mode, logit_mean=logit_mean, logit_std=logit_std
     )
     return t_cell.repeat_interleave(counts, dim=0)
+
+
+EARTH_RADIUS_KM = 6371.0
+
+
+def latlon_to_unit_vectors(coords: torch.Tensor) -> torch.Tensor:
+    """``[N, >=2]`` of (latitude, longitude) in DEGREES -> ``[N, 3]`` unit vectors.
+
+    The column convention is the readers': ``coords[:, 0]`` is latitude and ``coords[:, 1]``
+    longitude, as ``theta_phi_to_standard_coords`` in ``tokenizer_utils`` assumes. Extra columns
+    are ignored.
+
+    Unit vectors rather than degrees because the source's covariance has to be isotropic in real
+    distance: a longitude difference is worth ``cos(lat)`` of a latitude difference, so a field
+    built on raw degrees would be stretched east-west and would stretch differently at every
+    latitude.
+    """
+    assert coords.ndim == 2 and coords.shape[1] >= 2, (
+        f"expected [N, >=2] (lat, lon) in degrees, got {tuple(coords.shape)}"
+    )
+    lat = torch.deg2rad(coords[:, 0].to(torch.float32))
+    lon = torch.deg2rad(coords[:, 1].to(torch.float32))
+    cos_lat = torch.cos(lat)
+    return torch.stack([cos_lat * torch.cos(lon), cos_lat * torch.sin(lon), torch.sin(lat)], -1)
+
+
+def correlated_source(
+    coords_xyz: torch.Tensor,
+    num_channels: int,
+    length_km: float,
+    num_modes: int,
+    generator: torch.Generator | None = None,
+    mix: float = 1.0,
+) -> torch.Tensor:
+    """Flow-matching source ``y0`` as a SPATIALLY COHERENT Gaussian field -> ``[N, num_channels]``.
+
+    **Why this exists.** The corrector's only texture mechanism is self-attention *within one
+    HEALPix cell* (``cu_seqlens`` makes the mask strictly block-diagonal), so with an iid ``y0``
+    neighbouring cells generate statistically independent textures. The only way to make
+    independent draws agree at a shared border is to average them -- which is what soft blend does,
+    and it costs 31-69% of the small-scale amplitude. Drawing ``y0`` from a field that is a smooth
+    function of POSITION makes the two sides of a boundary share their noise instead, so they agree
+    by construction and nothing is averaged. Measured target: 50-89% of the tiling-aligned per-cell
+    artifact is the sampled component (``FINDINGS_DC_NULL_2026-09-06.md`` §2.1).
+
+    **Construction.** Random Fourier features,
+    ``y0(x) = sqrt(2/M) * sum_j cos(k_j . x + phi_j)`` with ``k_j ~ N(0, sigma^2 I_3)`` and
+    ``phi_j ~ U[0, 2pi)``, evaluated on the unit sphere.
+
+    * The marginal is **exactly** unit variance for any ``M`` (``E[cos^2] = 1/2``), which is what
+      the rest of the algebra needs: ``ResidualScale`` normalises the residual to unit std, the
+      ``y0 + v`` loss identity (see ``residual_to_physical``) is untouched, and the closed-form
+      ``v* = (2t-1) y_t / ((1-t)^2 + t^2)`` still integrates to variance 1. CFM itself is valid for
+      any source you can sample: the path and the target ``u = r - y0`` are unchanged in form.
+    * The covariance is ``exp(-d^2 / (2 l^2))`` in the large-``M`` limit, ``d`` the chord distance,
+      so ``length_km`` sets the coherence scale directly.
+    * It carries **no tiling of its own** -- a piecewise-constant HEALPix-grid noise field would
+      import a second grid, which is the artifact this is meant to remove.
+
+    ``mix`` interpolates ``sqrt(1-a) * iid + sqrt(a) * field``, preserving unit variance;
+    ``mix=0`` is the old iid behaviour exactly. Channels get independent fields.
+
+    Args:
+        coords_xyz : ``[N, 3]`` unit vectors, the points' TRUE positions (never the host-cell
+                     frame -- a per-cell frame would make the field discontinuous at boundaries,
+                     which is the bug this avoids).
+        length_km  : coherence length. Too long starves the sample of degrees of freedom and
+                     blurs it; ~2-3x the point spacing is the intended regime.
+        generator  : draw the modes per member / per forward. Do NOT cache them in a buffer --
+                     buffers reach checkpoints through EMA, which has already cost this campaign
+                     a whole campaign (see ``ema.py``).
+    """
+    assert coords_xyz.ndim == 2 and coords_xyz.shape[1] == 3, (
+        f"correlated_source expects [N, 3] unit vectors, got {tuple(coords_xyz.shape)}"
+    )
+    assert 0.0 <= mix <= 1.0, f"flow_source_mix must be in [0, 1], got {mix}"
+    assert length_km > 0.0 and num_modes >= 1
+
+    n = coords_xyz.shape[0]
+    device, dtype = coords_xyz.device, torch.float32
+    kw = {"device": device, "dtype": dtype, "generator": generator}
+
+    iid = torch.randn((n, num_channels), **kw)
+    if mix == 0.0:
+        return iid
+
+    # sigma is the inverse coherence length expressed on the UNIT sphere
+    sigma = EARTH_RADIUS_KM / float(length_km)
+    x = coords_xyz.to(dtype)
+    field = torch.empty((n, num_channels), device=device, dtype=dtype)
+    for c in range(num_channels):
+        k = torch.randn((3, num_modes), **kw) * sigma
+        phi = torch.rand((1, num_modes), **kw) * (2.0 * math.pi)
+        field[:, c] = math.sqrt(2.0 / num_modes) * torch.cos(x @ k + phi).sum(-1)
+
+    if mix == 1.0:
+        return field
+    return math.sqrt(1.0 - mix) * iid + math.sqrt(mix) * field
 
 
 def flow_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
@@ -104,6 +224,47 @@ def flow_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     )
     ang = t.float() * freqs.unsqueeze(0) * 1000.0
     return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1).to(t.dtype)
+
+
+def dominant_replica(idx: torch.Tensor, w: torch.Tensor, n_state: int) -> torch.Tensor:
+    """Row of each original point's highest-weight soft-blend replica -> ``[n_state]`` long.
+
+    Soft blend replicates a point into several host cells and, as shipped, averages their
+    velocities at every ODE step. That average is what makes the sample smooth: below the cell
+    scale the replicas generate nearly independent texture, so folding them is a k-member
+    ensemble mean and small-scale amplitude falls by ~1/sqrt(k). Measured on `ir77afjz` against
+    its matched control, member SF ratio at 10-25 km retains 31-69% -- for 10si, r_850 and u_850
+    that is BELOW the deterministic base, i.e. worse than not correcting at all.
+
+    *** MEASURED, AND IT IS NOT THE FIX. *** The hypothesis was that the conditional mean needs
+    the averaging while the fluctuation does not, so selecting one replica's velocity would keep
+    the seam benefit and return the texture. Three matched inference arms off one snapshot and one
+    checkpoint (a0ivju54 / vh8takpq / ycei1xd5), member SF ratio at 10-25 km on 10si:
+
+        no blend            0.607        mu only, no blend   0.420
+        blend k=3           0.355        mu only, blend k=3  0.334
+        blend k=3, no fold  0.362
+
+    Selecting instead of folding recovers 0.007 of the 0.252 that blending costs. The corrector's
+    contribution over bare `mu` falls from +0.187 to +0.021 (folded) or +0.028 (selected), i.e.
+    replication disables the corrector whatever the fold does. Blending `mu` accounts for only
+    about 20%; the rest is the corrector going out of distribution, since its only texture
+    mechanism is within-cell self-attention and replication inflates every varlen group by ~1.6x
+    with duplicated points it never saw in training (blend is eval-only, `model.py:1032`).
+
+    Kept because the flag is the experiment's record and costs nothing at the default. Do not
+    reach for it as a seam fix.
+
+    The highest weight is the nearest cell CENTRE, which is the containing cell for only ~91% of
+    points -- a HEALPix cell is a rhombus, not a Voronoi cell. Nearest-centre is the right choice
+    anyway: it is the most in-distribution host for the point's coordinate frame.
+    """
+    best = torch.full((n_state,), -1.0, device=w.device, dtype=w.dtype)
+    best = best.scatter_reduce(0, idx, w, reduce="amax", include_self=False)
+    hit = w >= best[idx] - 1e-6
+    pick = torch.zeros(n_state, dtype=torch.long, device=w.device)
+    rows = torch.arange(idx.numel(), device=w.device)
+    return pick.scatter_(0, idx[hit], rows[hit])
 
 
 def physical_to_residual(y1: torch.Tensor, mu: torch.Tensor, r_scale: torch.Tensor) -> torch.Tensor:

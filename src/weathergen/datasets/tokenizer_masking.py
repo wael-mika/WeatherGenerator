@@ -180,7 +180,16 @@ class TokenizerMasking(Tokenizer):
             }
 
         # TODO: split up
-        _, _, _, coords_local, coords_per_cell, blend_idx, blend_w = tokenize_apply_mask_target(
+        (
+            _,
+            _,
+            _,
+            coords_local,
+            coords_per_cell,
+            blend_idx,
+            blend_w,
+            coords_query,
+        ) = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -196,7 +205,7 @@ class TokenizerMasking(Tokenizer):
             blend=blend,
         )
 
-        return (coords_local, coords_per_cell, blend_idx, blend_w)
+        return (coords_local, coords_per_cell, blend_idx, blend_w, coords_query)
 
     def get_target_values(
         self,
@@ -213,7 +222,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        data, datetimes, coords, _, _, _, _ = tokenize_apply_mask_target(
+        data, datetimes, coords, _, _, _, _, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,

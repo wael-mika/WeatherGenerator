@@ -116,3 +116,47 @@ def test_small_tau_collapses_to_single_assignment():
     single = counts_per_point[idx] == 1
     assert single.float().mean() > 0.995
     assert torch.allclose(w[single], torch.ones(int(single.sum())), atol=1e-6)
+
+
+def test_targets_expand_to_replicas_by_the_blend_index():
+    """The gather `flow_blend_in_training` relies on (`model.py`, predict_decoders).
+
+    `target_tokens` are never replicated, so training under soft blend must gather them on the
+    ORIGINAL axis and expand with the blend index. Every replica has to receive its own point's
+    target -- getting this wrong would train each host cell against a neighbouring point's truth,
+    which no metric would catch until the run was worthless.
+    """
+    _, coords, _, _, _, (c_r, _, _, _, idx, _) = _run(seed=4)
+    targets = torch.randn(len(coords), 6)
+    expanded = targets[idx]
+
+    assert expanded.shape[0] == c_r.shape[0] > targets.shape[0], "must land on the replica axis"
+    assert torch.equal(expanded, targets[idx])
+    # every replica's target is exactly its own original point's row
+    for rep in range(0, expanded.shape[0], max(1, expanded.shape[0] // 50)):
+        assert torch.equal(expanded[rep], targets[idx[rep]])
+
+
+def test_blend_replicas_share_one_raw_coordinate_row():
+    """The query-axis coordinates a position-dependent flow source is drawn from.
+
+    Soft blend replicates a boundary point into several host cells. Those replicas MUST carry the
+    same raw coordinate, because that is what makes `correlated_source` hand every replica one
+    shared `y0` -- and it removes a real train/eval asymmetry: training draws `randn_like` on the
+    replicated axis (a different y0 per replica) while `sample` draws once on the original axis
+    and shares it through `_expand`.
+
+    Contrast with the LOCAL coordinates, which are deliberately different per host: that is what
+    makes a replica a genuine decode under another cell rather than a duplicate.
+    """
+    _, coords, _, _, _, (c_r, _, _, _, idx, _) = _run(seed=5)
+
+    assert c_r.shape[0] > coords.shape[0], "the fixture must actually replicate something"
+    assert torch.equal(c_r, coords[idx]), "every replica must carry its own point's raw row"
+
+    # a point that really was replicated, and its rows really are identical
+    counts = torch.bincount(idx, minlength=coords.shape[0])
+    multi = int((counts > 1).nonzero()[0])
+    rows = c_r[idx == multi]
+    assert rows.shape[0] > 1
+    assert torch.equal(rows, rows[:1].expand_as(rows))

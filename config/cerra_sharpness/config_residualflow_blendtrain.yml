@@ -1,0 +1,51 @@
+# ARM: train WITH the soft blend active. Pair with config_residualflow_ft.yml, exactly as the
+# a1/a2 arm files are:
+#   --config config/cerra_sharpness/config_residualflow_ft.yml \
+#            config/cerra_sharpness/config_residualflow_blendtrain.yml
+#
+# WHY THIS ARM EXISTS. Soft blend removes the seam and destroys the texture. Measured on one
+# snapshot and one checkpoint, member SF ratio at 10-25 km on 10si:
+#
+#     no blend  0.607     mu only, no blend  0.420     -> corrector adds +0.187
+#     blend k=3 0.355     mu only, blend k=3 0.334     -> corrector adds +0.021
+#     blend k=3, velocity NOT folded  0.362            -> corrector adds +0.028
+#
+# Not folding the velocity recovers 0.007 of the 0.252 that blending costs, so the fold is not the
+# mechanism. Replication is: blend is EVAL-ONLY (`rf_blend = None if self.training`), the
+# corrector's only texture mechanism is within-cell self-attention, and replication inflates every
+# varlen group by ~1.6x with duplicated points it never trained on. The corrector is being run out
+# of distribution, and it collapses.
+#
+# This arm removes that asymmetry -- the training groups become the evaluation groups. It is the
+# one blending route the measurements leave open, and it is a TRAINING change, not a post-process.
+#
+# Read it on the member SF ratios at 10-25 km first (must approach the 0.607 of the unblended
+# control, not the 0.355 of eval-only blending), then on seam excess. Do NOT read MSE as a verdict.
+#
+# `streams_directory` is overridden here, which REPLACES the inherited streams wholesale
+# (config.py:458-460). cerra_blendtrain is cerra_flowmatch_v2 plus exactly two keys --
+# decode_soft_blend_k and decode_soft_blend_tau -- and nothing else; verify with a diff before
+# trusting any result from it.
+
+general:
+  desc: "residualflow_blendtrain"
+  # frozen-base arms need spawn: forked dataloader workers throw
+  # `c10::AcceleratorError: CUDA error: initialization error` at the start of validation, and
+  # num_workers: 0 is NOT a workaround (worker_workset asserts world_size == 1)
+  multiprocessing_method: "spawn"
+
+flow_cond: "mu+tokens+latent"
+flow_cond_dropout: 0.1
+flow_guidance: 1.0
+flow_freeze_base: True
+
+# the point of the arm
+flow_blend_in_training: True
+
+streams_directory: "./config/streams/cerra_blendtrain/"
+
+training_config:
+  # ABSOLUTE, not "N more". The seeded parent sits at ~112, so this buys ~8 mini-epochs of
+  # blend-aware fine-tuning -- enough to see whether the corrector's contribution recovers once
+  # it trains on the same inflated attention groups it is evaluated on.
+  num_mini_epochs: 120

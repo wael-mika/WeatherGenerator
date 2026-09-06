@@ -18,7 +18,10 @@ import pytest
 import torch
 
 from weathergen.model.flow_math import (
+    EARTH_RADIUS_KM,
     ResidualScale,
+    correlated_source,
+    dominant_replica,
     physical_to_residual,
     residual_to_physical,
     sample_flow_time_for_points,
@@ -239,3 +242,169 @@ def test_time_per_cell_asserts_on_length_mismatch():
     lens = torch.cat([torch.zeros(1, dtype=torch.int32), counts])
     with pytest.raises(AssertionError, match="decode-group counts"):
         sample_flow_time_for_points(99, lens, torch.device("cpu"), torch.float32, per_cell=True)
+
+
+def test_dominant_replica_picks_the_heaviest_row_per_point():
+    """The selector soft blend needs when it must NOT average.
+
+    Three original points; point 1 is replicated into three host cells, point 2 into two, point 0
+    stays single. The winner is the largest weight in each group, whatever order the rows arrive
+    in -- `blend_replicate_targets` sorts its output by host cell, so the rows of one point are
+    NOT contiguous.
+    """
+    idx = torch.tensor([1, 0, 2, 1, 2, 1])
+    w = torch.tensor([0.2, 1.0, 0.4, 0.7, 0.6, 0.1])
+    pick = dominant_replica(idx, w, n_state=3)
+
+    assert pick.tolist() == [1, 3, 4]
+    assert torch.equal(w[pick], torch.tensor([1.0, 0.7, 0.6]))
+
+
+def test_dominant_replica_is_the_identity_when_nothing_replicates():
+    """With k=1 every point is its own single host, so selection must change nothing."""
+    n = 7
+    idx = torch.arange(n)
+    w = torch.ones(n)
+    assert torch.equal(dominant_replica(idx, w, n_state=n), torch.arange(n))
+
+
+def test_dominant_replica_selects_rather_than_averages():
+    """The whole point: the returned velocity is one replica's, never a blend of several.
+
+    Averaging is what costs 31-69% of the small-scale amplitude, so a gather that happened to
+    coincide with the weighted mean would be the bug this guards against.
+    """
+    idx = torch.tensor([0, 0, 0])
+    w = torch.tensor([0.5, 0.3, 0.2])
+    v = torch.tensor([[10.0], [20.0], [30.0]])
+
+    pick = dominant_replica(idx, w, n_state=1)
+    selected = v[pick]
+    blended = torch.zeros(1, 1).index_add_(0, idx, v * w.view(-1, 1))
+
+    assert selected.item() == 10.0, "must take the heaviest replica verbatim"
+    assert not torch.allclose(selected, blended), "must not reproduce the weighted mean"
+
+
+# ---------------------------------------------------------------------------------------------
+# Correlated source. Every one of these guards a property the seam fix rests on; a source that
+# is coherent but not unit-variance would silently rescale the residual, and one that is unit
+# variance but not coherent would be the old behaviour under a new name.
+# ---------------------------------------------------------------------------------------------
+
+
+def _ring(n, lat_deg=45.0, spacing_km=5.0):
+    """``n`` points along a parallel, ``spacing_km`` apart -> ``[n, 3]`` unit vectors."""
+    lat = torch.full((n,), lat_deg * torch.pi / 180.0, dtype=torch.float64)
+    dlon = spacing_km / (EARTH_RADIUS_KM * torch.cos(lat[0]))
+    lon = torch.arange(n, dtype=torch.float64) * dlon
+    return torch.stack(
+        [torch.cos(lat) * torch.cos(lon), torch.cos(lat) * torch.sin(lon), torch.sin(lat)], -1
+    ).float()
+
+
+@pytest.mark.parametrize("modes", [8, 256])
+def test_correlated_source_has_a_standard_normal_marginal(modes):
+    """Unit variance is EXACT for any M, and the rest of the algebra depends on it.
+
+    ``ResidualScale`` normalises the residual to unit std and the ``y0 + v`` identity assumes the
+    source matches it. A source at, say, 0.8 std would rescale every sample without touching a
+    single metric that is currently logged.
+    """
+    g = torch.Generator().manual_seed(0)
+    y0 = correlated_source(
+        _ring(20000, spacing_km=3.0), 4, length_km=15.0, num_modes=modes, generator=g
+    )
+
+    assert y0.shape == (20000, 4)
+    assert y0.mean().abs() < 0.05
+    assert torch.allclose(y0.std(0), torch.ones(4), atol=0.05), y0.std(0)
+
+
+def test_correlated_source_matches_the_gaussian_covariance_it_promises():
+    """cov(d) = exp(-d^2 / 2l^2). This IS the mechanism -- without it nothing is shared."""
+    g = torch.Generator().manual_seed(1)
+    length_km, n = 40.0, 4000
+    # one long ring so every separation is sampled many times, averaged over channels
+    x = _ring(n, spacing_km=2.0)
+    y0 = correlated_source(x, 64, length_km=length_km, num_modes=4096, generator=g)
+
+    for lag, d_km in [(0, 0.0), (5, 10.0), (10, 20.0), (25, 50.0)]:
+        emp = (y0[: n - lag] * y0[lag:]).mean().item()
+        want = torch.exp(torch.tensor(-(d_km**2) / (2 * length_km**2))).item()
+        assert abs(emp - want) < 0.06, f"lag {d_km} km: {emp:.3f} vs {want:.3f}"
+
+
+def test_correlated_source_couples_near_points_and_not_far_ones():
+    """The property in the units that matter: neighbours across a cell border share noise.
+
+    A HEALPix level-5 cell is ~200 km, CERRA points are ~5-8 km apart, so two points straddling a
+    boundary must be strongly correlated while two points in genuinely different weather must not.
+    """
+    g = torch.Generator().manual_seed(2)
+    near, far = _ring(2, spacing_km=5.0), _ring(2, spacing_km=500.0)
+    x = torch.cat([near, far])
+
+    c_near, c_far = [], []
+    for _ in range(400):
+        y0 = correlated_source(x, 8, length_km=15.0, num_modes=256, generator=g)
+        c_near.append((y0[0] * y0[1]).mean())
+        c_far.append((y0[2] * y0[3]).mean())
+
+    assert torch.stack(c_near).mean() > 0.6, "5 km apart must share noise"
+    assert torch.stack(c_far).mean().abs() < 0.1, "500 km apart must not"
+
+
+def test_correlated_source_with_mix_zero_is_exactly_the_old_iid_draw():
+    """The default-off guarantee: mix=0 must reproduce ``torch.randn`` bit-for-bit.
+
+    This is what makes every existing run bit-identical, and it is cheap to keep true.
+    """
+    x = _ring(500)
+    a = correlated_source(
+        x, 6, length_km=15.0, num_modes=64, generator=torch.Generator().manual_seed(7), mix=0.0
+    )
+    b = torch.randn((500, 6), generator=torch.Generator().manual_seed(7), dtype=torch.float32)
+    assert torch.equal(a, b)
+
+
+def test_correlated_source_is_a_function_of_position_only():
+    """Two rows with the SAME coordinate must get the SAME noise, wherever they sit in the batch.
+
+    Soft blend replicates a point into several host cells; the replicas carry copies of the raw
+    coordinate row. This property is what gives every replica one shared ``y0`` -- and it removes
+    an existing train/eval asymmetry, since training draws ``randn_like`` on the replicated axis
+    while ``sample`` shares one draw through ``_expand``.
+    """
+    x = _ring(64)
+    dup = torch.cat([x, x[:8]])  # 8 "replicas" appended out of order
+    y0 = correlated_source(
+        dup, 5, length_km=20.0, num_modes=32, generator=torch.Generator().manual_seed(3)
+    )
+    assert torch.allclose(y0[:8], y0[64:], atol=1e-5)
+
+
+def test_flow_time_global_scope_gives_every_point_one_time():
+    """Required by a correlated source: y_t is continuous across a boundary only if t is."""
+    lens = torch.tensor([0, 3, 5, 2], dtype=torch.int32)
+    t = sample_flow_time_for_points(10, lens, torch.device("cpu"), torch.float32, scope="global")
+
+    assert t.shape == (10, 1)
+    assert t.unique().numel() == 1, "global scope must be ONE draw for the whole batch"
+    assert 0.0 < float(t[0]) < 1.0
+
+
+def test_flow_time_scope_matches_the_legacy_boolean():
+    """`per_cell` is the old spelling; it must keep meaning exactly what it meant."""
+    lens = torch.tensor([0, 4, 6], dtype=torch.int32)
+    kw = dict(output_lens=lens, device=torch.device("cpu"), dtype=torch.float32)
+
+    torch.manual_seed(0)
+    a = sample_flow_time_for_points(10, per_cell=True, **kw)
+    torch.manual_seed(0)
+    b = sample_flow_time_for_points(10, scope="cell", **kw)
+    assert torch.equal(a, b)
+    assert a[:4].unique().numel() == 1 and a[4:].unique().numel() == 1
+
+    with pytest.raises(AssertionError, match="unknown flow_time_scope"):
+        sample_flow_time_for_points(10, scope="per_cell", **kw)

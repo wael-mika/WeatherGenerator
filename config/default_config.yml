@@ -75,6 +75,66 @@ flow_dim_time: 32
 #                        NOTE w rescales the deviation from the unconditional mean uniformly; it
 #                        is NOT scale-selective and so cannot correct a spectral SLOPE error.
 flow_solver: euler
+
+# Soft-blend decode (streams.<S>.decode_soft_blend_k) folds the replica velocities with a weighted
+# MEAN at every ODE step. Below the cell scale the replicas produce nearly independent texture, so
+# that fold is a k-member ensemble mean and small-scale amplitude falls by ~1/sqrt(k). Measured on
+# ir77afjz against its matched control, member SF ratio at 10-25 km retains only 31-69%, which for
+# 10si / r_850 / u_850 is BELOW the deterministic base -- the blend more than undoes the corrector.
+# Set False to take the velocity from a single host cell instead of the weighted mean, keeping `mu`
+# blended. TESTED AND IT DOES NOT RECOVER THE TEXTURE: on 10si at 10-25 km, no blend 0.607, blend
+# 0.355, blend-without-folding 0.362. Replication disables the corrector regardless of the fold --
+# see `dominant_replica` in flow_math.py for the full table. Kept as the record of that experiment.
+# Has no effect unless decode_soft_blend_k > 1.
+flow_blend_velocity: True
+
+# Replicate soft-blend points during TRAINING too. As shipped, `decode_soft_blend_k` replicates at
+# EVAL ONLY, and that asymmetry is why blending fails on a sharp decoder: measured on 10si at
+# 10-25 km, the corrector's contribution over bare `mu` collapses from +0.187 (no blend) to +0.021
+# (blend k=3), because its only texture mechanism is within-cell self-attention and replication
+# inflates every varlen group by ~1.6x with duplicated points the model never trained on. Turning
+# this on makes the training groups match the evaluation groups. Requires decode_soft_blend_k > 1
+# on the stream to do anything; default False leaves every existing run bit-identical.
+flow_blend_in_training: False
+
+# Flow-matching SOURCE: where y0 comes from.  "iid" is the shipped behaviour -- y0 ~ N(0, I) drawn
+# independently per point.  Because the corrector's only texture mechanism is self-attention INSIDE
+# one HEALPix cell (cu_seqlens makes the attention mask strictly block-diagonal), an iid source
+# means neighbouring cells generate statistically INDEPENDENT texture, and the only way to make two
+# independent draws agree at a shared border is to average them.  That is what soft blend does, and
+# it costs 31-69% of the small-scale amplitude -- sharpness and seamlessness get traded ~1:1.
+#
+# "correlated" draws y0 from a globally defined Gaussian field evaluated at each point's true
+# position (random Fourier features, see `correlated_source`).  Two points either side of a
+# boundary then SHARE their noise and agree by construction, with nothing averaged and so no
+# amplitude tax.  Measured target: 50-89% of the tiling-aligned per-cell artifact is the sampled
+# component that only this can reach (FINDINGS_DC_NULL_2026-09-06.md).
+#
+#   flow_source_length_km   coherence length.  Wants to be ~2-3x the point spacing: long enough
+#                           that cross-boundary neighbours share noise, short enough that a cell
+#                           still holds many independent degrees of freedom.  TOO LONG STARVES THE
+#                           SAMPLE AND BLURS IT -- if member SF falls along with the artifact,
+#                           this is the knob.
+#   flow_source_modes       number of plane waves.  The marginal is exactly unit variance for any
+#                           M; M only controls how closely the covariance approaches the Gaussian.
+#   flow_source_mix         sqrt(1-a)*iid + sqrt(a)*field, unit variance for every a.  a = 0 is
+#                           bit-identical to the old draw, so this bisects rather than switches.
+#
+# REQUIRES flow_time_scope: global -- y_t = (1-t) y0 + t r is continuous across a boundary only if
+# t is, so a per-cell t would write the seam straight back into the training state.  Asserted.
+flow_source: iid
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+
+# How widely one draw of the training flow time t is shared: point | cell | global.
+# "point" is FALSIFIED (density arm f8as896p): a point's cell-mates sit at unrelated noise levels
+# and any neighbour near t=1 leaks the answer, a shortcut worth nothing at sampling time.
+# "cell" is the current default for the arms and matches the sampler within a cell.
+# "global" is one t for the whole batch -- what the sampler already does, strictly safer than
+# "cell" w.r.t. that leak, and REQUIRED by flow_source: correlated.
+# Leave unset to inherit from the legacy boolean flow_time_per_cell.
+flow_time_scope: null
 flow_time_sampling: uniform
 flow_time_logit_mean: 0.0
 flow_time_logit_std: 1.0

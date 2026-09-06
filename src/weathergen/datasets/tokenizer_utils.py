@@ -398,8 +398,9 @@ def tokenize_apply_mask_target(
         coords = torch.zeros([0, rdata.coords.shape[-1]])
         dt = np.array([], dtype=np.datetime64)
         masked_points_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
-        # data, datetimes, coords, coords_local, masked_points_per_cell, blend_idx, blend_w
-        return do, dt, coords, coords, masked_points_per_cell, None, None
+        # data, datetimes, coords, coords_local, masked_points_per_cell, blend_idx, blend_w,
+        # coords_query
+        return do, dt, coords, coords, masked_points_per_cell, None, None, coords
 
     # convert to token level, forgetting about cells
     idxs_tokens = [i for t in idxs_cells for i in t]
@@ -465,7 +466,12 @@ def tokenize_apply_mask_target(
     else:
         coords_local = torch.tensor([])
 
-    return data, datetimes, coords, coords_local, points_per_cell_q, blend_idx, blend_w
+    # `coords_q` is the decode QUERY axis in raw (lat, lon): cell-major, and replicated exactly
+    # like coords_local when soft blend is on. `coords_local` cannot stand in for it -- every one
+    # of its features is expressed in the HOST CELL's rotated frame, so it jumps discontinuously
+    # at a cell boundary. A spatially coherent flow source has to be a function of the point's
+    # true position, or it would carry the very seam it exists to remove.
+    return data, datetimes, coords, coords_local, points_per_cell_q, blend_idx, blend_w, coords_q
 
 
 def get_source_coords_local(

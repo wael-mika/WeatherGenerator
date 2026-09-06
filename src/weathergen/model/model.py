@@ -357,6 +357,10 @@ class Model(torch.nn.Module):
 
         self.cf = cf
         self.dtype = get_dtype(self.cf.attention_dtype)
+        # Replicate soft-blend points during TRAINING as well, so the corrector learns on the same
+        # inflated within-cell attention groups it is evaluated on. Default False keeps every
+        # existing run bit-identical. See the comment at the call site in predict_decoders.
+        self.blend_in_training = bool(cf.get("flow_blend_in_training", False))
         self.sources_size = sources_size
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
@@ -935,6 +939,14 @@ class Model(torch.nn.Module):
             ]
             t_coords_lens = [len(t) for t in t_coords]
             t_coords = torch.cat(t_coords)
+            # raw (lat, lon) on the same query axis, for a position-dependent flow source.
+            # `t_coords` above is in the HOST CELL's frame and is discontinuous at a boundary,
+            # so it cannot stand in for this.
+            t_coords_q = [
+                batch.samples[i_b].streams_data[stream_name].target_coords_query[step]
+                for i_b in range(batch_size)
+            ]
+            t_coords_q = torch.cat(t_coords_q) if all(len(c) for c in t_coords_q) else None
 
             if len(t_coords) == 0:
                 continue
@@ -1016,16 +1028,35 @@ class Model(torch.nn.Module):
                         coordinates=t_coords,
                     )
                     mu = self.pred_heads[stream_name](det_tokens).mean(0)
+                    # Soft blend replicates boundary-zone points into several host cells. As
+                    # shipped that happens at EVAL ONLY, and the measurement says that is why
+                    # blending fails: the corrector's contribution over bare `mu` collapses from
+                    # +0.187 to +0.021 on 10si at 10-25 km (a0ivju54 / vh8takpq), because its only
+                    # texture mechanism is within-cell self-attention and replication inflates
+                    # every varlen group by ~1.6x with duplicated points it never trained on.
+                    # `flow_blend_in_training` replicates during training too, so the groups the
+                    # corrector learns on are the groups it is evaluated on.
+                    train_blend = (
+                        _blend_maps(batch, stream_name, step, t_coords_lens, mu, batch_size)
+                        if (self.training and self.blend_in_training)
+                        else None
+                    )
                     tgt = None
                     if self.training:
+                        # target_tokens are never replicated, so with replication on they must be
+                        # gathered on the ORIGINAL axis and then expanded through the blend map --
+                        # otherwise _gather_stream_targets' count assert fires immediately.
+                        n_pts = train_blend[3] if train_blend is not None else tc_tokens.shape[0]
                         tgt = self._gather_stream_targets(
                             batch,
                             target_batch,
                             stream_name,
                             step,
                             tte.num_channels,
-                            tc_tokens.shape[0],
+                            n_pts,
                         )
+                        if train_blend is not None:
+                            tgt = tgt[train_blend[0]]
                     # Soft blend, if enabled, is applied INSIDE the sampler on the velocity --
                     # never on the finished sample. `pred` then already lives on the original
                     # point axis, so the generic fold-back below must be skipped for it.
@@ -1042,6 +1073,7 @@ class Model(torch.nn.Module):
                         latent_lens=tokens_nbors_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
+                        coords_query=t_coords_q,
                         target=tgt,
                         ens_size=self.streams[stream_name]["pred_head"]["ens_size"],
                         blend=rf_blend,

@@ -26,6 +26,9 @@ from weathergen.model.engines import (
 )
 from weathergen.model.flow_math import (
     ResidualScale,
+    correlated_source,
+    dominant_replica,
+    latlon_to_unit_vectors,
     physical_to_residual,
     residual_to_physical,
 )
@@ -130,6 +133,41 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         self.time_logit_mean = float(cf.get("flow_time_logit_mean", 0.0))
         self.time_logit_std = float(cf.get("flow_time_logit_std", 1.0))
         self.time_per_cell = bool(cf.get("flow_time_per_cell", False))
+        # Flow-matching SOURCE. "iid" is the shipped behaviour: y0 ~ N(0, I) drawn independently
+        # per point, which -- because the corrector's only texture mechanism is self-attention
+        # inside one cell -- makes neighbouring cells generate statistically independent texture.
+        # "correlated" draws y0 from a globally defined field instead, so the two sides of a
+        # boundary SHARE their noise and agree without anything being averaged. See
+        # `correlated_source`.
+        self.source = str(cf.get("flow_source", "iid"))
+        assert self.source in ("iid", "correlated"), (
+            f"unknown flow_source '{self.source}' (use 'iid' or 'correlated')"
+        )
+        self.source_length_km = float(cf.get("flow_source_length_km", 15.0))
+        self.source_modes = int(cf.get("flow_source_modes", 64))
+        self.source_mix = float(cf.get("flow_source_mix", 1.0))
+        # `null` in the yaml means "inherit from the legacy boolean", so a None must not become
+        # the string "None" here.
+        scope = cf.get("flow_time_scope", None)
+        self.time_scope = str(scope) if scope else ("cell" if self.time_per_cell else "point")
+        # A correlated source makes y_t continuous across a cell boundary ONLY if t is continuous
+        # there too: y_t = (1-t) y0 + t r jumps wherever t jumps, so a per-cell t would write the
+        # very seam this is meant to remove straight into the training state. Fail loudly -- a
+        # config key with no reader, or a silently ignored mismatch, has cost this campaign more
+        # than one full run.
+        if self.source == "correlated" and self.source_mix > 0.0:
+            assert self.time_scope == "global", (
+                "flow_source: correlated requires flow_time_scope: global -- with a spatially "
+                "coherent y0 a per-point or per-cell t reintroduces the seam "
+                f"(got '{self.time_scope}')"
+            )
+        # Soft blend folds the replica velocities with a weighted mean at every ODE step. That
+        # mean is an ensemble mean below the cell scale, and it costs 31-69% of the small-scale
+        # amplitude (ir77afjz against its matched control). Set False to keep `mu` blended -- which
+        # is where the measured per-cell conditional-mean error lives -- while taking the velocity
+        # from a single host cell, so the texture survives at full amplitude. Default True is the
+        # shipped behaviour, so no existing run changes.
+        self.blend_velocity = bool(cf.get("flow_blend_velocity", True))
         self.solver = str(cf.get("flow_solver", "euler"))
         assert self.solver in ("euler", "heun"), f"unknown flow_solver '{self.solver}'"
 
@@ -275,7 +313,42 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         )
         return v_u + self.guidance * (v_c - v_u)
 
-    def sample(self, mu, latent, base, latent_lens, output_lens, coordinates, ens_size, blend=None):
+    def _draw_source(self, n_rows, coords_query, device):
+        """The flow-matching source y0 -> ``[n_rows, C]``, identically in training and sampling.
+
+        Both call sites go through here on purpose. The eval-only soft blend is the cautionary
+        tale: a source that differed between the two paths would put the corrector out of
+        distribution exactly as replication did, and no aggregate metric would show it.
+        """
+        if self.source == "iid" or self.source_mix == 0.0:
+            return torch.randn((n_rows, self.num_channels), device=device, dtype=torch.float32)
+        assert coords_query is not None, (
+            "flow_source: correlated needs the raw target coordinates; "
+            "predict_decoders must pass coords_query"
+        )
+        assert coords_query.shape[0] == n_rows, (
+            f"coords_query has {coords_query.shape[0]} rows but the decode axis has {n_rows}"
+        )
+        return correlated_source(
+            latlon_to_unit_vectors(coords_query),
+            self.num_channels,
+            length_km=self.source_length_km,
+            num_modes=self.source_modes,
+            mix=self.source_mix,
+        ).to(device)
+
+    def sample(
+        self,
+        mu,
+        latent,
+        base,
+        latent_lens,
+        output_lens,
+        coordinates,
+        ens_size,
+        blend=None,
+        coords_query=None,
+    ):
         """Integrate the residual ODE and add it back -> ``[ens_size, N, num_channels]``.
 
         ``mu`` is computed once by the caller; members differ only in the base noise, so the
@@ -302,6 +375,7 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
         dt = 1.0 / self.num_steps
         preds = []
 
+        pick = None
         if blend is not None:
             idx, w, _lens, n_state = blend
             w = w.to(torch.float32).view(-1, 1)
@@ -309,6 +383,8 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             mu = torch.zeros(
                 (n_state, mu.shape[-1]), dtype=torch.float32, device=mu.device
             ).index_add_(0, idx, mu.float() * w)
+            if not self.blend_velocity:
+                pick = dominant_replica(idx, w.view(-1), n_state)
         else:
             idx = w = None
             n_state = n
@@ -317,17 +393,30 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             """Replica velocity -> one velocity per original point."""
             if idx is None:
                 return v
+            if pick is not None:
+                # one host cell's estimate, not the mean of several -- see `dominant_replica`
+                return v[pick]
             out = torch.zeros((n_state, v.shape[-1]), dtype=v.dtype, device=v.device)
             return out.index_add_(0, idx, v * w)
 
         def _expand(y):
             return y if idx is None else y[idx]
 
+        # the ODE state lives on the ORIGINAL point axis while coords_query is on the replicated
+        # one; replicas of a point carry copies of its coordinate row, so any replica's row is the
+        # right one to keep.
+        coords_state = coords_query
+        if coords_query is not None and idx is not None:
+            coords_state = torch.zeros(
+                (n_state, coords_query.shape[-1]),
+                dtype=coords_query.dtype,
+                device=coords_query.device,
+            )
+            coords_state[idx] = coords_query
+
         with torch.no_grad():
             for _ in range(ens_size):
-                y = torch.randn(
-                    (n_state, self.num_channels), device=base.device, dtype=torch.float32
-                )
+                y = self._draw_source(n_state, coords_state, base.device)
                 for i_step in range(self.num_steps):
                     t = torch.full((n, 1), i_step * dt, device=base.device, dtype=torch.float32)
                     mu_rep = _expand(mu)
@@ -376,7 +465,9 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
                 preds.append(mu.float() + rs.float() * y)
         return torch.stack(preds, 0)
 
-    def training_pack(self, mu, target, latent, base, latent_lens, output_lens, coordinates):
+    def training_pack(
+        self, mu, target, latent, base, latent_lens, output_lens, coordinates, coords_query=None
+    ):
         """Build member 1 of the training pack -> ``[N, num_channels]``.
 
         Returns ``mu.detach() + r_scale*(y0 + v)``, so a plain MSE against the target is the CFM
@@ -388,7 +479,7 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
 
         r = physical_to_residual(y1, mu_c.float(), rs)
         finite = torch.isfinite(r)
-        y0 = torch.randn_like(r)
+        y0 = self._draw_source(r.shape[0], coords_query, r.device).to(r.dtype)
         # masked / spoofed targets are NaN. Substituting y0 gives them zero velocity instead of
         # poisoning y_t; the loss masks these points anyway, so they contribute no gradient.
         r = torch.where(finite, r, y0)
@@ -402,6 +493,7 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             r.device,
             r.dtype,
             per_cell=self.time_per_cell,
+            scope=self.time_scope,
             mode=self.time_sampling,
             logit_mean=self.time_logit_mean,
             logit_std=self.time_logit_std,
@@ -551,6 +643,7 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
         target=None,
         ens_size=1,
         blend=None,
+        coords_query=None,
     ):
         """Apply the corrector to a deterministic prediction ``mu`` of shape ``[N, C]``.
 
@@ -582,7 +675,15 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
                 ).index_add_(0, idx, mu.float() * w.to(torch.float32).view(-1, 1))
                 return folded.unsqueeze(0)
             return self.flow.sample(
-                mu_cond, kv, base, latent_lens, output_lens, coordinates, ens_size, blend=blend
+                mu_cond,
+                kv,
+                base,
+                latent_lens,
+                output_lens,
+                coordinates,
+                ens_size,
+                blend=blend,
+                coords_query=coords_query,
             )
 
         assert target is not None, (
@@ -590,7 +691,7 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
             "probability path; predict_decoders must pass it."
         )
         member = self.flow.training_pack(
-            mu_cond, target, kv, base, latent_lens, output_lens, coordinates
+            mu_cond, target, kv, base, latent_lens, output_lens, coordinates, coords_query
         )
         # Member 2 carries the per-channel r_scale so `mse_flow` can divide it out and score the
         # CFM objective with EQUAL weight per channel. Without it the loss weight is r_scale_c^2,

@@ -76,7 +76,7 @@ def inputs():
     )
 
 
-def _decode(dec, io, target=None, ens_size=1, latent=None):
+def _decode(dec, io, target=None, ens_size=1, latent=None, coords_query=None):
     """Deterministic pass then the corrector, under the autocast the trainer runs in."""
     with torch.autocast("cuda", dtype=torch.bfloat16):
         det = dec.det_forward(
@@ -97,6 +97,7 @@ def _decode(dec, io, target=None, ens_size=1, latent=None):
             coordinates=io["coordinates"],
             target=target,
             ens_size=ens_size,
+            coords_query=coords_query,
         )
     return mu, det, pred
 
@@ -403,3 +404,74 @@ def test_warm_start_from_a_flow_matching_parent_is_rejected():
 
     with pytest.raises(RuntimeError, match="size mismatch"):
         dec.load_state_dict(fm.state_dict(), strict=False)
+
+
+# ---------------------------------------------------------------------------------------------
+# Correlated flow source. The CPU suite proves the field's statistics; these prove it survives
+# the real decoder -- the shapes, the blend axis, and the train/eval symmetry.
+# ---------------------------------------------------------------------------------------------
+
+_CORR = dict(flow_source="correlated", flow_time_scope="global", flow_source_length_km=400.0)
+
+
+def _latlon(n, spread=3.0):
+    """Points in a small patch, so `flow_source_length_km` actually couples some of them."""
+    torch.manual_seed(11)
+    return torch.stack([45.0 + spread * torch.rand(n), 5.0 + spread * torch.rand(n)], -1).to(DEV)
+
+
+def test_correlated_source_runs_end_to_end_in_both_paths(inputs):
+    """Shapes and finiteness through the real varlen decode, training AND sampling.
+
+    A config key with no reader is silent in this repo, and a wiring bug in the blend tuple
+    already killed one run outright, so this is the check that the flag is actually connected.
+    """
+    coords_q = _latlon(inputs["n"])
+
+    dec = _build(**_CORR).train()
+    _, _, pack = _decode(dec, inputs, target=inputs["target"], coords_query=coords_q)
+    assert pack.shape == (3, inputs["n"], C)
+    assert torch.isfinite(pack).all()
+
+    dec = _build(**_CORR).eval()
+    _, _, pred = _decode(dec, inputs, ens_size=2, coords_query=coords_q)
+    assert pred.shape == (2, inputs["n"], C)
+    assert torch.isfinite(pred).all()
+
+
+def test_correlated_source_makes_nearby_points_agree_across_cells(inputs):
+    """The point of the whole change, measured on the decoder's own output.
+
+    Two points that are close in SPACE but sit in different varlen groups must move together
+    across members. With an iid source they cannot: the groups never attend to each other, so
+    their only shared information is the conditioning, which is identical in both arms here.
+    """
+    n = inputs["n"]
+    # first and last point of the batch are in different cells; place them ~0 km apart
+    coords_q = _latlon(n)
+    coords_q[-1] = coords_q[0]
+
+    def spread(**over):
+        dec = _build(**over).eval()
+        _, _, pred = _decode(dec, inputs, ens_size=8, coords_query=coords_q)
+        # how differently do the two co-located points behave, member by member?
+        return (pred[:, 0, :] - pred[:, -1, :]).std(0).mean().item()
+
+    iid = spread()
+    corr = spread(**_CORR)
+    assert corr < iid, f"correlated source must couple co-located points: {corr:.4f} vs {iid:.4f}"
+
+
+def test_correlated_source_rejects_a_per_cell_time():
+    """The interaction that would silently reintroduce the seam it exists to remove."""
+    with pytest.raises(AssertionError, match="requires flow_time_scope: global"):
+        _build(flow_source="correlated", flow_time_scope="cell")
+    with pytest.raises(AssertionError, match="requires flow_time_scope: global"):
+        _build(flow_source="correlated", flow_time_per_cell=True)
+
+
+def test_correlated_source_needs_the_coordinates(inputs):
+    """Rather than silently falling back to iid, which would look like a null result."""
+    dec = _build(**_CORR).eval()
+    with pytest.raises(AssertionError, match="needs the raw target coordinates"):
+        _decode(dec, inputs, ens_size=1, coords_query=None)

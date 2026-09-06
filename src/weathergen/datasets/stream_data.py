@@ -98,6 +98,11 @@ class StreamData:
             torch.tensor([0 for _ in range(self.healpix_cells)]) for _ in range(output_steps)
         ]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
+        # raw (lat, lon) on the decode QUERY axis: cell-major, and replicated with the queries
+        # when soft blend is on. Distinct from `target_coords_raw`, which lives on the target
+        # VALUE axis and is never replicated. Needed by a position-dependent flow source, since
+        # `target_coords` is expressed in the host cell's frame and jumps at a cell boundary.
+        self.target_coords_query = [torch.tensor([]) for _ in range(output_steps)]
         self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
         # soft-blend decode (decode_soft_blend_k): replica -> original-point map and weights;
         # None when blending is disabled for the stream
@@ -122,6 +127,7 @@ class StreamData:
 
         # Pin target tensors
         self.target_coords = _pin_tensor_list(self.target_coords)
+        self.target_coords_query = _pin_tensor_list(self.target_coords_query)
         self.target_coords_lens = _pin_tensor_list(self.target_coords_lens)
         self.target_tokens = _pin_tensor_list(self.target_tokens)
         self.idxs_inv = _pin_tensor_list(self.idxs_inv)
@@ -152,6 +158,7 @@ class StreamData:
 
         dv = device
         self.target_coords = [t.to(dv, non_blocking=True) for t in self.target_coords]
+        self.target_coords_query = [t.to(dv, non_blocking=True) for t in self.target_coords_query]
         self.target_coords_lens = [t.to(dv, non_blocking=True) for t in self.target_coords_lens]
         self.target_tokens = [t.to(dv, non_blocking=True) for t in self.target_tokens]
         self.target_blend_idx = [
@@ -315,6 +322,7 @@ class StreamData:
         is_spoof: bool,
         blend_idx: torch.Tensor | None = None,
         blend_weights: torch.Tensor | None = None,
+        target_coords_query: torch.Tensor | None = None,
     ) -> None:
         """
         Add data for target for one input.
@@ -346,6 +354,8 @@ class StreamData:
         self.target_coords_lens[fstep] = target_coords_per_cell
         self.target_blend_idx[fstep] = blend_idx
         self.target_blend_weights[fstep] = blend_weights
+        if target_coords_query is not None:
+            self.target_coords_query[fstep] = target_coords_query
 
         self.target_is_spoof[fstep] = is_spoof
 
