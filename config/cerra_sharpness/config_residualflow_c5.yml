@@ -1,0 +1,93 @@
+# ARM C2: CORRELATED FLOW SOURCE + BLEND-TRAINING. Pair with config_residualflow_ft.yml:
+#   --config config/cerra_sharpness/config_residualflow_ft.yml \
+#            config/cerra_sharpness/config_residualflow_c2.yml
+#
+# WHY THIS ARM EXISTS. The corrector's only texture mechanism is self-attention INSIDE one HEALPix
+# cell -- `cu_seqlens` makes the attention mask strictly block-diagonal, so points in different
+# cells can never attend to each other. With an iid `y0` neighbouring cells therefore generate
+# statistically INDEPENDENT texture, and the only way to make two independent draws agree at a
+# shared border is to AVERAGE them. That is soft blend, and it costs 31-69% of the small-scale
+# amplitude: sharpness and seamlessness get traded roughly 1:1.
+#
+# `flow_source: correlated` draws `y0` from a globally defined Gaussian field evaluated at each
+# point's true position, so the two sides of a boundary SHARE their noise and agree by
+# construction -- nothing is averaged, so there is no amplitude tax. This is the one route that
+# buys sharpness and seamlessness together instead of trading them.
+#
+# THE MEASUREMENT THAT MADE THIS THE NEXT MOVE. `seam_next_steps.md` §5 designed this in 2026-08
+# and deprioritised it ("the sampled half only, ~10% of tile DC"). That estimate divided by the
+# RAW per-cell DC, which the rotated-tiling null now shows is 87-97% NOT tiling-aligned. On the
+# aligned artifact itself the sampled component is 50-89% -- the majority on every channel.
+# See playground/flowmatching/FINDINGS_DC_NULL_2026-09-06.md.
+#
+# HOW TO READ IT. Primary metric is the tiling-ALIGNED excess from `playground/postproc/dc_null.py`
+# at E=1 and E=16, NOT the raw DC. The signature of success:
+#   * A(E=1) falls toward A(E=16)      -- the sampled aligned artifact collapses
+#   * member SF at 10-25 km HOLDS or RISES -- no averaging, so no amplitude tax. This is what
+#     separates it from soft blend, which drove SF down.
+#   * seam excess falls.
+# If A(E=1) falls AND SF falls, `flow_source_length_km` is too long: the source has eaten the
+# degrees of freedom. Bisect with `flow_source_mix` or shorten it. Do NOT read MSE as a verdict.
+
+general:
+  # frozen-base arms need spawn: forked dataloader workers throw
+  # `c10::AcceleratorError: CUDA error: initialization error` at the start of validation, and
+  # num_workers: 0 is NOT a workaround (worker_workset asserts world_size == 1)
+  multiprocessing_method: "spawn"
+  desc: "residualflow_c5_corr5km_blend"
+
+# matched to A1 (oxdtokeq), the simplest arm and equal-or-better on 4 of 5 channels
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+
+# the point of the arm
+flow_source: "correlated"
+# ~2-3x the point spacing at 1.2M (~7.6 km): long enough that points straddling a cell border
+# share noise, short enough that a 200 km cell still holds ~180 independent degrees of freedom.
+flow_source_length_km: 5.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+# REQUIRED by the correlated source and asserted in ResidualFlowBranch.__init__:
+# y_t = (1-t) y0 + t r is continuous across a boundary only if t is, so a per-cell t would write
+# the seam straight back into the training state. This does NOT contradict the "flow_time_per_cell
+# MUST STAY ON" note in the _ft file: what that falsified is per-POINT t, where a cell-mate near
+# t=1 leaks the answer. Global t removes that leak entirely -- every point shares one time -- and
+# it is what the sampler already does.
+flow_time_scope: "global"
+
+# C2 ADDS BLEND-TRAINING. The two mechanisms target the two halves of the artifact and are
+# complementary, not alternatives:
+#   * the correlated source reaches the SAMPLED aligned artifact (50-89% of it)
+#   * blend-training reaches the SYSTEMATIC half -- measured to remove it on 10si / r_850 / u_850
+#     to non-significance, leaving only tp (5.4 sigma). See FINDINGS_DC_NULL_2026-09-06.md §2.2.
+# They also compose cleanly: because the source is a function of POSITION and replicas of a point
+# carry copies of its raw coordinate row, every replica now receives the SAME y0. That removes an
+# existing train/eval asymmetry -- training drew `randn_like` on the replicated axis (a different
+# y0 per replica) while `sample` draws once and shares it through `_expand`.
+#
+# COSTS, carried over from the blend arm: it replicates ~1.6x more query rows, so it OOMs at
+# native density (the limit is per-sample; more nodes do not help) and must be scored at 1.2M
+# against a control at the SAME cap. It also cost some 50-200 km sharpness and some physical
+# validity on its own.
+flow_blend_in_training: True
+
+# cerra_flowmatch_v2 plus exactly decode_soft_blend_k and decode_soft_blend_tau, nothing else --
+# verify with a diff before trusting any result from it. Stream overrides on the command line are
+# silently discarded on a `train` run, which is why this is a directory and not `--options`.
+streams_directory: "./config/streams/cerra_blendtrain/"
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 0.0}
+        mse_flow: {weight: 1.0}
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+  # ABSOLUTE stop point, not "N more". The parent ws0x0bai ends at 96, so this buys 32, matching
+  # A1/A2/B exactly.
+  num_mini_epochs: 128

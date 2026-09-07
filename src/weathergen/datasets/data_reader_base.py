@@ -12,6 +12,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
+import torch
 from numpy import datetime64, timedelta64
 from numpy.typing import NDArray
 
@@ -531,6 +532,7 @@ class DataReaderBase(metaclass=ABCMeta):
         mean: dict[int, float],
         stdev: dict[int, float],
         name: str,
+        skip: set[int] | None = None,
     ) -> NDArray[DType]:
         """
         Helper function to normalize data
@@ -557,8 +559,56 @@ class DataReaderBase(metaclass=ABCMeta):
                 f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
             )
         for i, ch in enumerate(idx):
+            if skip and i in skip:
+                continue  # this channel is standardised by its own transform instead
             data[..., i] = (data[..., i] - mean[ch]) / stdev[ch]
 
+        return data
+
+    def _transform_idx(self) -> dict[int, dict]:
+        """Position on the TARGET channel axis -> transform spec, for the configured channels."""
+        tf = self.stream_info.get("channel_transforms") or {}
+        return {i: tf[nm] for i, nm in enumerate(self.target_channels) if nm in tf}
+
+    @staticmethod
+    def _channel_transform(data, specs, inverse: bool):
+        """Per-channel invertible transform that REPLACES the z-score for that channel.
+
+        Why: `tp` is positive, intermittent and heavy-tailed, and a flow-matching decoder
+        transports a GAUSSIAN source. Asking it to hit that marginal in raw units is asking for
+        the wrong shape, and it shows -- 21-64% of predicted `tp` is negative across every arm
+        measured so far. Modelling ``log1p(x/s)`` instead puts the target much closer to the shape
+        the sampler can represent, and the inverse cannot emit a negative value at all.
+
+        This is the right layer for it. A clamp on the residual is deliberately absent
+        (``flow_residual_clamp``) because it breaks the identity that makes plain MSE the CFM
+        objective, and ``pred_head.final_activation`` never runs because the flow decoder owns its
+        own head and bypasses ``pred_heads``. A transform applied before the residual is formed
+        sidesteps both.
+
+        ``mean``/``stdev`` in the spec are statistics of the TRANSFORMED variable -- the store's
+        own statistics describe raw rain and would leave log-space rain badly scaled, which is why
+        the z-score is skipped for these channels rather than composed with them.
+
+        The clamp on the inverse moves only points the model placed below the physical floor, and
+        moves them to exactly zero, which for rain is a real state rather than an edge artifact.
+        """
+        # The forward path gets numpy in the dataloader worker; the INVERSE also runs on
+        # predictions, which arrive as torch tensors on the GPU (`validation_io.write_output` ->
+        # `denormalize_target_channels`). `np.log1p` on a CUDA tensor raises
+        # "can't convert cuda:N device type tensor to numpy", so dispatch on the type -- the same
+        # branch `data_reader_cams` makes, and for the same reason.
+        xp = torch if torch.is_tensor(data) else np
+        for i, spec in specs.items():
+            kind = str(spec.get("type", "log1p"))
+            assert kind == "log1p", f"unknown channel transform '{kind}'"
+            sc, mu, sd = float(spec["scale"]), float(spec["mean"]), float(spec["stdev"])
+            if inverse:
+                t = data[..., i] * sd + mu
+                data[..., i] = sc * xp.expm1(xp.clip(t, 0.0, None))
+            else:
+                t = xp.log1p(xp.clip(data[..., i], 0.0, None) / sc)
+                data[..., i] = (t - mu) / sd
         return data
 
     @staticmethod
@@ -568,6 +618,7 @@ class DataReaderBase(metaclass=ABCMeta):
         mean: dict[int, float],
         stdev: dict[int, float],
         name: str,
+        skip: set[int] | None = None,
     ) -> NDArray[DType]:
         """
         Helper function to denormalize data
@@ -594,6 +645,8 @@ class DataReaderBase(metaclass=ABCMeta):
                 f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
             )
         for i, ch in enumerate(idx):
+            if skip and i in skip:
+                continue  # this channel is de-standardised by its own transform instead
             data[..., i] = (data[..., i] * stdev[ch]) + mean[ch]
 
         return data
@@ -648,7 +701,11 @@ class DataReaderBase(metaclass=ABCMeta):
         -------
         Normalized target data
         """
-        return self._normalize(target, self.target_idx, self.mean, self.stdev, "target")
+        specs = self._transform_idx()
+        target = self._channel_transform(target, specs, inverse=False)
+        return self._normalize(
+            target, self.target_idx, self.mean, self.stdev, "target", skip=set(specs)
+        )
 
     def denormalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """
@@ -678,7 +735,11 @@ class DataReaderBase(metaclass=ABCMeta):
         -------
         Denormalized target data
         """
-        return self._denormalize(target, self.target_idx, self.mean, self.stdev, "target")
+        specs = self._transform_idx()
+        target = self._denormalize(
+            target, self.target_idx, self.mean, self.stdev, "target", skip=set(specs)
+        )
+        return self._channel_transform(target, specs, inverse=True)
 
 
 class DataReaderTimestep(DataReaderBase):

@@ -1,0 +1,41 @@
+# ARM T0: matched control for T1 -- identical joint fine-tune, RAW tp. Only pairing makes T1 readable.
+#   --config config/cerra_sharpness/config_residualflow_ft.yml \
+#            config/cerra_sharpness/config_residualflow_t1.yml
+#
+# The question this answers: does modelling log(1 + tp/0.01) instead of raw tp move precipitation
+# at all? Raw tp has skew 11.12 / kurtosis 277.3 and is 49.8% dry; the transform gives skew 0.99 /
+# kurtosis -0.51, and its inverse cannot emit a negative value.
+#
+# WHY THE BASE IS UNFROZEN. The transform changes the units the target lives in, so the frozen
+# base's `mu` is in the wrong space and the residual would be meaningless. The base has to adapt,
+# which is why `flow_freeze_base: False` and `mse_det` carries weight. This is ALSO why this is
+# only a probe: a proper answer needs the base retrained from scratch (~96 mini-epochs). Eight
+# mini-epochs cannot converge a rescaled base -- read this arm for DIRECTION, not for final
+# numbers, and read it ONLY against T0, which is the identical run without the transform.
+#
+# READ IT ON: % negative tp (must go to exactly 0), the tp marginal, and tp member SF. Not MSE --
+# it is not comparable across a change of target units at all.
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "residualflow_t0_control"
+
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: False
+flow_time_scope: "global"
+
+streams_directory: "./config/streams/cerra_flowmatch_v2/"
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 1.0}
+        mse_flow: {weight: 1.0}
+  learning_rate_scheduling:
+    lr_max: 5.0e-5
+  num_mini_epochs: 104
