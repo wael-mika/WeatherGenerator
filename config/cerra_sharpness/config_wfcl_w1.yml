@@ -1,0 +1,147 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM W1 -- WFCL finetune on top of C2.
+#
+# Pass the shared half FIRST, then this file:
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_wfcl_w1.yml
+#     --from-run-id re6i8y5m
+#
+# WHAT THIS ARM IS FOR.
+# Every arm of this campaign so far optimised a structure function, i.e. AMPLITUDE. The
+# scorecard now says that bought amplitude at the cost of PLACEMENT: C2 over the Alps raised
+# 10si amplitude 57% and dropped rho 39%. WFCL is the first objective here that optimises
+# placement directly -- WCL(L,k) is a differentiable per-scale, per-orientation correlation --
+# and its P_t schedule trains phase FIRST and amplitude LAST, the reverse of what we have
+# been doing.
+#
+# Starting from C2 (re6i8y5m, chkpt00128) keeps the one unambiguous win of the campaign --
+# blend-training eliminated the seam on every channel -- and asks whether the placement
+# regression can be bought back without giving it up.
+#
+# *** WHAT THIS ARM CANNOT DO. ***
+# An ORACLE probe on ypj5be4l measured the increment correlation ceiling at 5.5 km:
+#     tp 0.054 | 2t 0.514 | 10si 0.195 | z_850 0.172 | t_850 0.093
+# and skill = 2*A*rho - A^2 is maximised at A = rho. No loss can manufacture information the
+# latent does not carry, so on tp (rho 0.054) driving amplitude toward 1 is NEGATIVE skill no
+# matter how good the phase term is. WFCL is a loss-side lever; latent_probe_report.md says
+# the bottleneck is the READOUT (tp 0.087 deployed vs 0.518 from an MLP on one latent).
+#   * Judge this arm on 2t (rho 0.514) and 10si (0.195). They are the only channels where a
+#     positive result is interpretable, exactly as in the residualflow header.
+#   * A null result here is INFORMATIVE: it says the loss is not the binding constraint and
+#     the readout split (handoff 2026-09-09 section 4, item 1) is the better lever.
+#
+# WHY WFCL IS ADDED TO mse_flow RATHER THAN REPLACING IT.
+# The paper replaces MSE outright, but there MSE is the whole objective of a deterministic
+# U-Net. Here `mse_flow` IS the conditional-flow-matching objective; deleting it does not
+# leave a sharpening loss, it leaves a model with no flow to match. WFCL is applied to the
+# decoded field instead -- member 1 is `mu + r_scale*(y0 + v)`, which is exactly the
+# x1-prediction reparametrisation of the velocity, so the gradient reaches the same weights.
+# beta_wfcl is therefore a REGULARISER WEIGHT and is the main knob on this arm.
+#
+# SCORE IT WITH rho, NOT SF. Per handoff section 4: every ranking made on a structure-function
+# ratio alone is suspect. Use playground/postproc/fine_skill.py (rho AND amplitude) and the
+# aligned excess A from dc_null.py. The new per-orientation WCL_L*_k* logs are the cheap
+# in-run version of the same question.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "wfcl_w1_from_c2_patch64_J3"
+
+# --- inherited C2 recipe: correlated source + blend training, base frozen -------------------
+# Unchanged from config_residualflow_c2.yml so the ONLY new variable is the WFCL term.
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+flow_source: "correlated"
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+flow_time_scope: "global"
+flow_blend_in_training: True
+
+# Patch targets instead of a uniform random draw. See the header of the stream file --
+# this is what lets the wavelet levels reach 11-22 km.
+streams_directory: "./config/streams/cerra_wfcl/"
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 0.0}
+        mse_flow: {weight: 1.0}
+
+    wfcl:
+      type: LossSpectralWFCL
+      # The main knob. Early on P_t = 1, so the WFCL term is FCL + sum_L WCL_L, which is
+      # bounded by 2*(1+J) = 8; at 0.1 that contributes at most ~0.8 against mse_flow ~ 1.
+      # Raise it if the WCL curves refuse to move, lower it if mse_flow stalls.
+      weight: 0.1
+      target_and_aux_calc: Physical
+      loss_fcts:
+        wfcl:
+          target_stream: CERRA
+          # must match config/streams/cerra_wfcl/cerra.yml exactly
+          grid_width: 1069
+          grid_height: 1069
+          patch_size: 64
+          coords_zarr: "/e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"
+
+          # The two channels with enough decodable fine-scale signal for a positive result
+          # to mean anything. tp is deliberately EXCLUDED from the training objective: at
+          # rho 0.054 the loss would spend its gradient budget manufacturing texture that
+          # cannot be right. tp is still scored in validation below.
+          channels: ['2t', '10si']
+
+          J: 3
+          gamma: [1.0, 1.0, 1.0]
+          beta: 1.0
+          alpha: 0.1
+          facl_mode: expected     # convex combination; "sampled" = original FACL Bernoulli
+          reduce: members         # MEMBERS, never the ensemble mean
+
+          # *** THE SCHEDULE, AND THE CONTINUATION TRAP. ***
+          # istep is absolute and survives train_continue. C2 ended at istep 66000 after 128
+          # mini-epochs (~516 steps/mini-epoch). num_mini_epochs below is an ABSOLUTE stop
+          # point, so 160 means 32 more mini-epochs ~ 16500 more steps.
+          # Without schedule_start_step, P_t at the first step of this run would be
+          # 1 - 66000/(0.9*82500) = 0.11 -- amplitude-only from the outset, the exact
+          # opposite of the intended order. These two numbers must be updated together if
+          # num_mini_epochs changes.
+          schedule_start_step: 66000
+          total_steps: 82500
+
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+
+  # ABSOLUTE stop point, not "32 more". 128 (C2's end) + 32.
+  num_mini_epochs: 160
+
+
+# ===========================================================================================
+# NO `validation_config` AND NO `wgtags` HERE, DELIBERATELY.
+# Both already live in config_residualflow_ft.yml, and launch-slurm.py calls mlflow log_config
+# once PER FILE: a top-level key present in two sources makes mlflow reject the second write
+# and kills the launch with
+#     RestException: Parameter with key validation_config was already logged
+# So this arm inherits ft's validation block unchanged (physical + structure +
+# structure_members), and is tagged `exp: cerra_residualflow_ft` like every C arm.
+#
+# CONSEQUENCE, and it is a real one: there is no validation-side WFCL term, so the only band
+# diagnostics come from the TRAINING logs -- which cover 2t and 10si but NOT tp, since tp is
+# excluded from the training channels above. To get tp's per-orientation WCL, run a
+# validation-only pass with a config whose `validation_config` is the sole source, or add the
+# term to ft once the C arms that share it have finished.
+# ===========================================================================================

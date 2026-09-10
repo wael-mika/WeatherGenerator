@@ -1,0 +1,197 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM D1 -- WFCL on a DETERMINISTIC decoder.
+#
+# THIS FILE IS STANDALONE. Do NOT pass config_residualflow_ft.yml with it -- that file sets
+# `decoder_type: ResidualFlow` and the whole flow_* block, which is exactly what this arm is
+# built to avoid.
+#
+#     ../WeatherGenerator-private/hpc/launch-slurm.py --from-run-id ws0x0bai_wfcl \
+#       --config config/cerra_sharpness/config_wfcl_d1.yml \
+#       --nodes 2 --account e-ext-2025e01-128
+#
+# WHAT THIS ARM IS FOR.
+# Arm W1 puts WFCL on a residual-flow corrector. This one puts the same loss, with the same
+# patch geometry and the same channels, on the plain deterministic PerceiverIO readout. The
+# question is whether the wavelet correlation term does anything at all without a generative
+# decoder underneath it.
+#
+# It is also the FAITHFUL reading of the paper. An et al. train a deterministic U-Net and
+# replace MSE outright; there is no ensemble, so none of the "which member do we score"
+# ambiguity that forced `reduce: members` on the generative arms applies here.
+#
+# WHY THIS IS THE MORE DIRECT TEST OF THE CAMPAIGN'S ACTUAL BOTTLENECK.
+# latent_probe_report.md measured the deployed decoder against a 3-layer MLP reading ONE
+# latent: tp 0.087 vs 0.518, 10si 0.371 vs 1.046. Its conclusion was "the fine scale is
+# present in the representation and is being lost at the readout." That gap is a property of
+# the DETERMINISTIC readout, and this arm asks the obvious follow-up: is the gap partly an
+# OBJECTIVE problem -- MSE preferring the blur -- rather than a capacity problem? If a
+# spectral objective closes any of it, the readout redesign gets much more attractive. If it
+# closes none, the gap is structural and the loss is not the lever.
+#
+# HOW TO READ IT.
+#   * Pixel MSE WILL get worse. That is the point, not a regression: skill = 2*A*rho - A^2 is
+#     maximised at the blur, so any move toward A = 1 costs RMSE. The paper reports the same
+#     (MSE 0.6246 -> 0.7234) while every structural metric improves.
+#   * Judge on 2t (oracle rho 0.514) and 10si (0.195) -- the channels trained on, and the only
+#     ones where a positive result is interpretable.
+#   * Score with playground/postproc/fine_skill.py: rho AND amplitude. Per handoff 2026-09-09
+#     section 4, a structure-function ratio alone rewards variance regardless of whether it is
+#     the right variance, and every ranking made on SF alone this campaign is suspect.
+#
+# PARENT. ws0x0bai = `pretrain_l5_deterministic`, PerceiverIOCoordConditioning, healpix 5,
+# 96 mini-epochs, istep 49366, chkpt00096. Preferred over ypj5be4l (64 mini-epochs, istep
+# 15610) purely because it is far more converged, so the MSE baseline it provides is a harder
+# thing for WFCL to beat.
+#
+# *** MUST BE LAUNCHED FROM A SEEDED SNAPSHOT (ws0x0bai_wfcl). ***
+# --from-run-id ws0x0bai would ship the code that TRAINED that checkpoint, which has no
+# spectral_*.py at all, and LossSpectralWFCL would not resolve. Seed first:
+#     playground/raina/seed_raina_run.py ws0x0bai --suffix wfcl
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "wfcl_d1_deterministic_from_ws0x0bai"
+
+# Explicit, though the parent already carries it. ws0x0bai's saved config still holds a full
+# flow_* block from the shared defaults; those keys are inert while decoder_type is this, but
+# stating it here makes it impossible to inherit ResidualFlow by passing the wrong parent.
+decoder_type: PerceiverIOCoordConditioning
+
+# Same patch geometry as arm W1, so D1 and W1 differ ONLY in the decoder.
+streams_directory: "./config/streams/cerra_wfcl_det/"
+
+training_config:
+  losses:
+    # MSE is KEPT rather than replaced. The paper drops it, but it has a sigmoid-bounded output
+    # head and works in [0,1]; here FCL is exactly scale-invariant (proved in
+    # spectral_utils_test.test_fcl_is_scale_invariant), so under P_t ~ 1 the field could drift
+    # to any global brightness and pay nothing. MSE is the cheapest anchor against that, and it
+    # keeps the arm comparable to its own parent. Watch mean(pred)-mean(obs) regardless.
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {weight: 1.0}
+
+    wfcl:
+      type: LossSpectralWFCL
+      # The main knob, same value as W1 so the two arms are comparable. Early on P_t = 1 and
+      # the term is FCL + sum_L WCL_L, bounded by 2*(1+J) = 8, so at 0.1 it contributes at
+      # most ~0.8 against mse ~ 1. Raise if the WCL curves refuse to move.
+      weight: 0.1
+      target_and_aux_calc: Physical
+      loss_fcts:
+        wfcl:
+          target_stream: CERRA
+          # must match config/streams/cerra_wfcl_det/cerra.yml exactly
+          grid_width: 1069
+          grid_height: 1069
+          patch_size: 64
+          coords_zarr: "/e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"
+
+          # Identical to W1 on purpose: the comparison being made is decoder-vs-decoder, so
+          # the channel set has to be held fixed. tp is excluded from the OBJECTIVE and scored
+          # in validation below.
+          channels: ['2t', '10si']
+
+          J: 3
+          gamma: [1.0, 1.0, 1.0]
+          beta: 1.0
+          alpha: 0.1
+          facl_mode: expected
+          # The decoder is deterministic, so all members are the same field and every reduce
+          # mode coincides. Kept at `members` so the logged number means the same thing it
+          # does on W1.
+          reduce: members
+
+          # *** SCHEDULE, AND THE CONTINUATION TRAP. ***
+          # istep is ABSOLUTE and survives train_continue. ws0x0bai ended at 49366 after 96
+          # mini-epochs (~514 steps/mini-epoch), so num_mini_epochs 128 below = 32 more
+          # ~ 16450 steps. Without schedule_start_step, P_t would open at
+          # 1 - 49366/(0.9*65800) = 0.166 -- nearly pure amplitude from step one, the exact
+          # inverse of the intended order. These two numbers move together with
+          # num_mini_epochs.
+          schedule_start_step: 49366
+          total_steps: 65800
+
+  # The parent's own value, unchanged. This arm changes the LOSS and nothing else; raising lr
+  # on a converged deterministic decoder would confound the result with plain re-training.
+  learning_rate_scheduling:
+    lr_start: 1.0e-06
+    lr_max: 5.0e-05
+    lr_final_decay: 2.0e-06
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  # ABSOLUTE stop point, not "32 more". 96 (ws0x0bai's end) + 32.
+  num_mini_epochs: 128
+
+validation_config:
+  # Unlike W1, this arm is a SINGLE config file, so there is no second source to collide with
+  # and validation_config can live here. That is what lets D1 carry the WFCL diagnostic term
+  # that W1 had to give up.
+  losses:
+    physical:
+      # `type` is REQUIRED on every validation loss term -- Model.create reads v.type for each
+      # entry, and the parent's validation_config has no `physical` term to supply it by merge.
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: True, weight: 1.0}
+    structure:
+      loss_fcts:
+        struct:
+          pair_sampling: stratified
+          log_bin_ratios: True
+    structure_members:
+      loss_fcts:
+        struct_members:
+          pair_sampling: stratified
+          log_bin_ratios: True
+    # Diagnostic only; validation does no backprop, so this just logs the band decomposition.
+    # tp IS scored here even though it is not trained on -- the per-orientation WCL_L*_k* logs
+    # are the cheapest read on whether the tiling artifact is orientation-selective, which is
+    # something dc_null.py structurally cannot answer.
+    wfcl:
+      type: LossSpectralWFCL
+      weight: 1.0
+      target_and_aux_calc: Physical
+      loss_fcts:
+        wfcl:
+          target_stream: CERRA
+          grid_width: 1069
+          grid_height: 1069
+          patch_size: 64
+          coords_zarr: "/e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"
+          channels: ['2t', '10si', 'tp']
+          J: 3
+          gamma: [1.0, 1.0, 1.0]
+          beta: 1.0
+          alpha: 0.1
+          reduce: members
+          schedule_start_step: 49366
+          total_steps: 65800
+
+  samples_per_mini_epoch: 4
+  validate_before_training: True
+  output:
+    num_samples: 0
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_wfcl_d1
+  grid: null
