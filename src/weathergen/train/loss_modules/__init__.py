@@ -8,7 +8,13 @@
 # nor does it submit to any jurisdiction.
 
 from .loss_module_physical import LossPhysical
+from .loss_module_spectral import LossSpectralWFCL
 from .loss_module_ssl import LossLatentSSLStudentTeacher
 from .loss_module_structure import LossStructureFunction
 
-__all__ = [LossPhysical, LossLatentSSLStudentTeacher, LossStructureFunction]
+__all__ = [
+    LossPhysical,
+    LossLatentSSLStudentTeacher,
+    LossStructureFunction,
+    LossSpectralWFCL,
+]
