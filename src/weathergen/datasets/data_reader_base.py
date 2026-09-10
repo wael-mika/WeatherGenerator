@@ -249,6 +249,73 @@ class ReaderData:
 
         return self
 
+    def subsample_patches(
+        self, rng, grid_width: int, grid_height: int, patch_size: int, num_patches: int
+    ) -> "ReaderData":
+        """Keep only points falling inside randomly placed contiguous square patches.
+
+        The alternative to `shuffle`'s uniform random draw, for losses that need a
+        dense regular raster rather than a scattered sample (WFCL). Spending the
+        same point budget on a few contiguous blocks yields complete grids at the
+        source's native resolution, instead of a grid that is ~96% holes.
+
+        Patches are placed on the *aligned* lattice (origins are multiples of
+        `patch_size`). This is required, not cosmetic:
+        `spectral_patches.group_into_patches` recovers patch membership as
+        `row // patch_size`, so a patch straddling two lattice cells would be split
+        into four incomplete fragments and silently discarded.
+
+        Must be called on the reader's full, natively-ordered output. That output is
+        TIME-MAJOR when the window spans several steps: `data_reader_anemoi._get` does
+        `data.transpose([0, 2, 1]).reshape((T * G, -1))`, so row `t*G + g` is grid
+        point `g` at step `t`. The same patches are therefore selected in every step
+        block -- both because the geometry has to be consistent for the loss, which
+        groups per timestep, and because anything else would interleave steps within
+        a patch. A point count that is not a whole multiple of `G` means something
+        upstream filtered or reordered, and we raise rather than scramble the patches.
+
+        Returns
+        -------
+        self
+        """
+        num_datapoints = self.coords.shape[0]
+        if num_datapoints == 0:
+            return self
+
+        grid_points = grid_width * grid_height
+        n_steps, remainder = divmod(num_datapoints, grid_points)
+        if remainder != 0 or n_steps == 0:
+            raise ValueError(
+                f"subsample_patches needs whole {grid_height}x{grid_width} rasters in native "
+                f"order, got {num_datapoints} points, which is {num_datapoints / grid_points:.3f} "
+                f"rasters. Something upstream already filtered or reordered the points."
+            )
+
+        n_rows, n_cols = grid_height // patch_size, grid_width // patch_size
+        n_lattice = n_rows * n_cols
+        if n_lattice == 0:
+            raise ValueError(f"patch_size={patch_size} exceeds the {grid_height}x{grid_width} grid")
+
+        chosen = rng.choice(n_lattice, min(num_patches, n_lattice), replace=False)
+        p_row, p_col = chosen // n_cols, chosen % n_cols
+
+        # (num_patches, patch_size, patch_size) flat indices within ONE raster
+        dr = np.arange(patch_size)
+        rows = (p_row[:, None] * patch_size)[:, :, None] + dr[None, :, None]
+        cols = (p_col[:, None] * patch_size)[:, None, :] + dr[None, None, :]
+        base = np.sort((rows * grid_width + cols).reshape(-1))
+
+        # ... repeated into every step block
+        offsets = (np.arange(n_steps) * grid_points)[:, None]
+        idxs_subset = (base[None, :] + offsets).reshape(-1)
+
+        self.coords = self.coords[idxs_subset]
+        self.geoinfos = self.geoinfos[idxs_subset]
+        self.data = self.data[idxs_subset]
+        self.datetimes = self.datetimes[idxs_subset]
+
+        return self
+
 
 def check_reader_data(rdata: ReaderData, dtr: DTRange) -> None:
     """

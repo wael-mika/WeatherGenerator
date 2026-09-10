@@ -75,9 +75,24 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
             assert False, "invalid value for argument `type`"
 
         # get source (of potentially multi-step length)
-        rdata = (
-            get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
-        )
+        rdata = get_reader_data(idx)
+
+        # Contiguous-patch targets, for losses that need a dense regular raster (WFCL).
+        # Off unless the stream asks for it, in which case it replaces the uniform
+        # random draw that `max_num_targets` would otherwise perform.
+        patch_cfg = ds.stream_info.get("target_patches", None) if type == "target" else None
+        if patch_cfg is not None:
+            rdata = rdata.subsample_patches(
+                rng,
+                grid_width=int(patch_cfg["grid_width"]),
+                grid_height=int(patch_cfg["grid_height"]),
+                patch_size=int(patch_cfg["patch_size"]),
+                num_patches=int(patch_cfg["num_patches"]),
+            )
+        else:
+            rdata = rdata.shuffle(rng, shuffle, num_subset)
+
+        rdata = rdata.remove_nan_coords_and_geoinfos()
         rdata.data = normalize_channels(rdata.data)
         rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
         rdatas += [rdata]
