@@ -9,6 +9,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import datetime
 import os
 
 import torch
@@ -102,12 +103,27 @@ class TrainerBase:
                 print(f"Running on device {device}")
 
             backend = torch.distributed.get_default_backend_for_device(device)
+            # Collective timeout. PyTorch's NCCL default is 10 minutes and is NOT settable from
+            # any environment variable -- only via this argument. Ten minutes is too short for
+            # the end of a long inference: each rank writes a ~10-20 GB zarr store while the
+            # others wait at the next collective, and on a busy filesystem that overruns. Runs
+            # k8rh8ktl, e2gnrwnw, kegjqawn and fpkjym95 all died with
+            #     Watchdog caught collective operation timeout: WorkNCCL(... OpType=ALLREDUCE,
+            #     Timeout(ms)=600000) ran for 600xxx milliseconds before timing out
+            # after ~1h55m, and the ranks that were mid-write were left with truncated,
+            # unreadable zip stores (BadZipFile) -- losing 46-92 of 368 initialisations each.
+            # A longer timeout only delays detection of a genuine hang; it does not mask one,
+            # and inference jobs are bounded by their slurm walltime anyway.
+            pg_timeout = datetime.timedelta(
+                minutes=int(os.environ.get("WEATHERGEN_PG_TIMEOUT_MIN", "45"))
+            )
             torch.distributed.init_process_group(
                 backend=backend,
                 world_size=world_size,
                 device_id=device,
                 rank=rank,
                 init_method=f"tcp://{master_addr}:{master_port}",
+                timeout=pg_timeout,
             )
             print(f"Process group initialized ({backend}).")
 
