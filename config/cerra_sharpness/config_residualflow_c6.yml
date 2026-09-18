@@ -15,6 +15,8 @@
 #              config/cerra_sharpness/config_residualflow_c6.yml
 #     --from-run-id xk761c0a_wfcl
 #
+# First launch `vrse7m33` died at construction (inherited WFCL term, see training_config).
+#
 # WHY THIS ARM. C4 (`scmcehvo`) is the working baseline: fine-scale amplitude nearest 1.0 on
 # 4 of 5 channels, and the LOWEST placement rho of the five generative arms (10si 0.21). It
 # runs `flow_freeze_base: True`, so its placement ceiling is its frozen `mu` -- every C arm
@@ -72,6 +74,17 @@ training_config:
         mse: {enabled: False}
         mse_det: {weight: 0.0}
         mse_flow: {weight: 1.0}
+
+    # *** THE PARENT'S LOSSES BLEED THROUGH. ***
+    # A continuation inherits `xk761c0a`'s full config by merge, and that run trained with a
+    # WFCL term. An overlay cannot delete a key, so without this line C6 would have trained
+    # its corrector with E64's `wfcl` (reduce: mean) silently attached -- NOT C4's recipe.
+    # The first launch (`vrse7m33`) was stopped at construction by LossSpectralWFCL's pack
+    # guard, which is the only reason this was noticed. Term-level `enabled: False` drops the
+    # term before it is built (loss_calculator.py). This arm is base-side WFCL ONLY: the
+    # corrector sees mse_flow and nothing else, exactly as C4 did.
+    wfcl:
+      enabled: False
 
   learning_rate_scheduling:
     lr_max: 2.0e-4

@@ -1,0 +1,20 @@
+# ===========================================================================================
+# R48-split CONTINUATION -- dfzw4pqx (37/48) -> 48. MINIMAL OVERLAY.
+#
+#     launch-slurm.py --from-run-id dfzw4pqx \
+#       --config config/cerra_sharpness/config_wfcl_r48_split_cont.yml --nodes 2 \
+#       --account e-ext-2025e01-128 --chain-jobs 2
+#
+# Carries ONLY the deltas. config_wfcl_r48_split.yml (the FRESH-run config) descends from
+# config_pretrain_l5.yml and sets `general: istep: 0`; reusing it for a continuation reset the
+# step counter and would have run 48 MORE epochs on top of 37. See the E-ft header.
+#
+# num_mini_epochs 48 is ABSOLUTE, so from 37 this is 11 more.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "r48_readout_split_cont"
+
+training_config:
+  num_mini_epochs: 48

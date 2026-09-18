@@ -1,0 +1,367 @@
+# ===========================================================================================
+# R48-split -- READOUT SPLIT BY SPECTRAL CLASS. handoff 2026-09-09 section 4, item 1.
+#
+# The campaign's top-ranked untried idea. latent_probe_report.md measured the deployed decoder
+# against a 3-layer MLP reading ONE latent -- tp 0.087 vs 0.518, 10si 0.371 vs 1.046 -- and
+# concluded "the fine scale is present in the representation and is being lost at the readout".
+# This tests the cheapest structural response: stop making channels with nothing in common share
+# one set of readout weights.
+#
+# THE CONTROL IS `config_wfcl_e48_mse.yml` (run z1x9rw7j), and this file is a copy of it with a
+# single line changed -- the streams directory. Same decoder, same ens_size 1, same patch
+# targets, same total point budget (28+28 patches vs 56), same 48 mini-epochs, same mse-only
+# objective. **The only difference is that CERRA's eight channels are served as two streams with
+# separate target_readouts instead of one.**
+#
+#   CERRA         ROUGH   10si, r_850, tp                    (also carries the source)
+#   CERRA_SMOOTH  SMOOTH  2t, t_850, u_850, v_850, z_850     (diagnostic, target-only)
+#
+# Grouping rationale: on a shared readout, fine-scale placement rho is 0.69-0.77 for 2t and
+# ~0.00 for r_850 over the Atlantic. That spread is the evidence they should not share weights.
+#
+# NO WFCL HERE, DELIBERATELY. This isolates the readout change. If it works, WFCL stacks on top
+# afterwards; running both at once would repeat the mistake that made D1 unreadable.
+#
+# HOW TO READ IT. Compare against z1x9rw7j at matched mini-epochs with fine_skill.py -- rho AND
+# amplitude, per region, per channel. The prediction the split makes is specifically that the
+# ROUGH channels improve while the SMOOTH ones do not get worse. A uniform change in both would
+# suggest something other than the readout is responsible.
+#
+# There is no warm start: two target_token_engines is a different model shape, so no existing
+# checkpoint matches. This trains from scratch, like z1x9rw7j.
+# ===========================================================================================
+
+# ===========================================================================================
+# E48-mse -- deterministic ens_size 1, 48 epochs, mse ONLY (control)
+#
+# Part of a THREE-RUN design that finally isolates WFCL. All three share one stream
+# (`config/streams/cerra_wfcl_e1/`): deterministic PerceiverIO, **ens_size 1**, contiguous-patch
+# targets. Holding both fixed means the only variable across the three is the loss.
+#
+#   E48-mse   48 mini-epochs, mse only                     <- control, and the parent of E-ft
+#   E64-wfcl  64 mini-epochs, mse + WFCL from step 0       <- WFCL all the way through
+#   E-ft      E48-mse continued to 64 with WFCL added      <- WFCL as a 16-epoch finetune
+#
+# WHY ens_size 1. See the stream file. In one line: `mse` averages the members before taking the
+# error, so with 4 heads only their mean was ever trained, the heads drifted several K apart, and
+# WFCL's per-member scoring collapsed them -- which by itself produced a fake -46%/-68% RMSE
+# "improvement" while the ensemble mean got worse. One head removes that failure mode entirely.
+#
+# WHY PATCHES EVEN IN THE mse-ONLY CONTROL. WFCL cannot run without a dense raster, so the two
+# WFCL arms need patches. If the control used the usual 500k random draw, E-ft would change the
+# sampling and the loss at the same time -- exactly the confound that made the D1-vs-ws0x0bai
+# comparison unreadable. Patches everywhere costs comparability with older campaign baselines and
+# buys a clean single variable. That trade is deliberate.
+#
+# NOTE ON WHAT THIS DESIGN CAN AND CANNOT ANSWER. There is no 64-epoch mse-only run, so
+# "WFCL vs no WFCL at equal epochs" is not directly answerable yet; E48-mse can be extended to 64
+# later for that. What it does answer is WFCL-throughout vs WFCL-as-finetune, both against a
+# shared 48-epoch ancestor.
+# ===========================================================================================
+
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# STAGE 1 -- FRESH DETERMINISTIC LEVEL-5 BASE, TRAINED FROM SCRATCH.
+# The single trusted parent for every residual-flow corrector arm.
+# ===========================================================================================
+#
+# WHY THIS RUN EXISTS. The level-5 campaign (fthi701s / zk7yuisj) was run as a continuation of
+# `ypj5be4l` and both arms were unusable, for two independent reasons that a from-scratch base
+# removes outright:
+#
+#   1. `ypj5be4l` was trained on the `cerra_perceiver_v3_geo` branch with a per-stream `geo_bias`
+#      MLP that does not exist here. On warm start its eight tensors were reported as "Unused
+#      keys" and DROPPED, so the frozen base ran at mse.avg 0.172 against the parent's published
+#      0.116 -- 48% worse -- for 28 mini-epochs. Nothing failed; the evidence sat in the log.
+#      `allow_unused_checkpoint_keys` now defaults to False and turns that into a hard error.
+#   2. `ResidualScale.update()` was never called, so `r_scale` stayed at the global scalar 1.0
+#      that its own docstring says cannot survive this data. The corrector injected 2-5x too much
+#      residual amplitude on 7 of 8 channels. Trainer._report_residual_scales now raises if a
+#      mini-epoch ends with count == 0.
+#
+# Training from scratch also means this base is self-consistent with the code that will use it:
+# no inherited module can go missing, because nothing is inherited.
+#
+# WHY LEVEL 5 AND NOT 6. Cheaper, and the corrector is known to FIT here: fthi701s and zk7yuisj
+# both ran at `max_num_targets: 500000` with the 2-layer corrector on top of the 4-layer readout
+# and never OOM'd. The level-6 attempt at the same density did (z45153bw). Establish the
+# mechanism where it is affordable, then move it.
+#
+# EXPECT THIS BASE TO SCORE SLIGHTLY WORSE THAN ypj5be4l's 0.116, and do not treat that as a
+# regression: `geo_bias` is genuinely absent from this branch, so the fair comparison is this run
+# against itself and against the arms that continue it -- never against v3_geo's numbers.
+#
+# STAGE 2, once this finishes:
+#   config_residualflow_a1.yml     corrector sees mu + decoder tokens
+#   config_residualflow_a2.yml     corrector also sees the latent
+#   config_residualflow_b_l6.yml   joint: base keeps training under mse_det
+# All three continue THIS run, so they differ only in the corrector's conditioning and in whether
+# the base keeps training. `num_mini_epochs` is ABSOLUTE, so the arms must be set above 96.
+#
+# DENSITY IS SET IN THE STREAM CONFIG, ONCE: config/streams/cerra_flowmatch_v2/cerra.yml
+# (`max_num_targets: 500000`). The arms inherit it through this parent, which is why no arm file
+# overrides it. Training the base at a different density from the arms would fit the corrector in
+# a regime the base never saw.
+# ===========================================================================================
+
+embed_unembed_mode: "block"
+embed_dropout_rate: 0.1
+
+ae_local_dim_embed: 1024
+ae_local_num_blocks: 2
+ae_local_num_heads: 16
+ae_local_dropout_rate: 0.1
+ae_local_with_qk_lnorm: True
+
+ae_local_num_queries: 1
+ae_local_queries_per_cell: False
+ae_adapter_num_heads: 16
+ae_adapter_embed: 128
+ae_adapter_with_qk_lnorm: True
+ae_adapter_with_residual: True
+ae_adapter_dropout_rate: 0.1
+
+# Matched to ypj5be4l exactly (545 M params), minus geo_bias. Keeping the width identical means
+# the arms are compared against a base of the same capacity as the run every oracle number in
+# playground/flowmatching/README.md was measured on, so the rho table stays a usable reference
+# even though the absolute MSE will differ.
+ae_global_dim_embed: 2048
+ae_global_num_blocks: 4
+ae_global_num_heads: 32
+ae_global_dropout_rate: 0.1
+ae_global_with_qk_lnorm: True
+ae_global_att_dense_rate: 1.0
+ae_global_block_factor: 64
+ae_global_mlp_hidden_factor: 2
+ae_global_trailing_layer_norm: False
+
+ae_aggregation_num_blocks: 1
+ae_aggregation_num_heads: 32
+ae_aggregation_dropout_rate: 0.1
+ae_aggregation_with_qk_lnorm: True
+ae_aggregation_att_dense_rate: 1.0
+ae_aggregation_block_factor: 64
+ae_aggregation_mlp_hidden_factor: 2
+
+# Deterministic readout. ResidualFlowPointDecoder calls super().__init__ with the UN-widened
+# dim_coord_in precisely so that this checkpoint's `tte.*` keys match it byte for byte.
+decoder_type: PerceiverIOCoordConditioning
+pred_adapter_kv: False
+# REQUIRED for the arms. The within-cell self-attention is the only mechanism coupling a cell's
+# target points, so it is the only thing that can make the corrector emit a spatially coherent
+# residual rather than independent per-point noise. Model.create warns if this is off.
+pred_self_attention: True
+pred_mlp_adaln: True
+
+num_class_tokens: 0
+num_register_tokens: 0
+
+# REQUIRED on torch >= ~2.9: a stream's decoder runs at every output step, so ERA5's head is used
+# twice per iteration and DDP otherwise raises "marked as ready twice" on the first backward.
+ddp_static_graph: True
+
+fe_num_blocks: 8
+fe_num_heads: 16
+fe_dropout_rate: 0.1
+fe_with_qk_lnorm: True
+fe_layer_norm_after_blocks: [7]
+fe_impute_latent_noise_std: 1e-4
+forecast_att_dense_rate: 1.0
+
+healpix_level: 5
+
+with_mixed_precision: True
+with_flash_attention: True
+compile_model: False
+with_fsdp: False           # FSDP2 sharding bug with ae_local_blocks; use DDP
+
+# OFF at level 5. ypj5be4l ran this configuration at 500000 targets without it, and the level-6
+# OOM post-mortem left ~56 GiB of device memory unaccounted for with `save_on_cpu(pin_memory=True)`
+# active on GH200 -- untested, but no reason to carry the risk where it buys nothing.
+activation_offload: False
+attention_dtype: bf16
+mixed_precision_dtype: bf16
+mlp_norm_eps: 1e-5
+norm_eps: 1e-4
+
+latent_noise_kl_weight: 0.0
+latent_noise_gamma: 2.0
+latent_noise_saturate_encodings: 5
+latent_noise_use_additive_noise: False
+latent_noise_deterministic_latents: True
+
+freeze_modules: ""
+load_chkpt: {}
+
+norm_type: "LayerNorm"
+
+#####################################
+
+# Same stream directory the arms use, so base and arms share `max_num_targets: 500000`, the eight
+# CERRA target channels and their weights. Do not fork it for this run.
+streams_directory: "./config/streams/cerra_readout_split/"
+streams: ???
+
+zarr_store: "zip"
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  multiprocessing_method: "fork"
+  desc: "r48_readout_split"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+data_loading:
+  num_workers: 6
+  rng_seed: ???
+  repeat_data_in_mini_epoch: False
+  log_spoof_warnings: False
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # ABSOLUTE, not "N more". This run starts at 0, so 96 means 96, and the arms continuing it must
+  # be set ABOVE 96 or they will train nothing and still write a checkpoint.
+  num_mini_epochs: 48
+  samples_per_mini_epoch: 4096
+  shuffle: True
+
+  # ERA5 (1979-2023) and CERRA (1985-2023) both cover this range. 2023 is held out for validation.
+  start_date: 2010-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  # 6h window = ERA5 cadence -> ERA5 present in every window (no starvation).
+  time_window_step: 06:00:00
+  time_window_len: 06:00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 5e-5
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 256
+    num_steps_cooldown: 512
+    policy_warmup: "cosine"
+    policy_decay: "constant"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  # Plain mse: this is the deterministic base. mse_det / mse_flow belong to the arms and would
+  # assert here, because they require the [2, N, C] pack only ResidualFlow produces.
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    }
+
+  model_input: {
+    "forecasting": {
+      masking_strategy: "forecast",
+      },
+    }
+
+  forecast:
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 1
+      policy: "fixed"
+
+
+validation_config:
+  # Deliberately tiny: a liveness check, not a measurement. The structure function needs >=32
+  # samples to replicate, so the real numbers come from a separate validation-only pass at the
+  # end. Writing fields every mini-epoch would also cost tens of GB of scratch over 96 epochs.
+  samples_per_mini_epoch: 2
+  shuffle: False
+  start_date: 2023-01-01T00:00
+  end_date: 2023-12-31T00:00
+  validate_before_training: True
+  losses: {
+    "structure": {
+      type: LossStructureFunction,
+      weight: 1.0,                    # validation does no backprop; weight only scales the log
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct": {
+          target_stream: CERRA,
+          # *** ALL CHANNELS, NOT JUST tp -- THIS IS A CORRECTION, NOT A PREFERENCE. ***
+          # The level-5 arms scored `channels: ['tp']`, and tp happened to be the ONE channel
+          # whose accidental r_scale of 1.0 was near-correct (injected/true residual amplitude
+          # 1.02). So the diagnostic faithfully reported a healthy ratio ~0.9 for the only
+          # channel that was not broken, while 2t (4.45x), t_850 (4.92x) and z_850 (4.94x) were
+          # over-dispersed and NEVER MEASURED. Scoring every channel costs essentially nothing:
+          # one pair sample serves all channels at once.
+          channels: null,
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: mean,               # ensemble MEAN
+          # Uniform sampling put ~16 of 262144 pairs in the 10-25 km bin on this domain, i.e. the
+          # bins that matter were noise or dropped. Numbers are NOT comparable with
+          # pre-2026-07-31 runs.
+          pair_sampling: stratified,
+          # now also emits ratio_<lo>_<hi>km_ch.<channel>; the channel-mean aggregate alone
+          # cannot distinguish "calibrated" from "half the channels cancel out"
+          log_bin_ratios: True,
+        },
+      },
+    },
+    "structure_members": {
+      type: LossStructureFunction,
+      weight: 1.0,
+      target_and_aux_calc: Physical,
+      loss_fcts: {
+        "struct_members": {
+          target_stream: CERRA,
+          channels: null,
+          num_pairs: 262144,
+          bin_edges_km: [10, 25, 50, 100, 200],
+          increment_power: 2.0,
+          reduce: members,            # the coherence read: per-member, not the mean
+          pair_sampling: stratified,
+          log_bin_ratios: True,
+        },
+      },
+    },
+  }
+  validate_with_ema:
+    enabled: True
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 1e-3
+  output: {
+    num_samples: 0,
+    normalized_samples: False,
+    streams: null,
+    }
+
+wgtags:
+  org: null
+  issue: null
+  exp: cerra_pretrain_l5
+  grid: null

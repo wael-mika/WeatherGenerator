@@ -1,0 +1,71 @@
+# ===========================================================================================
+# E-ft -- WFCL as a 16-epoch FINETUNE on the mse-only base. MINIMAL CONTINUATION OVERLAY.
+#
+#     launch-slurm.py --from-run-id z1x9rw7j \
+#       --config config/cerra_sharpness/config_wfcl_eft.yml --nodes 2 --account e-ext-2025e01-128
+#
+# *** THIS FILE MUST STAY MINIMAL, AND THE REASON IS A BUG THAT ALREADY COST A RUN. ***
+# The first version was a full copy of config_wfcl_e64_wfcl.yml, which descends from
+# config_pretrain_l5.yml and therefore carries `general: istep: 0`. On a CONTINUATION that
+# overrides the parent's istep, so run `ir6eb9xc` loaded z1x9rw7j's weights correctly but reset
+# the step counter to 0 -- which would have trained 64 MORE epochs instead of 16 and pinned P_t
+# at 1.0 for ~48 of them, destroying the schedule. A continuation overlay must carry ONLY the
+# deltas; everything else (decoder, streams, lr, forecast, validation) comes from the parent's
+# saved config. Compare config_residualflow_c3.yml, whose `general` block has no istep -- which
+# is why the C3/C4 continuations resumed correctly.
+#
+# WHAT THIS ARM IS. Continues z1x9rw7j (E48-mse: 48 mini-epochs of mse only on the ens_size-1,
+# patch-target stream; final istep 24814) for 16 more epochs with WFCL added, reaching 64 -- the
+# same epoch count as E64-wfcl (xk761c0a), so the two are directly comparable:
+#
+#     E64-wfcl  WFCL for all 64 epochs      (xk761c0a)
+#     E-ft      WFCL for the last 16 only   (this file)
+#     E48-mse   no WFCL, 48 epochs          (z1x9rw7j -- shared ancestor and control)
+#
+# *** BOTH SCHEDULE NUMBERS ARE MEASURED, NOT ESTIMATED. ***
+#   schedule_start_step: 24814  = z1x9rw7j's ACTUAL final istep, from its checkpoint json.
+#   total_steps:         33256  = xk761c0a's ACTUAL final istep at 64 epochs.
+# Taking total_steps from the sibling means both 64-epoch arms share one horizon, so P_t means
+# the same thing in both. P_t runs 1.0 -> 0.0 over istep 24814..32412, then ~844 steps of pure
+# amplitude.
+#
+# num_mini_epochs 64 is ABSOLUTE: from 48 that is 16 more, not 64 more.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "eft_48mse_then_16wfcl"
+  # NO istep here. See the header.
+
+training_config:
+  num_mini_epochs: 64
+  losses: {
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    "wfcl": {
+        type: LossSpectralWFCL,
+        weight: 0.1,
+        target_and_aux_calc: Physical,
+        loss_fcts: {
+          "wfcl": {
+            target_stream: CERRA,
+            grid_width: 1069,
+            grid_height: 1069,
+            patch_size: 64,
+            coords_zarr: "/e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr",
+            channels: ['2t', '10si'],
+            J: 3,
+            gamma: [1.0, 1.0, 1.0],
+            beta: 1.0,
+            alpha: 0.1,
+            facl_mode: expected,
+            # ens_size is 1, so every reduce mode is the same field; `mean` matches what mse does.
+            reduce: mean,
+            schedule_start_step: 24814,
+            total_steps: 33256,
+            },
+          },
+        },
+    }

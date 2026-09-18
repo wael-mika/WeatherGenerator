@@ -61,6 +61,17 @@ class LossCalculator:
 
         loss_term_configs = deepcopy(mode_cfg.losses)
 
+        # A continuation inherits the PARENT's `losses` by config merge, so an arm that says
+        # nothing about a term still gets it -- there is no way to drop a key from an overlay.
+        # `enabled: False` at the term level is that way: the module is not constructed at all
+        # (weight 0 would still build it and, for a spectral term, open its coordinate store).
+        # vrse7m33 (C6, a C4-recipe corrector on the E64-wfcl base) inherited E64's `wfcl`
+        # term this way; the WFCL constructor's pack guard caught it at launch.
+        disabled = [k for k, p in loss_term_configs.items() if not p.get("enabled", True)]
+        for k in disabled:
+            _logger.info(f"loss term '{k}' disabled by config; not constructed")
+            del loss_term_configs[k]
+
         self.loss_calculators = dict(
             [
                 (
