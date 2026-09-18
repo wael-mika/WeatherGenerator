@@ -1,0 +1,153 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM W2 -- WFCL finetune on top of C4, with the pack bug fixed.
+#
+# Pass the shared half FIRST, then this file:
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_wfcl_w2.yml
+#     --from-run-id scmcehvo_wfcl
+#
+# *** THIS SUPERSEDES W1 (`idgem1hg` / `prr1iy4u`). DO NOT QUOTE W1'S NUMBERS. ***
+# W1 measured +93% RMSE on 10si with WAL_L1 +108% and was read as "WFCL does not transfer to
+# the generative decoder". It measured no such thing. `LossSpectralWFCL` called
+# `ensemble_fields(pred, reduce="members")` on `ResidualFlowPointDecoder`'s TRAINING PACK --
+# a stack of heterogeneous slots, not an ensemble -- and that helper SORTS POINTWISE. The
+# three fields it scored were per-pixel chimeras:
+#     srt[0]  18.5% mu / 48.6% cfm / 32.8% r_scale
+#     srt[1]  79.4% mu / 15.3% cfm /  5.3% r_scale
+#     srt[2]   2.1% mu / 36.1% cfm / 61.9% r_scale
+# Against a corrector that had learned 90% of the velocity, that inflates FAL 253x and WAL_L1
+# 118x over scoring the intended member -- and leaves the value nearly INSENSITIVE to the
+# corrector, because `mu` is frozen here (`flow_freeze_base`) and `r_scale` is a buffer. The
+# gradient reached only the ~36-49% of pixels where the CFM slot happened to win the sort, a
+# set that re-randomises with y0 every step.
+#
+# Fixed in `flow_math.PACK_*`: the pack is addressed by slot, and the constructor now REFUSES
+# to build a WFCL term on a ResidualFlow decoder without `pack_member`.
+#
+# WHY THE X1 SLOT AND NOT THE CFM SLOT.
+# Both equal the target exactly at `v == u`, so they share a minimiser, but they differ in what
+# they carry away from it. The CFM slot is `mu + r_scale*(y0 + v)` and carries the raw source at
+# FULL amplitude at every t -- measured against the true residual on a 64x64 CERRA patch:
+#     L1 11-22 km  1.63x   L2 22-44 km  0.97x   L3 44-88 km  0.57x
+# i.e. the band this whole campaign is about is more noise than signal, so a spectral loss
+# reading that field is largely reading y0. The x1 slot is `mu + r_scale*(y_t + (1-t)*v)`, where
+# the same contamination enters as (1-t): 0.19 at L1 for t=0.25, 0.06 at t=0.75, 0.03 at t=0.9.
+# `mse_flow` keeps scoring the CFM slot; both move the same weights through the same `v`.
+#
+# WHY C4 AND NOT C2 (W1's parent).
+# `prr1iy4u` is void, so there is no W1 result to stay comparable with, and C4 is the arm this
+# work continues from: fine-scale amplitude closest to 1.0 on 4 of 5 channels (10si 0.96, tp
+# 0.86) and the LOWEST placement rho of the five (10si 0.21). That is the most headroom on the
+# quantity WFCL's phase half optimises, and the least to lose on the quantity it risks.
+#
+# *** WHAT THIS ARM STILL CANNOT DO. ***
+# Unchanged from W1, and it bounds the result: the ORACLE probe on `ypj5be4l` put the increment
+# correlation ceiling at 5.5 km at tp 0.054 | 2t 0.514 | 10si 0.195, and skill = 2*A*rho - A^2
+# is maximised at A = rho. Judge this arm on 2t and 10si only. Also note `flow_freeze_base: True`
+# is inherited from C4, so `mu` does not move: this measures what the CORRECTOR can place on a
+# fixed conditional mean, not what the model could place if the readout improved. The
+# deterministic-side result (`ktnwerqe` / `w5ulbg2p` / `hywh77pm`) is what decides whether the
+# base is the better lever.
+#
+# SCORE IT WITH rho AND amplitude (`playground/postproc/fine_skill.py`), not RMSE, and not a
+# structure-function ratio alone. The per-orientation `WCL_L*_k*` logs are the in-run version.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "wfcl_w2_from_c4_x1slot_patch64_J3"
+  # NO `istep` HERE. A continuation config that carries `general: istep: 0` resets the step
+  # counter while the weights still load, so nothing looks broken -- it killed `ir6eb9xc` and
+  # `l2cv60g5` at ~3 h each. Continuation configs are MINIMAL overlays.
+
+# --- inherited C4 recipe, byte-for-byte from config_residualflow_c4.yml --------------------
+# The ONLY new variable is the WFCL term and the patch sampling it requires.
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+flow_source: "iid"
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+flow_time_scope: "global"
+flow_blend_in_training: True
+
+# Patch targets instead of a uniform random draw -- what lets the wavelet levels reach 11-22 km.
+# `config/streams/cerra_wfcl/` is `cerra_blendtrain/` (C4's own streams) plus `target_patches`
+# and nothing else; verified by diff. So this changes the SAMPLING and not the task.
+streams_directory: "./config/streams/cerra_wfcl/"
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 0.0}     # base frozen; kept at 0 so the term is logged, not applied
+        mse_flow: {weight: 1.0}
+
+    wfcl:
+      type: LossSpectralWFCL
+      # Unchanged from W1 ON PURPOSE. The fix does not rescale the early schedule: P_t starts at
+      # 1, so the term is FCL + sum_L WCL_L, which are normalised CORRELATIONS bounded by 2 and
+      # were never the inflated part. Only FAL/WAL shrink to their true size, and they do not
+      # enter until P_t falls. Revisit only if the WCL curves refuse to move.
+      weight: 0.1
+      target_and_aux_calc: Physical
+      loss_fcts:
+        wfcl:
+          target_stream: CERRA
+          grid_width: 1069
+          grid_height: 1069
+          patch_size: 64
+          coords_zarr: "/e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr"
+
+          # tp is EXCLUDED from the objective: at an oracle rho of 0.054 the loss would spend its
+          # gradient budget manufacturing texture that cannot be placed. Still scored in
+          # validation via the inherited structure terms.
+          channels: ['2t', '10si']
+
+          J: 3
+          gamma: [1.0, 1.0, 1.0]
+          beta: 1.0
+          alpha: 0.1
+          facl_mode: expected
+
+          # *** THE WHOLE POINT OF THIS ARM. ***
+          # Score the x1 slot. `reduce` is left at its default and is inert while this is set;
+          # at VALIDATION the same decoder returns real samples and `reduce` applies normally.
+          pack_member: x1
+
+          # *** THE SCHEDULE. ***
+          # C4 (`scmcehvo`) ended at istep 65738 after 128 mini-epochs (~513.6 steps each).
+          # `num_mini_epochs` is an ABSOLUTE stop point, so 160 buys 32 more ~ 16435 steps.
+          # Without `schedule_start_step` the first step of this run would sit at
+          # P_t = 1 - 65738/(0.9*82200) = 0.11 -- amplitude-only from the outset, the exact
+          # reverse of the intended order. These two numbers move together.
+          schedule_start_step: 65738
+          total_steps: 82200
+
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+
+  # ABSOLUTE stop point, not "32 more". 128 (C4's end) + 32.
+  num_mini_epochs: 160
+
+# ===========================================================================================
+# NO `validation_config` AND NO `wgtags` HERE, DELIBERATELY -- both live in
+# config_residualflow_ft.yml, and launch-slurm.py calls mlflow `log_config` once PER FILE, so a
+# top-level key present in two sources kills the launch with
+#     RestException: Parameter with key validation_config was already logged
+# Consequence, and it is real: there is no validation-side WFCL term, so the band diagnostics
+# come from the TRAINING logs only -- 2t and 10si, not tp.
+# ===========================================================================================
