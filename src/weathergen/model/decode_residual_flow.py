@@ -31,6 +31,7 @@ from weathergen.model.flow_math import (
     latlon_to_unit_vectors,
     physical_to_residual,
     residual_to_physical,
+    residual_to_physical_x1,
 )
 
 logger = logging.getLogger(__name__)
@@ -468,10 +469,17 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
     def training_pack(
         self, mu, target, latent, base, latent_lens, output_lens, coordinates, coords_query=None
     ):
-        """Build member 1 of the training pack -> ``[N, num_channels]``.
+        """Build the two decoded members of the training pack -> two ``[N, num_channels]``.
 
-        Returns ``mu.detach() + r_scale*(y0 + v)``, so a plain MSE against the target is the CFM
-        objective scaled by ``r_scale^2``. See ``residual_to_physical``.
+        Returns ``(cfm, x1)``:
+          * ``cfm = mu.detach() + r_scale*(y0 + v)`` -- a plain MSE against the target is the CFM
+            objective scaled by ``r_scale^2``. See ``residual_to_physical``.
+          * ``x1  = mu.detach() + r_scale*(y_t + (1-t)*v)`` -- the same velocity, reparametrised
+            so the injected source enters as ``(1-t)`` instead of at full amplitude. This is what
+            a spectral loss must score; see ``residual_to_physical_x1``.
+
+        The second costs one extra elementwise combination of tensors that already exist -- no
+        additional forward pass, no additional memory of consequence.
         """
         mu_c = mu.detach()
         y1 = target.float()
@@ -528,7 +536,10 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
                     [round(x, 3) for x in corr.tolist()],
                 )
 
-        return residual_to_physical(mu_c.float(), y0, v.float(), rs)
+        return (
+            residual_to_physical(mu_c.float(), y0, v.float(), rs),
+            residual_to_physical_x1(mu_c.float(), y_t.float(), t.float(), v.float(), rs),
+        )
 
 
 class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
@@ -549,11 +560,14 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
     raises on *size* mismatch, and that decoder widens the AdaLN aux.
 
     Returns:
-        training : ``[3, N, C]`` -- member 0 is ``mu`` (undetached, trains the base via
-            ``mse_det``), member 1 is ``mu.detach() + r_scale*(y0+v)``, and member 2 is the
-            per-channel ``r_scale`` that ``mse_flow`` divides out so every channel's CFM term
-            carries the same weight. **The training loss must use ``mse_det``/``mse_flow``,
-            never plain ``mse``**, which would average the members into nonsense.
+        training : ``[PACK_WIDTH, N, C]``, a pack of HETEROGENEOUS slots addressed by the
+            ``PACK_*`` constants at the top of this module -- ``PACK_MU`` (undetached, trains the
+            base via ``mse_det``), ``PACK_CFM``, ``PACK_RSCALE``, ``PACK_X1``. **The training
+            loss must address slots by index** -- ``mse_det`` / ``mse_flow`` for the pixel terms
+            and ``pack_member: x1`` for any spectral term. Plain ``mse`` averages the slots into
+            nonsense; ``reduce: members`` sorts them pointwise, which is worse (see the comment
+            on the constants).
+        eval : a real ensemble, so the ``reduce`` modes mean what they say there.
         eval : ``[ens_size, N, C]`` of corrected fields, or ``[1, N, C]`` of bare ``mu`` when
             ``flow_ens_size == 0`` -- which evaluates the same checkpoint as a purely
             deterministic model.
@@ -690,13 +704,14 @@ class ResidualFlowPointDecoder(TargetPredictionEngineClassic):
             "ResidualFlowPointDecoder needs the target during training to build the "
             "probability path; predict_decoders must pass it."
         )
-        member = self.flow.training_pack(
+        member_cfm, member_x1 = self.flow.training_pack(
             mu_cond, target, kv, base, latent_lens, output_lens, coordinates, coords_query
         )
-        # Member 2 carries the per-channel r_scale so `mse_flow` can divide it out and score the
-        # CFM objective with EQUAL weight per channel. Without it the loss weight is r_scale_c^2,
-        # which starves exactly the channels the base already predicts well -- see the table in
-        # loss_functions.mse_flow. It is a loss-contract slot, not a prediction; `mse_det` still
-        # slices member 0 and validation never sees this pack at all.
+        # PACK_RSCALE carries the per-channel r_scale so `mse_flow` can divide it out and score
+        # the CFM objective with EQUAL weight per channel. Without it the loss weight is
+        # r_scale_c^2, which starves exactly the channels the base already predicts well -- see
+        # the table in loss_functions.mse_flow. It is a loss-contract slot, not a prediction;
+        # `mse_det` still slices PACK_MU and validation never sees this pack at all.
         r_scale = self.flow.r_scale.value().to(mu.dtype).expand_as(mu)
-        return torch.stack([mu.float(), member, r_scale.float()], 0)
+        # Order fixed by the PACK_* constants at the top of this module. Address by name.
+        return torch.stack([mu.float(), member_cfm, r_scale.float(), member_x1], 0)

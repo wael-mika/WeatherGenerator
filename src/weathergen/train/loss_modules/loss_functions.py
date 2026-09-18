@@ -12,6 +12,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from weathergen.model.flow_math import PACK_CFM, PACK_MU, PACK_RSCALE, PACK_WIDTH
+
 stat_loss_fcts = ["stats", "kernel_crps"]  # Names of loss functions that need std computed
 
 
@@ -225,10 +227,10 @@ def mse(
 
 
 _RESIDUAL_FLOW_PACK = (
-    "expects the [3, N, C] training pack of ResidualFlowPointDecoder "
-    "(member 0 = mu, member 1 = mu + r_scale*(y0+v), member 2 = the per-channel r_scale); "
-    "got ens_dim {n}. Use plain `mse` for any other decoder, and never `mse` for this one -- it "
-    "would average the members together."
+    "expects the [{w}, N, C] training pack of ResidualFlowPointDecoder "
+    "(PACK_MU = mu, PACK_CFM = mu + r_scale*(y0+v), PACK_RSCALE = the per-channel r_scale, "
+    "PACK_X1 = mu + r_scale*(y_t + (1-t)*v)); got ens_dim {n}. Use plain `mse` for any other "
+    "decoder, and never `mse` for this one -- it would average the slots together."
 )
 
 
@@ -245,10 +247,12 @@ def mse_det(
     identity. Reported under its own name, so the deterministic and flow terms are logged
     separately per channel.
     """
-    assert pred.shape[0] == 3, "mse_det " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
+    assert pred.shape[0] == PACK_WIDTH, "mse_det " + _RESIDUAL_FLOW_PACK.format(
+        n=pred.shape[0], w=PACK_WIDTH
+    )
     return lp_loss(
         target=target,
-        pred=pred[0:1],
+        pred=pred[PACK_MU : PACK_MU + 1],
         p_norm=2,
         with_p_root=False,
         with_mean=True,
@@ -295,14 +299,16 @@ def mse_flow(
     Dividing the TARGET as well keeps NaN masking intact (``nan / x`` is still ``nan``), so the
     existing spoof/mask handling in ``lp_loss`` is untouched.
     """
-    assert pred.shape[0] == 3, "mse_flow " + _RESIDUAL_FLOW_PACK.format(n=pred.shape[0])
-    r_scale = pred[2]
+    assert pred.shape[0] == PACK_WIDTH, "mse_flow " + _RESIDUAL_FLOW_PACK.format(
+        n=pred.shape[0], w=PACK_WIDTH
+    )
+    r_scale = pred[PACK_RSCALE]
     # scalar; keeps the loss magnitude where it was instead of inflating it by ~1/r_scale^2
     rms = r_scale.pow(2).mean().sqrt()
     denom = r_scale / rms
     return lp_loss(
         target=target / denom,
-        pred=(pred[1] / denom).unsqueeze(0),
+        pred=(pred[PACK_CFM] / denom).unsqueeze(0),
         p_norm=2,
         with_p_root=False,
         with_mean=True,

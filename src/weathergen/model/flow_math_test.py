@@ -19,11 +19,17 @@ import torch
 
 from weathergen.model.flow_math import (
     EARTH_RADIUS_KM,
+    PACK_CFM,
+    PACK_MU,
+    PACK_RSCALE,
+    PACK_WIDTH,
+    PACK_X1,
     ResidualScale,
     correlated_source,
     dominant_replica,
     physical_to_residual,
     residual_to_physical,
+    residual_to_physical_x1,
     sample_flow_time_for_points,
 )
 from weathergen.train.loss_modules.loss_functions import mse, mse_det, mse_flow
@@ -32,9 +38,22 @@ N = 64
 C = 3
 
 
-def _pack(mu, y0, v, r_scale):
-    """The decoder's training return: [mu, mu.detach() + r_scale*(y0+v), r_scale]."""
-    return torch.stack([mu, residual_to_physical(mu, y0, v, r_scale), r_scale.expand_as(mu)], 0)
+def _pack(mu, y0, v, r_scale, t=None, y_t=None):
+    """The decoder's training return -- the PACK_* slots in order.
+
+    ``t`` / ``y_t`` default to a mid-path state; the CFM slot does not depend on them.
+    """
+    if t is None:
+        t = torch.full((mu.shape[0], 1), 0.5)
+    if y_t is None:
+        r = physical_to_residual(mu + r_scale * (y0 + v), mu, r_scale)
+        y_t = (1.0 - t) * y0 + t * r
+    slots = [None] * PACK_WIDTH
+    slots[PACK_MU] = mu
+    slots[PACK_CFM] = residual_to_physical(mu, y0, v, r_scale)
+    slots[PACK_RSCALE] = r_scale.expand_as(mu)
+    slots[PACK_X1] = residual_to_physical_x1(mu, y_t, t, v, r_scale)
+    return torch.stack(slots, 0)
 
 
 def test_packed_mse_is_the_cfm_objective_weighted_equally_per_channel():
@@ -102,19 +121,27 @@ def test_mse_det_and_flow_slice_the_right_member():
     other = y1 + 3.0
 
     ones = torch.ones_like(y1)
-    exact_mu = torch.stack([y1, other, ones], 0)
+
+    # slots addressed by name: only PACK_MU / PACK_CFM are read by these two losses, so the
+    # other slots are filled with a distinguishable value that must never leak into either.
+    def _slots(mu, cfm):
+        s = [other + 7.0] * PACK_WIDTH
+        s[PACK_MU], s[PACK_CFM], s[PACK_RSCALE] = mu, cfm, ones
+        return torch.stack(s, 0)
+
+    exact_mu = _slots(y1, other)
     det, _ = mse_det(y1, exact_mu, None, None)
     flow, _ = mse_flow(y1, exact_mu, None, None)
     assert det.item() == pytest.approx(0.0, abs=1e-12)
     assert flow.item() == pytest.approx(9.0, rel=1e-6)
 
-    exact_flow = torch.stack([other, y1, ones], 0)
+    exact_flow = _slots(other, y1)
     det, _ = mse_det(y1, exact_flow, None, None)
     flow, _ = mse_flow(y1, exact_flow, None, None)
     assert det.item() == pytest.approx(9.0, rel=1e-6)
     assert flow.item() == pytest.approx(0.0, abs=1e-12)
 
-    # plain mse on the pack averages ALL THREE members -- exactly what must never be configured.
+    # plain mse on the pack averages ALL the slots -- exactly what must never be configured.
     # Assert against the explicit mean rather than a literal, so the check keeps its meaning if
     # the pack ever grows another slot.
     both, _ = mse(y1, exact_flow, None, None)
@@ -408,3 +435,155 @@ def test_flow_time_scope_matches_the_legacy_boolean():
 
     with pytest.raises(AssertionError, match="unknown flow_time_scope"):
         sample_flow_time_for_points(10, scope="per_cell", **kw)
+
+
+# =================================================================================================
+# The x1 slot, and why a spectral loss must score it rather than the CFM slot.
+# Regression cover for run `prr1iy4u`; see the PACK_* comment in flow_math.
+# =================================================================================================
+
+
+def test_x1_and_cfm_slots_agree_exactly_at_a_perfect_velocity():
+    """Both parametrisations recover y1 when v == u, so they share a minimiser."""
+    torch.manual_seed(3)
+    mu = torch.randn(N, C)
+    r_scale = torch.tensor([0.851, 0.348, 0.563])
+    y1 = mu + r_scale * torch.randn(N, C)
+    y0 = torch.randn(N, C)
+
+    r = physical_to_residual(y1, mu, r_scale)
+    u = r - y0  # the exact CFM target velocity on the linear path
+    for t_val in (0.05, 0.5, 0.95):
+        t = torch.full((N, 1), t_val)
+        y_t = (1.0 - t) * y0 + t * r
+        cfm = residual_to_physical(mu, y0, u, r_scale)
+        x1 = residual_to_physical_x1(mu, y_t, t, u, r_scale)
+        assert torch.allclose(cfm, y1, atol=1e-5)
+        assert torch.allclose(x1, y1, atol=1e-5)
+
+
+def test_x1_slot_carries_less_of_the_raw_source_than_the_cfm_slot():
+    """The property the spectral loss needs: contamination scales as (1 - t), not as 1.
+
+    The CFM slot carries y0 at full amplitude at every t, so its fine-scale spectrum is set by
+    the injected noise rather than by the model. That is the second, independent reason WFCL
+    could not work on the flow arm even once the pointwise-sort bug is fixed.
+    """
+    torch.manual_seed(4)
+    mu = torch.randn(N, C)
+    r_scale = torch.tensor([0.851, 0.348, 0.563])
+    y1 = mu + r_scale * torch.randn(N, C)
+    y0 = torch.randn(N, C)
+    r = physical_to_residual(y1, mu, r_scale)
+    u = r - y0
+    v = 0.9 * u + 0.1 * torch.randn(N, C)  # a corrector that has mostly learned the velocity
+
+    errs = []
+    for t_val in (0.1, 0.5, 0.9):
+        t = torch.full((N, 1), t_val)
+        y_t = (1.0 - t) * y0 + t * r
+        cfm_err = (residual_to_physical(mu, y0, v, r_scale) - y1).abs().mean()
+        x1_err = (residual_to_physical_x1(mu, y_t, t, v, r_scale) - y1).abs().mean()
+        assert x1_err <= cfm_err + 1e-6, f"x1 must never be dirtier than cfm (t={t_val})"
+        errs.append((cfm_err.item(), x1_err.item()))
+
+    # cfm is flat in t; x1 falls off with it
+    assert errs[0][0] == pytest.approx(errs[2][0], rel=1e-6), "cfm error must not depend on t"
+    assert errs[2][1] < 0.5 * errs[0][1], "x1 error must shrink substantially as t -> 1"
+
+
+def test_pointwise_sort_of_a_pack_is_not_any_slot():
+    """`reduce: members` on a pack returns per-pixel chimeras -- the prr1iy4u bug, pinned.
+
+    This is the check that would have caught it: no order statistic of the pack equals any slot,
+    and the sorted fields draw most of their pixels from the two slots that carry NO gradient
+    (PACK_MU under flow_freeze_base, and the PACK_RSCALE buffer).
+    """
+    from weathergen.train.loss_modules.loss_module_structure import LossStructureFunction
+
+    torch.manual_seed(5)
+    mu = torch.randn(N, C)
+    r_scale = torch.tensor([0.851, 0.348, 0.563])
+    y0, v = torch.randn(N, C), torch.randn(N, C)
+    pack = _pack(mu, y0, v, r_scale)
+
+    sorted_fields = LossStructureFunction.ensemble_fields(pack, "members")
+    assert len(sorted_fields) == PACK_WIDTH
+    for f in sorted_fields:
+        for slot in range(PACK_WIDTH):
+            assert not torch.allclose(f, pack[slot]), (
+                "a sorted 'member' coincided with a real slot -- the test data is degenerate "
+                "and no longer demonstrates the failure"
+            )
+
+    # and the explicit escape hatch returns exactly the slot asked for
+    for slot in range(PACK_WIDTH):
+        (only,) = LossStructureFunction.ensemble_fields(pack, "members", pack_member=slot)
+        assert torch.equal(only, pack[slot])
+
+
+def test_wfcl_refuses_to_score_a_residualflow_pack_without_pack_member():
+    """The constructor guard: configuring the prr1iy4u bug again must fail loudly."""
+    from omegaconf import OmegaConf
+
+    from weathergen.train.loss_modules.loss_module_spectral import LossSpectralWFCL
+    from weathergen.train.utils import TRAIN, VAL
+
+    cfg = {
+        "target_stream": "CERRA",
+        "grid_width": 1069,
+        "grid_height": 1069,
+        "patch_size": 64,
+        "coords_zarr": "/nonexistent.zarr",  # never opened: __init__ fails before any IO
+        "total_steps": 1000,
+        "J": 3,
+        "reduce": "members",
+    }
+    cf = OmegaConf.create({"decoder_type": "ResidualFlow", "streams": {}})
+
+    with pytest.raises(ValueError, match="must set `pack_member`"):
+        LossSpectralWFCL(cf, OmegaConf.create({}), TRAIN, "cpu", wfcl=cfg)
+
+    # validation sees real samples from the same decoder, so `reduce` is legitimate there
+    LossSpectralWFCL(cf, OmegaConf.create({}), VAL, "cpu", wfcl=cfg)
+
+    # and `pack_member` on a non-pack decoder is equally a misconfiguration
+    cf_det = OmegaConf.create({"decoder_type": "PerceiverIO", "streams": {}})
+    with pytest.raises(ValueError, match="only meaningful for a ResidualFlow"):
+        LossSpectralWFCL(
+            cf_det, OmegaConf.create({}), TRAIN, "cpu", wfcl={**cfg, "pack_member": "x1"}
+        )
+
+
+def test_pack_member_is_inert_at_validation():
+    """kc5oigof attempt 1: at VAL the decoder returns real samples, so the slot index must
+    not be applied. Died with `index 3 is out of bounds for dimension 0 with size 2`."""
+    from omegaconf import OmegaConf
+
+    from weathergen.train.loss_modules.loss_module_spectral import LossSpectralWFCL
+    from weathergen.train.loss_modules.loss_module_structure import LossStructureFunction
+    from weathergen.train.utils import TRAIN, VAL
+
+    cfg = {
+        "target_stream": "CERRA",
+        "grid_width": 1069,
+        "grid_height": 1069,
+        "patch_size": 64,
+        "coords_zarr": "/nonexistent.zarr",
+        "total_steps": 1000,
+        "J": 3,
+        "reduce": "members",
+        "pack_member": "x1",
+    }
+    cf = OmegaConf.create({"decoder_type": "ResidualFlow", "streams": {}})
+    at_train = LossSpectralWFCL(cf, OmegaConf.create({}), TRAIN, "cpu", wfcl=cfg)
+    at_val = LossSpectralWFCL(cf, OmegaConf.create({}), VAL, "cpu", wfcl=cfg)
+    assert at_train.pack_member == PACK_X1
+    assert at_val.pack_member is None
+
+    # a real 2-member validation ensemble must resolve through `reduce`, not the slot index
+    ens2 = torch.randn(2, N, C)
+    fields = LossStructureFunction.ensemble_fields(ens2, at_val.reduce, at_val.pack_member)
+    assert len(fields) == 2
+    with pytest.raises(IndexError):
+        LossStructureFunction.ensemble_fields(ens2, "members", pack_member=PACK_X1)

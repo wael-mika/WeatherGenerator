@@ -278,6 +278,34 @@ def physical_to_residual(y1: torch.Tensor, mu: torch.Tensor, r_scale: torch.Tens
     return (y1 - mu) / r_scale
 
 
+# ---------------------------------------------------------------------------------------------
+# THE TRAINING PACK, AND WHY ITS SLOTS ARE NAMED.
+#
+# ``ResidualFlowPointDecoder`` returns a stack of HETEROGENEOUS quantities during training, not
+# an ensemble. Every consumer must address a slot BY INDEX. A loss that treats this axis as an
+# ensemble is not merely imprecise, it is scoring something that does not exist: ``reduce:
+# members`` sorts POINTWISE (``LossStructureFunction.ensemble_fields``), so each "member" it
+# returns is a per-pixel chimera of all four slots. Measured on a 3-wide pack with a corrector
+# that had learned 90% of the velocity, the sorted fields drew
+#     srt[0]  18.5% mu / 48.6% cfm / 32.8% r_scale
+#     srt[1]  79.4% mu / 15.3% cfm /  5.3% r_scale
+#     srt[2]   2.1% mu / 36.1% cfm / 61.9% r_scale
+# and WFCL's FAL came out 253x, WAL_L1 118x the value of scoring the intended member -- while
+# being nearly INSENSITIVE to the corrector, because PACK_MU is frozen under
+# ``flow_freeze_base`` and PACK_RSCALE is a buffer. That is run `prr1iy4u` (+93% RMSE on 10si,
+# WAL_L1 +108%): a measurement of the pack layout, not of the loss.
+#
+# Slots, and the one consumer each is for:
+PACK_MU = 0  # mu                                -- mse_det
+PACK_CFM = 1  # mu + r_scale*(y0 + v)            -- mse_flow
+PACK_RSCALE = 2  # r_scale, broadcast (a buffer) -- mse_flow divides it out
+PACK_X1 = 3  # mu + r_scale*(y_t + (1-t)*v)      -- every spectral / structure term
+PACK_WIDTH = 4
+
+# Config-facing names, so a config says `pack_member: x1` rather than a bare integer.
+PACK_MEMBERS = {"mu": PACK_MU, "cfm": PACK_CFM, "r_scale": PACK_RSCALE, "x1": PACK_X1}
+
+
 def residual_to_physical(
     mu: torch.Tensor, y0: torch.Tensor, v: torch.Tensor, r_scale: torch.Tensor
 ) -> torch.Tensor:
@@ -298,6 +326,42 @@ def residual_to_physical(
     exactly what makes the two loss terms commensurate (see ``ResidualScale``).
     """
     return mu + r_scale * (y0 + v)
+
+
+def residual_to_physical_x1(
+    mu: torch.Tensor,
+    y_t: torch.Tensor,
+    t: torch.Tensor,
+    v: torch.Tensor,
+    r_scale: torch.Tensor,
+) -> torch.Tensor:
+    """The x1-prediction of the same velocity -- ``mu + r_scale * (y_t + (1 - t) * v)``.
+
+    On the linear path ``y_t = (1-t)*y0 + t*r`` with CFM target ``u = r - y0`` we have
+    ``r = y_t + (1-t)*u`` exactly, so this and ``residual_to_physical`` agree at ``v == u``
+    and share a minimiser. They differ entirely in what they carry when ``v != u``:
+
+        residual_to_physical     mu + r_scale*(y0 + v)          carries y0 at FULL amplitude
+        residual_to_physical_x1  mu + r_scale*(y_t + (1-t)*v)   carries it as (1 - t)
+
+    That is irrelevant to MSE, which is why ``mse_flow`` uses the first form. It is decisive for
+    a SPECTRAL loss, which reads the field's amplitude and phase spectrum directly: the raw
+    source dominates exactly the fine-scale bands such a loss exists to constrain. Measured on
+    a 64x64 patch at CERRA's 5.5 km with ``r_scale`` 0.312 (10si), against the true residual:
+
+        band              |r_scale*y0| / |y1 - mu|
+        L1  11-22 km               1.63
+        L2  22-44 km               0.97
+        L3  44-88 km               0.57
+
+    i.e. the band the sharpness campaign is about is more noise than signal in the first form.
+    Under this form the same contamination falls off as ``(1-t)``: 0.19 of the true residual at
+    L1 for t=0.25, 0.06 at t=0.75, 0.03 at t=0.9.
+
+    So: ``mse_flow`` scores member ``PACK_CFM``, every spectral/structure term scores
+    ``PACK_X1``, and both move the same weights through the same ``v``.
+    """
+    return mu + r_scale * (y_t + (1.0 - t) * v)
 
 
 class ResidualScale(torch.nn.Module):

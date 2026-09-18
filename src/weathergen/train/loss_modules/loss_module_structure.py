@@ -407,13 +407,22 @@ class LossStructureFunction(LossModuleBase):
         return names
 
     @staticmethod
-    def ensemble_fields(pred: torch.Tensor, reduce) -> list[torch.Tensor]:
+    def ensemble_fields(pred: torch.Tensor, reduce, pack_member: int | None = None):
         """Resolve the ensemble dim into the field(s) the SF loss scores.
 
         pred: (ens, N, C). Returns a list of (N, C) fields; the loss is averaged over them.
         For ens_size=1 every mode returns the single member. See the module docstring for the
         semantics of "mean" / "median" / "members" / int.
+
+        ``pack_member`` short-circuits all of that and takes ONE slot by index. It exists for
+        ``ResidualFlowPointDecoder``'s training pack, whose leading axis holds heterogeneous
+        quantities (mu, the CFM member, an r_scale buffer, the x1 member) rather than samples of
+        one field. Every mode below is meaningless on such an axis and ``"members"`` is actively
+        destructive -- ``sort`` is POINTWISE, so it returns per-pixel chimeras of all four slots.
+        See the ``PACK_*`` constants in ``weathergen.model.flow_math``.
         """
+        if pack_member is not None:
+            return [pred[pack_member]]
         k = pred.shape[0]
         if k == 1:
             return [pred[0]]

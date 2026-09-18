@@ -39,6 +39,12 @@ see the campaign note in the config header.
 generative ensemble to be sharp is the double-penalty trap in a new costume; the
 mean of a well-calibrated ensemble *should* be smooth. Reuses
 `LossStructureFunction.ensemble_fields`.
+
+**A ResidualFlow training pack is NOT an ensemble.** That decoder's leading axis holds
+heterogeneous slots (see `PACK_*` in `weathergen.model.flow_math`), and `reduce: members`
+sorts it POINTWISE, so what gets scored is a per-pixel chimera of all four -- two of which
+carry no gradient at all. Set `pack_member: x1` on such a decoder; the constructor refuses
+to build without it. Run `prr1iy4u` is the measurement of getting this wrong.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 
+from weathergen.model.flow_math import PACK_MEMBERS
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.loss_modules.loss_module_structure import LossStructureFunction
 from weathergen.train.loss_modules.spectral_patches import (
@@ -59,7 +66,7 @@ from weathergen.train.loss_modules.spectral_patches import (
     points_to_patches,
 )
 from weathergen.train.loss_modules.spectral_utils import fal_fcl, phase_weight, wal_wcl
-from weathergen.train.utils import Stage
+from weathergen.train.utils import TRAIN, Stage
 
 _logger = logging.getLogger(__name__)
 
@@ -89,7 +96,8 @@ class LossSpectralWFCL(LossModuleBase):
             gamma: [1.0, 1.0, 1.0]
             alpha: 0.1
             facl_mode: expected
-            reduce: members
+            reduce: members     # real ensembles only
+            pack_member: x1     # REQUIRED on a ResidualFlow decoder; see below
 
     ``total_steps`` must be set explicitly. Deriving it from
     ``num_mini_epochs * samples_per_mini_epoch`` is wrong on this codebase, because
@@ -163,6 +171,46 @@ class LossSpectralWFCL(LossModuleBase):
         red = cfg.get("reduce", "members")
         self.reduce = red if red in ("mean", "median", "members") else int(red)
 
+        # *** THE PACK. See `weathergen.model.flow_math` PACK_* and run `prr1iy4u`. ***
+        # A ResidualFlow decoder hands the TRAINING loss a pack of heterogeneous slots, not an
+        # ensemble. `reduce` is meaningless on it and `members` is destructive. `pack_member`
+        # names the slot to score; `x1` is the only correct answer for a spectral loss, because
+        # the CFM slot carries the raw source y0 at full amplitude and so is noise-dominated in
+        # exactly the fine bands this loss constrains (1.63x the true residual at 11-22 km).
+        # At VALIDATION the same decoder returns real samples ([flow_ens_size, N, C]), so the
+        # slot index is meaningless there and `reduce` applies as usual. The term reaches the
+        # validation calculator by config merge whether or not the arm file mentions it, so this
+        # is not optional: kc5oigof's first attempt died in its first validation pass with
+        # `IndexError: index 3 is out of bounds for dimension 0 with size 2`, before any
+        # training step, on all three chained jobs.
+        pm = cfg.get("pack_member", None)
+        self.pack_member: int | None = (
+            None if pm is None else (PACK_MEMBERS[pm] if isinstance(pm, str) else int(pm))
+        )
+        if self.pack_member is not None and self.stage != TRAIN:
+            _logger.info(
+                "LossSpectralWFCL: pack_member=%s ignored at stage=%s (real samples there; "
+                "reduce=%s applies)",
+                pm,
+                self.stage,
+                red,
+            )
+            self.pack_member = None
+        decoder_type = str(cf.get("decoder_type", ""))
+        if decoder_type == "ResidualFlow" and self.stage == TRAIN and self.pack_member is None:
+            raise ValueError(
+                "LossSpectralWFCL on a ResidualFlow decoder must set `pack_member` (use "
+                "`pack_member: x1`). Its training prediction is a heterogeneous pack -- "
+                f"{list(PACK_MEMBERS)} -- and `reduce: {red}` would score a pointwise sort of "
+                "all four slots, two of which carry no gradient (mu is frozen under "
+                "flow_freeze_base, r_scale is a buffer). That is what run prr1iy4u measured."
+            )
+        if self.pack_member is not None and decoder_type != "ResidualFlow":
+            raise ValueError(
+                f"`pack_member` is only meaningful for a ResidualFlow decoder, got "
+                f"decoder_type='{decoder_type}'. Use `reduce` for a real ensemble."
+            )
+
         check_patch_size(self.patch_size, self.j)
         self.bands = DTCWTBands(
             self.j,
@@ -175,7 +223,7 @@ class LossSpectralWFCL(LossModuleBase):
 
         _logger.info(
             "LossSpectralWFCL: stream=%s grid=%dx%d patch=%d J=%d beta=%.3g gamma=%s "
-            "alpha=%.3g total_steps=%d facl_mode=%s reduce=%s channels=%s",
+            "alpha=%.3g total_steps=%d facl_mode=%s reduce=%s pack_member=%s channels=%s",
             self.target_stream,
             self.grid_height,
             self.grid_width,
@@ -187,6 +235,7 @@ class LossSpectralWFCL(LossModuleBase):
             self.total_steps,
             self.facl_mode,
             self.reduce,
+            self.pack_member,
             self.channels,
         )
 
@@ -442,7 +491,9 @@ class LossSpectralWFCL(LossModuleBase):
 
                 sel = torch.nonzero(valid, as_tuple=True)[0][found]
                 target_sel = target[sel]
-                fields = LossStructureFunction.ensemble_fields(pred[:, sel], self.reduce)
+                fields = LossStructureFunction.ensemble_fields(
+                    pred[:, sel], self.reduce, pack_member=self.pack_member
+                )
                 if ch_idx is not None:
                     target_sel = target_sel[:, ch_idx]
                     fields = [f[:, ch_idx] for f in fields]
