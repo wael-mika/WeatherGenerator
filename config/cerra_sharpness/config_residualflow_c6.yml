@@ -1,0 +1,86 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM C6 -- C4's corrector recipe on a WFCL-trained deterministic base.
+#
+# Pass the shared half FIRST, then this file:
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_residualflow_c6.yml
+#     --from-run-id xk761c0a_wfcl
+#
+# WHY THIS ARM. C4 (`scmcehvo`) is the working baseline: fine-scale amplitude nearest 1.0 on
+# 4 of 5 channels, and the LOWEST placement rho of the five generative arms (10si 0.21). It
+# runs `flow_freeze_base: True`, so its placement ceiling is its frozen `mu` -- every C arm
+# varied the texture generator while holding the thing that does the placing fixed.
+#
+# 2026-09-18 (WFCL_RUNS.md section 14) attributed what moves placement on the deterministic
+# side, with sampling held constant, structure finer than 30 km on 10si, rho / amp:
+#     E48-mse    0.33 / 0.56     <- control: patch sampling, no WFCL
+#     E64-wfcl   0.42 / 0.73     <- WFCL all 64 epochs           (+0.09 / +0.17)
+#     E-ft       0.40 / 0.71     <- WFCL last 16 of 64, cheaper, lower RMSE
+#     R48-split  0.30 / 0.57     <- two readouts: does NOT help, slightly hurts
+# So the lever is WFCL on the base. This arm takes C4's recipe BYTE-FOR-BYTE and swaps only
+# the parent: `nnr0qqo4` chkpt00117 (mse-only base, 10si rho ~0.33) -> `xk761c0a` chkpt00064
+# (E64-wfcl, 10si rho 0.42). If placement is set by the frozen base, C6's rho should land
+# near 0.42 with C4's amplitude; if the corrector destroys it, that is the finding.
+#
+# Not to be confused with W2 (`ubdwl5gn`), which puts WFCL on the CORRECTOR on top of C4's old
+# base. The two are orthogonal: base-side WFCL here, corrector-side WFCL there. Both open.
+#
+# WARM START. `xk761c0a` is a plain PerceiverIOCoordConditioning run, ens_size 1, `obs_value`
+# readout (4 layers, 8 heads) -- identical to C4's readout, so every `tte.*` key matches and
+# only `flow.*` is missing, which the reinit path fills. `cerra_wfcl_e1_blend/` keeps ens_size
+# at 1 so `pred_heads` matches too. It is `cerra_wfcl_e1/` + C4's blend keys - target_patches.
+#
+# CHECKPOINT. `xk761c0a_latest.chkpt` is NOT chkpt00064 (different inode, 4 KB smaller, istep
+# 33256 vs 33268) -- the same `_latest` trap as `scmcehvo`. The seeded snapshot is re-linked to
+# chkpt00064 by hand and its json re-seeded; verify inode and istep before trusting a relaunch.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "residualflow_c6_iid_blend_on_wfcl_base"
+  # NO `istep` HERE -- a continuation overlay must never reset the step counter.
+
+# --- C4's recipe, byte-for-byte from config_residualflow_c4.yml ------------------------------
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+flow_source: "iid"
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+flow_time_scope: "global"
+flow_blend_in_training: True
+
+# The ONLY change from C4: the base underneath. See the stream header.
+streams_directory: "./config/streams/cerra_wfcl_e1_blend/"
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 0.0}
+        mse_flow: {weight: 1.0}
+
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+
+  # ABSOLUTE stop point, not "32 more". The parent ends at 64; this buys the same 32 mini-epochs
+  # of corrector training that C4 got on top of its base (nnr0qqo4 117 -> 128 was 11, but the
+  # corrector itself had trained inside nnr0qqo4 from scratch; here it starts fresh, like A1/A2
+  # did on ws0x0bai, which used 32).
+  num_mini_epochs: 96
+
+# NO `validation_config` AND NO `wgtags` -- both live in config_residualflow_ft.yml (mlflow
+# log_config runs once per file; a duplicate top-level key kills the launch).
