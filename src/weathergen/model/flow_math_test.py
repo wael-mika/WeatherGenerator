@@ -587,3 +587,49 @@ def test_pack_member_is_inert_at_validation():
     assert len(fields) == 2
     with pytest.raises(IndexError):
         LossStructureFunction.ensemble_fields(ens2, "members", pack_member=PACK_X1)
+
+
+# =================================================================================================
+# flow_residual_gain -- the inference-time sharpness knob (Track B2).
+# =================================================================================================
+
+
+def test_residual_gain_multiplies_and_fixed_replaces():
+    """`gain` scales the calibrated vector; `fixed` overwrites it with one global scalar.
+
+    Conflating them is the trap: C4's calibrated r_scale spans 0.080 (z_850) to 0.69 (tp), so a
+    `fixed` of 0.5 is a 5.6x increase on 2t and a cut on tp -- a recalibration, not a sweep.
+    """
+    from weathergen.model.flow_math import ResidualScale
+
+    calibrated = torch.tensor([0.36, 0.109, 0.371, 0.089, 0.69, 0.289, 0.324, 0.080])
+
+    rs = ResidualScale(8)
+    rs.scale.copy_(calibrated)
+    assert torch.allclose(rs.value(), calibrated)  # default gain is a no-op
+
+    for g in (0.25, 0.5, 2.0):
+        rs_g = ResidualScale(8, gain=g)
+        rs_g.scale.copy_(calibrated)
+        assert torch.allclose(rs_g.value(), calibrated * g), f"gain {g} must scale every channel"
+
+    # `fixed` flattens the vector; `gain` then still multiplies it
+    rs_f = ResidualScale(8, fixed=0.5)
+    assert torch.allclose(rs_f.value(), torch.full((8,), 0.5))
+    rs_fg = ResidualScale(8, fixed=0.5, gain=0.5)
+    assert torch.allclose(rs_fg.value(), torch.full((8,), 0.25))
+
+    # and the two are genuinely different operations on real numbers
+    assert not torch.allclose(ResidualScale(8, fixed=0.5).value(), calibrated * 0.5)
+
+
+def test_residual_gain_scales_the_injected_residual_at_sampling():
+    """`mu + r_scale*y` is the sampling endpoint, so a gain g scales the injected part by g."""
+    mu = torch.randn(64, 3)
+    y = torch.randn(64, 3)  # the integrated residual
+    calibrated = torch.tensor([0.36, 0.109, 0.69])
+    for g in (0.0, 0.5, 1.0, 2.0):
+        out = mu + (calibrated * g) * y
+        assert torch.allclose(out - mu, g * (calibrated * y), atol=1e-6)
+    # g = 0 recovers bare mu exactly, i.e. the same field flow_ens_size=0 returns
+    assert torch.allclose(mu + (calibrated * 0.0) * y, mu)

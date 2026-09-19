@@ -1,0 +1,88 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# TRACK C -- did the corrector ever LEARN its velocity? One mini-epoch, diagnostic only.
+#
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_flowtrace_c4.yml
+#     --from-run-id scmcehvo_wfcl
+#
+# THE QUESTION. The 2026-09-19 bare-mu diagnostic showed the corrector's fine-scale output is
+# statistically INDEPENDENT of the truth: rho_corrected = rho_mu * A_mu / A_corrected predicts
+# the measured value with no free parameter (mean residual -0.013 over 10 arm/channel pairs).
+# Two very different worlds produce that same signature:
+#
+#   (a) the corrector LEARNED the velocity, and the conditional distribution of the fine-scale
+#       residual given the conditioning is genuinely almost unconditional. Then the injected
+#       noise is CORRECT, nothing on the corrector can be improved, and every remaining gain
+#       has to come from rho_mu (member placement = rho_mu^2).
+#
+#   (b) the corrector NEVER learned, and emits noise because it failed. Then the entire C1-C6
+#       axis has been comparing untrained correctors, and there is real headroom inside it.
+#
+# `ResidualFlowBranch.velocity` already logs exactly the number that separates these --
+# corr(v, u), the per-channel correlation between the predicted velocity and its own CFM target
+# u = r - y0 (decode_residual_flow.py, the `flow_debug_trace` block in `training_pack`).
+#
+# *** IT HAS NEVER BEEN SWITCHED ON. *** `flow_debug_trace: False` in default_config.yml and in
+# no other config in the repo. This run is the first time it is read.
+#
+# COST. `self._trace_n < 3` caps the trace at three log lines, so one mini-epoch is plenty and
+# nothing here is meant to produce a usable checkpoint. num_mini_epochs is ABSOLUTE: C4
+# (`scmcehvo`) ended at 128, so 129 buys exactly one.
+#
+# WHAT TO READ. grep the log for `FLOWTRACE train`; the line carries r.std, u.std, v.std and
+# corr(v,u) as per-channel vectors in the resolved channel order
+#     0:10si 1:2t 2:r_850 3:t_850 4:tp 5:u_850 6:v_850 7:z_850
+# corr(v,u) near 0 on 10si/2t is world (b). Substantially positive is world (a). Also compare
+# v.std against u.std: a corrector that learned the conditional MEAN velocity should have
+# v.std < u.std (it cannot predict the unpredictable part), and how much smaller says how much
+# of the velocity is deterministic given the conditioning.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "flowtrace_c4_corr_v_u_diagnostic"
+  # NO `istep` -- a continuation overlay must never reset the step counter.
+
+# --- C4's recipe, byte-for-byte from config_residualflow_c4.yml -----------------------------
+# Nothing may differ: this measures the corrector C4 actually shipped.
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_freeze_base: True
+flow_source: "iid"
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+flow_time_scope: "global"
+flow_blend_in_training: True
+streams_directory: "./config/streams/cerra_blendtrain/"
+
+# *** THE ONLY CHANGE. ***
+flow_debug_trace: True
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        mse_det: {weight: 0.0}
+        mse_flow: {weight: 1.0}
+
+  learning_rate_scheduling:
+    lr_max: 2.0e-4
+
+  # ABSOLUTE stop point. C4 ended at 128; 129 is exactly one more mini-epoch.
+  num_mini_epochs: 129
+
+# NO `validation_config` / `wgtags` -- both live in config_residualflow_ft.yml, and mlflow
+# log_config runs once per file, so a duplicate top-level key kills the launch.

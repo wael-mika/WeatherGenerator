@@ -395,6 +395,7 @@ class ResidualScale(torch.nn.Module):
         freeze_after: int = 1000,
         floor: float = 1e-2,
         ceil: float = 1e2,
+        gain: float = 1.0,
     ):
         super().__init__()
         self.num_channels = num_channels
@@ -403,6 +404,7 @@ class ResidualScale(torch.nn.Module):
         self.freeze_after = freeze_after
         self.floor = floor
         self.ceil = ceil
+        self.gain = gain
         self.register_buffer("scale", torch.ones(num_channels))
         self.register_buffer("count", torch.zeros((), dtype=torch.long))
         self.reset_parameters()
@@ -431,7 +433,27 @@ class ResidualScale(torch.nn.Module):
         self.count.add_(1)
 
     def value(self) -> torch.Tensor:
-        """The scale to divide residuals by -> ``[C]``."""
-        if self.fixed is not None:
-            return torch.full_like(self.scale, self.fixed)
-        return self.scale.clamp(self.floor, self.ceil)
+        """The scale to divide residuals by -> ``[C]``.
+
+        ``gain`` is a MULTIPLIER on the calibrated per-channel scale; ``fixed`` REPLACES it with
+        one global scalar. They are not interchangeable and the difference matters:
+
+            C4's calibrated r_scale  [10si .36  2t .109  r_850 .371  t_850 .089
+                                      tp .69   u_850 .289  v_850 .324  z_850 .080]
+
+        so ``fixed: 0.5`` is a 5.6x INCREASE on 2t and a cut on tp -- a recalibration, not a
+        dilution sweep. ``gain: 0.5`` halves the injected residual on every channel and leaves
+        the relative calibration alone, which is what sweeping the sharpness/placement trade
+        actually requires.
+
+        Defaults to 1.0, so training is untouched (and at the CFM optimum a gain cancels between
+        ``physical_to_residual`` and ``residual_to_physical`` anyway). It is meant to be set in
+        an INFERENCE config: at sampling it multiplies the integrated residual directly, in
+        ``mu + r_scale * y``.
+        """
+        base = (
+            torch.full_like(self.scale, self.fixed)
+            if self.fixed is not None
+            else self.scale.clamp(self.floor, self.ceil)
+        )
+        return base * self.gain if self.gain != 1.0 else base

@@ -197,6 +197,11 @@ class ResidualFlowBranch(TargetPredictionEngineClassic):
             fixed=None if residual_scale is None else float(residual_scale),
             ema=float(cf.get("flow_residual_scale_ema", 0.999)),
             freeze_after=int(cf.get("flow_residual_scale_steps", 1000)),
+            # INFERENCE knob. Multiplies the calibrated per-channel scale, so it sweeps the
+            # injected amplitude without touching the relative calibration -- unlike
+            # `flow_residual_scale`, which replaces the whole vector with one global constant.
+            # Not in the state_dict, so it is set from config with no retraining.
+            gain=float(cf.get("flow_residual_gain", 1.0)),
         )
 
         # Diagnostic only, off by default and free when off. Answers the two questions that
