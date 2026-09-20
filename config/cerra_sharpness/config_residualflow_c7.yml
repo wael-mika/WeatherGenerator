@@ -1,0 +1,109 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# ===========================================================================================
+# ARM C7 -- C4 with the BASE UNFROZEN. The first arm in this campaign to train the base.
+#
+#     --config config/cerra_sharpness/config_residualflow_ft.yml \
+#              config/cerra_sharpness/config_residualflow_c7.yml
+#     --from-run-id scmcehvo_wfcl
+#
+# WHY. WFCL_RUNS.md section 19 established that member placement is pinned at rho_mu^2, so the
+# conditional mean's own fine-scale placement is the entire lever -- and section 19c showed
+# that NOTHING in the campaign has ever moved it. Bare mu at matched 1.7M + blend:
+#     C1_mu = C3_mu = 0.44 / 0.53      (the two no-blend arms, IDENTICAL)
+#     C2_mu = C4_mu = C5_mu = 0.45 / 0.45  (the three blend arms, IDENTICAL)
+# Five arms, two values. Every one ran `flow_freeze_base: True`, so the source and the
+# coherence length only ever fed the corrector; the base has been frozen since `nnr0qqo4`.
+#
+# This arm changes exactly two lines against C4: the base trains, and `mse_det` is switched on
+# to train it. Everything else is C4 byte-for-byte.
+#
+# WHAT IT TESTS. Whether letting the base adapt -- while the corrector trains on its residual
+# -- raises rho_mu. The two losses are DECOUPLED: `flow_detach_cond: True` (inherited from
+# config_residualflow_ft.yml) cuts the flow gradient into the base, so `mse_det` stays a clean
+# deterministic objective and this is not a joint optimisation with a tug-of-war. Precedent for
+# the arrangement is `config_residualflow_b_l5.yml`, which was never run in the C series.
+#
+# READ IT AS: bare mu (`flow_ens_size=0`) against C4_mu's 0.45 / 0.45. The corrected sample
+# follows arithmetically at rho_mu^2, so the mu row IS the result. Watch |A_mu - rho_mu|: it
+# must stay near 0. C6 is the cautionary case -- base-side WFCL pushed it to 0.42 / 0.63,
+# |A - rho| = 0.21, an over-sharpened mean the corrector then erased.
+#
+# LR. `lr_max` 5.0e-5, from `config_residualflow_b_l5.yml`, NOT C4's 2.0e-4: the base is
+# converged and is now being fine-tuned rather than trained, and C4's rate on a converged base
+# risks undoing it. This is the one number here that is a judgement rather than a copy.
+# ===========================================================================================
+
+general:
+  multiprocessing_method: "spawn"
+  desc: "residualflow_c7_c4_with_base_unfrozen"
+  # NO `istep` -- a continuation overlay must never reset the step counter.
+
+# --- C4's recipe, byte-for-byte from config_residualflow_c4.yml -----------------------------
+flow_cond: "mu+tokens"
+flow_cond_dropout: 0.0
+flow_guidance: 1.0
+flow_source: "iid"
+flow_source_length_km: 15.0
+flow_source_modes: 64
+flow_source_mix: 1.0
+flow_time_scope: "global"
+flow_blend_in_training: True
+streams_directory: "./config/streams/cerra_blendtrain/"
+
+# *** CHANGE 1 OF 2. *** Every C arm froze the base; this one does not.
+flow_freeze_base: False
+
+# *** AND THE MEMORY THIS COSTS. ***
+# `flow_freeze_base: True` was never only an optimisation choice -- `det_forward` runs the
+# deterministic stack under `torch.no_grad()` when it is set, which DROPS THE DET-STACK
+# ACTIVATION GRAPH (see the comment at decode_residual_flow.py:646-650, "the memory headroom
+# the corrector needs at level 6"). Unfreezing restores that graph, and the first launch
+# (`lj0izmb5`) died with `torch.OutOfMemoryError: Tried to allocate 2.86 GiB ... 1.68 GiB
+# free` on a 95 GiB GH200 -- marginal, about 1.2 GiB short.
+# `activation_offload` parks autograd's saved tensors in host memory for the forward. It is
+# the mechanism built for this case and is cheap on Jupiter because the Grace CPU sits on
+# NVLink-C2C. It is chosen over adding nodes deliberately: it leaves the math bit-identical,
+# where changing the node count would change the per-GPU batch and confound the comparison
+# against C4.
+activation_offload: True
+
+# *** AND THE DENSITY THIS STILL COSTS. ***
+# activation_offload was not enough on its own: `hy8ttvcn` freed ~1.7 GiB (1.68 -> 3.42 GiB
+# free) and still died needing 2.86 GiB, inside `attention.py:96`. Offload moves autograd's
+# SAVED tensors to host memory; it does nothing for the TRANSIENT peak of the attention
+# itself, and that peak is set by the number of target points in one sample. More nodes do not
+# help for the same reason the campaign already documented at inference: the limit is
+# per-sample, not per-batch.
+# So this arm must be launched with
+#     --options streams.CERRA.max_num_targets=300000
+# against the stream's 500000. The train/eval density mismatch this introduces is the one
+# thing the campaign has actually REFUTED as a confound: WFCL_RUNS.md section 4 ran `ws0x0bai`
+# at its own trained 500k against native and got fourth-decimal agreement (10si 2.4807 vs
+# 2.4821). C7 is evaluated at 1.7M bare mu exactly like C4_mu, so the comparison is unaffected.
+
+training_config:
+  losses:
+    physical:
+      type: LossPhysical
+      loss_fcts:
+        mse: {enabled: False}
+        # *** CHANGE 2 OF 2. *** C4 had 0.0 -- with the base frozen it had nothing to train.
+        mse_det: {weight: 1.0}
+        mse_flow: {weight: 1.0}
+
+  learning_rate_scheduling:
+    lr_max: 5.0e-5
+
+  # ABSOLUTE stop point, not "32 more". C4 ended at 128.
+  num_mini_epochs: 160
+
+# NO `validation_config` / `wgtags` -- both live in config_residualflow_ft.yml, and mlflow
+# log_config runs once per file, so a duplicate top-level key kills the launch.
