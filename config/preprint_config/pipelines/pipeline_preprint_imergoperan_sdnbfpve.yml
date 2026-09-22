@@ -1,0 +1,97 @@
+# PREPRINT sdnbfpve arm -- target(s): IMERG_ANEMOI + OPERAN_TP.
+# 2 forecast steps x 6 mini epochs -> 8 steps x 3 mini epochs -> 3-month inference -> evaluation.
+#
+# One of THREE arms off the same backbone, differing only in which precipitation target(s) the
+# diagnostic decoder is trained on: imergonly / operanonly / imergoperan. Encoder and forecast
+# engine are frozen throughout, so the arms are a clean target ablation.
+#
+# BACKBONE IS `sdnbfpve_fix`. sdnbfpve's own slurm snapshot is stale on three counts that all bite
+# here -- validation_io.py 204 lines vs 324 (inference dies with IndexError), no NCCL PG-timeout
+# fix, and no aliased-module guard (adding a NEW decoder raises
+# `KeyError: ...lnorm.embed_aux.0`). The seed is the same checkpoint, istep 1168, current source.
+#
+# ERA5 (id 1) is neutralised in the stream directory: sdnbfpve trained it as a LIVE 81-channel
+# diagnostic output, and leaving it on would add an 81-channel loss term beside precipitation.
+#
+# CHECKPOINT PINS. Stage 1 runs 6 mini epochs -> `chkpt00005`; stage 2 runs 3 -> `chkpt00002`.
+# `sdnbfpve_fix` ships only `_latest.chkpt`, so stage 1 takes the launcher default and pins nothing.
+#
+# WALLTIME. Measured on this family: ~67 min per 2-step mini epoch, ~113 min per 8-step one.
+# Stage 1 ~6.7 h, stage 2 ~5.7 h. chain_jobs 3 gives 24 h and 36 h. A surplus chained job exits in
+# seconds once istep reaches num_mini_epochs. A training stage that runs OUT of walltime is a
+# pipeline-killer, not a slowdown: the next stage pins a numbered checkpoint that would never be
+# written, and every dependency is `afterany`.#
+# INFERENCE MEMORY RISK -- READ BEFORE LAUNCHING. This arm has TWO live decoders. At inference
+# Trainer.inference() forces max_num_targets back to -1, so every live decoder runs at the full
+# 542080 points x 40 forecast steps, and `output.streams` does NOT limit that -- it limits only
+# what is WRITTEN. The 3-decoder cw6a4szu model OOM-killed a DataLoader worker after 2 samples per
+# rank doing exactly this (runs g57h6cp5, so3hcvgp, aoafhja2 -- 16 of 368), at 42 s/it against
+# ~19 s/it for one decoder. Two decoders are ~2/3 of that load and are NOT proven to fit.
+#
+# If this stage OOMs, do NOT reduce `data_loading.num_workers` or `nodes`: both change the
+# sample-index -> initialisation-time map (ranks take contiguous blocks, workers interleave inside
+# a rank), which breaks comparability with every other run and invalidates the case-study sample
+# indices 196/204/357/365. Instead split it into two single-decoder inference runs using the
+# neutralisation overlay pattern in config/preprint_config/infer_3target_cw6a4szu_out_*.yml:
+# copy the stream dir, set `reconstruct: false` plus emptied target/train_target_channels/
+# val_target_channels on the decoder you are not writing, and run inference twice.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/preprint_config/pipelines/pipeline_preprint_imergoperan_sdnbfpve.yml | tee launch_imergoperan_sdnbfpve.log
+#####################################
+
+stages:
+  - name: train2s6ep
+    stage: train
+    from_run_id: sdnbfpve_fix
+    config_files:
+      - config/preprint_config/config_preprint_imergoperan_sdnbfpve_2step_6ep.yml
+    nodes: 2
+    chain_jobs: 3
+    slurm_args:
+      - "--time=08:00:00"
+
+  - name: train8s3ep
+    stage: train
+    from_run_id: STAGE.train2s6ep
+    mini_epoch: 5
+    config_files:
+      - config/preprint_config/config_preprint_imergoperan_sdnbfpve_8step_3ep.yml
+    nodes: 2
+    chain_jobs: 3
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI,OPERAN_TP]"
+      - "data_loading.num_workers=2"
+
+  - name: evalscores
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_sdnbfpve_imergoperan_scores.yml
+    slurm_args:
+      - "--time=03:00:00"
+
+  - name: evalevents
+    stage: evaluation
+    run_ids:
+      - STAGE.infer3month
+    eval_config: config/evaluate/eval_config_preprint_sdnbfpve_imergoperan_events.yml
+    slurm_args:
+      - "--time=01:00:00"

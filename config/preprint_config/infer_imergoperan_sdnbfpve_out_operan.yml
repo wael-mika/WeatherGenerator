@@ -1,0 +1,14 @@
+# Single-stream inference overlay for the sdnbfpve imergoperan arm -- writes OPERAN_TP only.
+#
+# FALLBACK for `pipeline_preprint_imergoperan_sdnbfpve.yml`'s joint inference stage. That stage has
+# TWO live decoders, and `output.streams` limits only what is written: both still compute at the
+# full 542080 points x 40 forecast steps. The 3-decoder model OOM-killed a worker doing exactly
+# this. `num_workers` and `nodes` must NOT be reduced to fix it -- both change the sample-index ->
+# initialisation-time map and would break comparability with every other run and invalidate the
+# case-study indices 196/204/357/365. This overlay switches the other decoder off instead.
+#
+# Use as:
+#   launch-slurm.py --stage inference --from-run-id <stage2 run id> --nodes 2 \
+#     --config config/preprint_config/infer_imergoperan_sdnbfpve_out_operan.yml \
+#     --options test_config.output.streams=[OPERAN_TP] <plus the standard geometry>
+streams_directory: "./config/streams/preprint_imergoperan_sdnbfpve_out_operan/"

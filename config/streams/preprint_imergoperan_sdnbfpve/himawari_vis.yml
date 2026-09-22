@@ -1,0 +1,48 @@
+# Written verbatim from model_sdnbfpve_latest.json. sdnbfpve's own streams_directory
+# (n320_new_channels_forecast_iasi_channels_mnt_cw_operan/) is not present in this repo, so the
+# checkpoint's resolved stream set is the source of truth.
+#
+HIMAWARI_AHI_VIS:
+  type: obs
+  stream_id: 14
+  filenames:
+  - observations-file-2015-2022-himawari8-VIS-o256-v1.zarr
+  - observations-file-2022-2024-himawari9-VIS-o256-v1.zarr
+  geoinfo_channels:
+  - zenith
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 1024
+  tokenize_spacetime: false
+  max_num_targets: 131072
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 4
+    dim_embed: 512
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 512
+  target_readout:
+    num_layers: 2
+    num_heads: 4
+  pred_head:
+    ens_size: 1
+    num_layers: 1
+  train_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  train_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  target_channel_weights:
+  - 1.0
+  - 1.0
+  val_source_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  val_target_channels:
+  - obsvalue_rawbt_086
+  - obsvalue_rawbt_160
+  forcing: true
