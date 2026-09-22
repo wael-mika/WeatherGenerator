@@ -1,0 +1,64 @@
+# PREPRINT sdnbfpve arm -- imergonly (IMERG_ANEMOI). SIX-MONTH inference only.
+#
+# Standalone re-run of the inference stage of pipeline_preprint_imergonly_sdnbfpve.yml over a
+# 6-month period instead of 3. Training is NOT repeated: this loads `bt06u8hd` (the 8step_3ep
+# stage-2 run) at `chkpt00002`, exactly the checkpoint the 3-month reference `kwn6g4cq` used.
+#
+# WHAT CHANGED vs the 3-month reference (everything else is byte-identical):
+#   test_config.end_date                2023-09-12T00 -> 2023-12-13T00
+#   test_config.samples_per_mini_epoch  368           -> 736
+#   test_config.output.num_samples      368           -> 736
+#   --time                              06:00:00      -> 08:00:00
+#
+# WINDOW ARITHMETIC (computed with the real TimeWindowHandler, not by hand). check_samples
+# subtracts (time_step*(num_steps+offset) + window_len)//step = 42 windows at 40 steps / 6 h.
+#   end 2023-12-13T00 -> index_range.end 780, available 738, spme 736  (margin 2, same as the
+#                        reference's 370/368)
+#   first fstep-1 window  2023-06-01T06 -> 12Z   (identical to the reference)
+#   last  fstep-1 window  2023-12-02T00 -> 06Z
+#   last  fstep-40 window 2023-12-11T18 -> 2023-12-12T00
+# end_date 2023-12-12T00 would yield only 734 available and check_samples would SILENTLY
+# reduce samples_per_mini_epoch to 733. Do not shorten it.
+#
+# DIVISIBILITY: per-rank length is ((spme // world) // (batch*num_workers)) * batch*num_workers,
+# truncated silently. 736 / world 8 = 92, and 92 is exact at num_workers 2 -> 8 x 92 = 736.
+# (736 = 2 x 368, so it is exact for world 4 as well.)
+#
+# INDEX SPACE IS *NOT* COMPATIBLE WITH THE 3-MONTH RUNS. Global sample index = rank-file
+# concatenation order, so with 736 samples rank r holds [r*92, (r+1)*92) instead of
+# [r*46, (r+1)*46). The Doksuri (196/204) and Daniel (357/365) indices from the 3-month runs
+# DO NOT transfer -- re-derive them from the stores by valid time before any case study.
+#
+# ONE LIVE DECODER ONLY: era5.yml in this stream directory is `reconstruct: false`, so IMERG_ANEMOI
+# is the single decoder. (Inference with >1 live decoder OOMs host RAM; `output.streams`
+# limits what is WRITTEN, not what is computed.)
+#
+# COVERAGE: all input stores reach past the last initialisation (2023-12-02) except the three
+# METOP IASI radiance files, which all end 2023-05-31 -- i.e. METOP_ABC_IASI is spoofed for the
+# whole period, exactly as it already was in the 3-month reference. No new gap is introduced.
+#
+# COST (scaled from the reference: kwn6g4cq ran 368 inits in 1h49-1h54 and wrote ~79-84 GB):
+# expect ~3h40-3h50 and ~160-170 GB per run.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/preprint_config/pipelines/pipeline_preprint_imergonly_sdnbfpve_infer6month.yml
+#####################################
+
+stages:
+  - name: infer6month
+    stage: inference
+    from_run_id: bt06u8hd
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=08:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-12-13T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=736"
+      - "test_config.output.num_samples=736"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
