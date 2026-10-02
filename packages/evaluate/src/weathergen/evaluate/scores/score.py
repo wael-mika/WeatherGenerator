@@ -17,6 +17,7 @@ import scores
 import xarray as xr
 from scipy.spatial import cKDTree
 
+from weathergen.evaluate.scores.cell_artifacts import cell_error_decomposition, healpix_cell_ids
 from weathergen.evaluate.scores.psd import compute_psd_score, detect_grid_type
 from weathergen.evaluate.scores.score_utils import calc_latitude_weights, to_list
 
@@ -219,6 +220,12 @@ class Scores:
             "qq_analysis": self.calc_quantiles,
             "nse": self.calc_nse,
             "psd": self.calc_psd,
+            # Decode-cell artifact ("diamond tiling"). READ THESE THREE TOGETHER -- cell_dc_share
+            # alone cannot distinguish a tiling artifact from a smooth large-scale bias, and
+            # cell_dc_roughness is the discriminator. See scores/cell_artifacts.py.
+            "cell_dc_share": self.calc_cell_dc_share,
+            "cell_dc_var": self.calc_cell_dc_var,
+            "cell_dc_roughness": self.calc_cell_dc_roughness,
         }
         self.prob_metrics_dict = {
             "ssr": self.calc_ssr,
@@ -474,6 +481,111 @@ class Scores:
     def _weighted_mean(self, data: xr.DataArray, weights: xr.DataArray) -> xr.DataArray:
         _, w = xr.broadcast(data, weights)
         return (data * w).mean(dim=self._agg_dims) / w.mean(dim=self._agg_dims)
+
+    # ------------------------------------------------------------------ cell artifacts
+
+    _LAT_NAMES = ("lat", "latitude", "rlat", "clat")
+    _LON_NAMES = ("lon", "longitude", "rlon", "clon")
+
+    def _find_coord(self, da: xr.DataArray, names: tuple[str, ...]):
+        for n in names:
+            if n in da.coords:
+                return np.asarray(da.coords[n].values).ravel()
+        return None
+
+    def _cell_artifacts(
+        self,
+        p: xr.DataArray,
+        gt: xr.DataArray,
+        healpix_level: int | None = None,
+        cell_coord: str | None = None,
+        min_points_per_cell: int = 8,
+    ) -> dict:
+        """Shared decomposition behind the three cell_dc_* scores. Cached per call site.
+
+        NOTE these scores reduce over POINTS by construction (they group the error by decode
+        cell), so ``agg_dims`` does not apply to them -- they always return a scalar per call.
+
+        The cell labels must be the tessellation the MODEL used. Preferred source is a cell
+        coordinate carried in the data (``cell_coord``); otherwise ``healpix_level`` is used, which
+        needs astropy-healpix (not a declared dependency -- see cell_artifacts.healpix_cell_ids).
+        """
+        # a deterministic artifact question: collapse any ensemble dim to its mean first
+        if self._ens_dim in p.dims:
+            p = p.mean(dim=self._ens_dim)
+
+        pv = np.asarray(p.values).ravel()
+        gv = np.asarray(xr.broadcast(gt, p)[0].values).ravel()
+        lat = self._find_coord(p, self._LAT_NAMES)
+        lon = self._find_coord(p, self._LON_NAMES)
+
+        if cell_coord is not None and cell_coord in p.coords:
+            cells = np.asarray(p.coords[cell_coord].values).ravel()
+        elif healpix_level is not None:
+            if lat is None or lon is None:
+                raise ValueError(
+                    "cell_dc_* with healpix_level needs latitude/longitude coordinates on the "
+                    f"prediction; looked for {self._LAT_NAMES} and {self._LON_NAMES}"
+                )
+            cells = healpix_cell_ids(lat, lon, healpix_level)
+        else:
+            raise ValueError(
+                "cell_dc_* needs either `cell_coord` (a cell index carried in the data) or "
+                "`healpix_level` (the level the MODEL decoded at). Example config: "
+                "{cell_dc_share: {healpix_level: 5}}"
+            )
+
+        if cells.size != pv.size:  # e.g. a cell coord defined on a different dim
+            raise ValueError(
+                f"cell ids ({cells.size}) do not align with the flattened prediction ({pv.size})"
+            )
+        return cell_error_decomposition(
+            pv, gv, cells, lat, lon, min_points_per_cell=min_points_per_cell
+        )
+
+    def calc_cell_dc_share(self, p, gt, **kwargs) -> xr.DataArray:
+        """Fraction of the error variance that is a constant offset per decode cell.
+
+        *** NOT an artifact score on its own: a smooth large-scale bias also scores high. ***
+        Pair it with ``cell_dc_roughness`` (>=0.5 => real tiling, <0.5 => smooth bias) and compare
+        arms on ``cell_dc_var``, since a share moves when its denominator moves.
+        """
+        r = self._cell_artifacts(p, gt, **kwargs)
+        return xr.DataArray(r.get("cell_dc_share", np.nan), attrs=self._cell_attrs(r))
+
+    def calc_cell_dc_var(self, p, gt, **kwargs) -> xr.DataArray:
+        """ABSOLUTE per-cell offset variance -- the number to compare BETWEEN arms.
+
+        The sampling-noise floor has been subtracted (``cell_dc_var_debiased``); the raw value and
+        the floor are on ``.attrs``.
+        """
+        r = self._cell_artifacts(p, gt, **kwargs)
+        v = r.get("cell_dc_var_debiased", np.nan)
+        if not np.isfinite(v):
+            v = r.get("cell_dc_var", np.nan)
+        return xr.DataArray(v, attrs=self._cell_attrs(r))
+
+    def calc_cell_dc_roughness(self, p, gt, **kwargs) -> xr.DataArray:
+        """Do ADJACENT cells disagree? ~1 = true tiling, ~0 = smooth bias. NaN without coords.
+
+        This is the discriminator that makes ``cell_dc_share`` safe to act on.
+        """
+        r = self._cell_artifacts(p, gt, **kwargs)
+        return xr.DataArray(r.get("cell_dc_roughness", np.nan), attrs=self._cell_attrs(r))
+
+    @staticmethod
+    def _cell_attrs(r: dict) -> dict:
+        """Carry the context a reader needs, so no cell_dc_* number is interpretable alone."""
+        keep = (
+            "verdict",
+            "cell_dc_var",
+            "cell_dc_share",
+            "cell_dc_noise_floor_var",
+            "cell_dc_roughness",
+            "mean_points_per_cell",
+            "n_cells",
+        )
+        return {k: r[k] for k in keep if k in r}
 
     def get_2x2_event_counts(
         self,
