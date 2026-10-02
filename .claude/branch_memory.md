@@ -1042,3 +1042,228 @@ Stages: 2 steps x 16 mini epochs -> 8 steps x 8 mini epochs -> 3-month inference
 - Deriving one eval config from another by text extraction is fragile: the stream name appears in
   BOTH `global_plotting_options` and `default_streams`, so an unanchored search grabs the first
   match and swallows everything between. Anchor on the `default_streams:` split first.
+- **MEASURED walltime: a 2-step mini epoch costs ~67 min on 2 nodes** (from xdr87pab checkpoint
+  mtimes: chkpt00000 10:20:52, 00001 11:27:36, 00002 12:34:48 -- 66m44s and 67m12s). So 16 mini
+  epochs need ~18 h plus ~11 min of uv sync / model load per chained job. The original
+  `chain_jobs: 2 x 8 h` = 16 h was NOT enough (would have stopped near mini epoch 13); pipelines
+  are now `chain_jobs: 3`. The earlier "8 h covers 8 mini epochs" figure was an inherited
+  ALLOCATION, never a measurement, and was itself marginal (8 x 67 min = 8.9 h).
+- **A training stage running out of wall time is a pipeline-killer, not a slowdown.** Stage 2 pins
+  `mini_epoch: 15` and stage 3 pins `mini_epoch: 7`; if the numbered checkpoint is never written
+  the next stage dies with FileNotFoundError, and every dependency is `afterany` so the whole
+  remaining chain runs and fails behind it.
+- **Extending a running pipeline in place**: submit another `train_continue` job with the SAME
+  run_id (`--export=...RUN_ID=<r>,FROM_RUN_ID=<r>,WEATHERGEN_MINI_EPOCH=-1,WEATHERGEN_STAGE=train_continue,WEATHERGEN_CONFIG_EXTRA=`,
+  cwd and `WEATHERGEN_HOME` = that run's slurm copy dir, script
+  `<copydir>/WeatherGenerator-private/hpc/santis/weathergen_slurm.sh`), depending on the previous
+  part; then `scontrol update jobid=<next stage part1> dependency=afterany:<new job>`. Copy the
+  exact parameters from an existing part with `scontrol show job`.
+- 8-step mini-epoch cost is still UNMEASURED. Measure it when a stage 2 starts and re-check that
+  3 x 12 h covers 8 of them.
+- **When extending a chained stage, repoint the stage's CLEANUP job too**, not just the next
+  stage. The launcher points `<runid>_cleanup` at what was the last chained job, so an added part3
+  leaves cleanup firing one job early. Harmless in practice -- `cleanup.py` only removes
+  `<copydir>/WeatherGenerator/.venv` (the full `rmtree(dir_path)` is commented out) and blacklists
+  any directory whose name contains a run id still in `squeue`, which an added part keeps alive --
+  but the graph should not depend on that guard. Repoint both:
+  `scontrol update jobid=<stageN cleanup> dependency=afterany:<new last part>`.
+- Intended pipeline order: part1->part2->part3 -> {stage1 cleanup, stage2 part1} -> ... ->
+  infer -> evalscores -> evalevents. `evalevents` depends on `evalscores` (NOT on inference) on
+  purpose: the scoring pass must bank its JSONs before the plotting pass, because
+  run_evaluation.py plots before it scores.
+
+## Measured epoch costs and the qljz42id loss (2026-09-05)
+From checkpoint mtimes, per mini epoch on 2 nodes:
+- 2 steps, 1 target: **67 min**  -> 16 epochs = 17.9 h (3 x 8 h is enough)
+- 2 steps, 3 targets: **84 min** -> 16 epochs = 22.4 h + startups (3 x 8 h is NOT enough)
+- 8 steps, 1 target, nhv6tkln lineage: **113 min** -> 8 epochs = 15.1 h (2 x 12 h is enough)
+- 8 steps, 1 target, cw6a4szu lineage: **227 min** -> 8 epochs = 30.3 h (2 x 12 h is NOT enough)
+`qljz42id` (3target cw6a4szu) died: v43l9geb timed out after 15 of 16 mini epochs, ~27 min short
+of chkpt00015; rj177eai then died on FileNotFoundError and inference + both eval stages FAILED
+behind it via `afterany`. Recovery: `pipeline_preprint_3target_cw6a4szu_resume.yml` restarts from
+`v43l9geb` at chkpt00014 (one epoch short of the other arms -- state that in the paper).
+- **The cw6a4szu-vs-nhv6tkln 2x gap at 8 steps is NOT ERA5 and NOT config.** Compared the resolved
+  saved configs of o4rttryd and mh2bplr2: both have ERA5 (id 1) at src 0 / tgt 0 / `reconstruct:
+  false` and ERA5_in forcing with 74 source channels; totals 134 src, 61 vs 62 tgt (the 1 is
+  METOP_ABC_IASI target channels on a forcing stream, so no decoder). Cause is environmental
+  (nodes / filesystem), still unexplained -- do not compare backbones on wall-clock.
+- **Recovering run ids after a lost launch log** (e.g. the ssh session dropping mid-launch): they
+  are all in the slurm job names, `weathergen_<runid>_[partN_]<stagename>_<pipelineid>`. Query
+  **squeue**, not just sacct -- sacct omits PENDING jobs, so a freshly launched pipeline looks like
+  a single running job and the rest of the chain appears missing when it is actually fine. Order
+  stages by lowest job id (the launcher submits in pipeline order); squeue's own listing order is
+  arbitrary. `playground/refresh_run_ids.sh` now does this automatically for entries written as
+  `SLURM:<pipeline_id>` instead of a log path.
+
+## Preprint 2-step val curves saturate by mini epoch 2-3 (2026-09-05)
+- Measured from `<run>_train_metrics.json` (`stage == "val"`, key
+  `LossPhysical.<STREAM>.mse.avg`). For EVERY stream the gain by mini epoch 3 is >= the gain over
+  all 16. OPERAN is worst: min at **ep2** for all three arms, then it rises — 3target's OPERAN head
+  ends at 0.3966 vs 0.3925 after ep0, i.e. **net worse than it started**. IMERG bottoms at ep6,
+  ERA5_TP at ep10-14 (those two do gain a real ~6-7%).
+- This is overfitting, NOT a too-low LR: train loss falls 17% (0.4348 -> 0.3625 on xdr87pab) and is
+  still descending at the last step while val rises. Raising lr_max would reach that regime sooner.
+- `validation_config.shuffle: True` here reseeds from the constant seed each mini epoch, so all 16
+  evals score the SAME 256 windows — the rise is real degradation, not resampling noise. (Differs
+  from the older IMERG family, which got the same property from `shuffle: False`.)
+- Warmup is already a non-factor: peak LR 2.83e-4 is reached by train log point 22 of 448 (~3.5k of
+  65k samples). Cosine decay puts LR at ~3e-5 by 75% through and <=1e-7 in the last quarter, so the
+  final epochs cannot move anything anyway. Shortening `num_steps_warmup` buys ~nothing.
+- Consequence: `num_mini_epochs: 16` is ~3x too long. Cutting to 6 keeps the whole gain, saves ~60%
+  of stage-1 walltime and structurally fixes the v43l9geb timeout. `lr_steps` is linear in
+  `num_mini_epochs`, so the cosine shape recompresses on its own — no LR retuning needed.
+- Stage 2 pins `mini_epoch: 15`, which is NOT the best checkpoint (xdr87pab: 0.3894 vs 0.3789 at
+  chkpt00002). Same checkpoint-selection cost already recorded for the older IMERG finetunes.
+- Caveat before acting: mse.avg is a conditional-mean metric and the preprint scores 364 inits with
+  extremes. Score chkpt00002 vs chkpt00015 through the eval stage before declaring ep3-15 wasted.
+
+## Plotting the preprint 2-step runs
+- `config/runs_plot_train_preprint_2step.yml`. `plot_train`'s `--streams` defaults to `["ERA5"]`,
+  which matches NO column in these runs — the target streams are `OPERAN_TP`, `ERA5_TP`,
+  `IMERG_ANEMOI` — so val curves come out empty unless you pass `--streams` explicitly.
+- `plot_train` does not create its output directory; `mkdir -p` it first or it dies in `savefig`.
+- `plot_loss_avg` is only ever called with `stage=TRAIN`, so there is no `*_val_avg.png` at all,
+  regardless of streams.
+
+## Backbone weights deleted, and the dy0jlrmw substitute (2026-09-06)
+- **`.chkpt` weight files under `models/{f7ug724z,f7ug724z_fix,dy0jlrmw,dy0jlrmw_fix}/` are GONE**
+  (dir mtimes 2026-09-04); only `model_*_latest.json` remains. Something sweeps large checkpoints
+  from the shared models dir. **Check for the `.chkpt`, not just the directory, before writing a
+  pipeline against a backbone.**
+- **`dy0jlrmw_jup` is the same run as `dy0jlrmw`** -- identical istep (12752), run_history and
+  streams_directory, weights intact -- so it is a valid substitute parent. **`f7ug724z` has no
+  surviving copy anywhere** and cannot currently be run.
+- **dy0jlrmw is a different family**: saved streams_directory
+  `streams_preprint/era5_georing_avhrr_synop_lowres_linear/`, live loss block `physical` (not
+  `forecast`), model_input `forecasting`, no `multiprocessing_method`, 4.2 GB checkpoint. Its
+  preprint stream dirs are built from `config/streams/imerg_diag_dy0jlrmw/` (5 files, ids
+  0/10-14/20/22/30, so 41 and 42 are free), NOT from the cw6a4szu family.
+- **dy0jlrmw's freeze regex also contains `.*ERA5.*`** -- same trap as f7ug724z, narrowed to
+  `.*\.ERA5|.*\.ERA5\..*`. In the era5only arm ERA5_TP is the ONLY trainable decoder, so the
+  original pattern would leave the run with zero trainable parameters.
+- Short-curriculum variants added: nhv6tkln 4 steps x 6 ep -> 8 steps x 4 ep; aets3ku5 and
+  dy0jlrmw 2 steps x 6 ep -> 8 steps x 3 ep; both operanonly and era5only. LR shape rescaled to
+  the family's 3.125%/6.25%: warmup/cooldown 96/192 (6 ep), 64/128 (4 ep), 48/96 (3 ep).
+- **launch-slurm takes a stage's CODE from the PARENT's slurm snapshot**
+  (`slurm_weathergen_<from_run_id>_dir/WeatherGenerator`, launch-slurm.py:1266-1273); only
+  `config/**/*.y*ml` is overlaid from the working tree. So a backbone whose snapshot predates a
+  source fix runs the OLD code no matter what your working tree says. That is the entire reason
+  the `_fix` backbones exist.
+- **dy0jlrmw_jup's snapshot predates the aliased-module fix** and killed runs mpz6e3rq / vkhy3jpa
+  with `KeyError: 'target_token_engines.OPERAN_TP.tte.5.lnorm.embed_aux.0'`: MLP registers its norm
+  as BOTH `.lnorm` and `.layers.0`, `named_modules()` deduplicates that, and the old
+  model_interface.load_model did `all_modules[path]` instead of `.get(path)` + the alias guard.
+- **Recipe for a `_fix` seed** (what nhv6tkln_fix/aets3ku5_fix are, and how `dy0jlrmw_wmfix` was
+  made): (1) `slurm/slurm_weathergen_<name>_dir/WeatherGenerator/` = git-tracked files from the
+  current working tree plus a `tracked_files.json` listing them (no `.git`, no `.venv` -- ~1 MB;
+  copy_git_tracked_directory falls back to that json when `.git` is absent); (2)
+  `models/<name>/<name>_latest.chkpt` copied from the source run and
+  `model_<name>_latest.json` with `general.run_id` rewritten to `<name>`. The source run is never
+  modified.
+
+## Evaluation failures dissected (2026-09-06)
+- **An inference job in slurm state FAILED may still have written everything.** `ht50r61p` logged
+  `100%|##########| 368/368` and THEN died on an ALLREDUCE watchdog timeout (600 s, SeqNum 22) during
+  teardown. Its output is complete: 8 rank ZipStores, 46 samples each, 368 total, none corrupt --
+  identical to the successful `sdwuif2h`. **Verify the zarr before re-running a 2 h inference.**
+  These stores are zarr **ZipStore** `.zip` files; plain `zarr.open` gives GroupNotFoundError on
+  good data too (check a known-good run as a control before concluding corruption).
+- **`run_evaluation.py` instantiated the ABSTRACT `WeatherGenReader`** in the MLflow push block.
+  `Reader` declares get_samples / get_forecast_steps / get_ensemble as @abstractmethod and only
+  WeatherGenZarrReader / WeatherGenJsonReader implement them. Because the block is guarded by
+  `if mlflow_client`, it killed the job AFTER the full scoring pass had written its JSONs (run
+  gq1480k7). Fixed to `get_reader("zarr", ...)`. Scores from that run WERE banked -- check
+  `results/<run>/evaluation/` before assuming an eval produced nothing.
+- **`cfg.evaluation.metrics` is GLOBAL, not per-stream**, so requesting `seeps` for one stream runs
+  get_climatology for ALL of them, and `_get_climatology_filename` AUTO-RESOLVES
+  `<store>_climatology.zarr` from each stream's filename. For ERA5_TP that finds
+  `assets/climatology/aifs-ea-an-oper-...-with-era51_climatology.zarr`, which contains only
+  `.zattrs`/`.zgroup` -- no arrays -- so `align_clim_data` raised
+  `AttributeError: 'Dataset' object has no attribute 'latitude'` and discarded the whole pass.
+  `get_climatology` now catches this and degrades to NaN for that stream only.
+- seeps removed from the operanonly and era5only eval configs (neither target has a climatology);
+  KEPT for 3target, where IMERG_ANEMOI has a real N320 climatology and the fault-tolerance above is
+  what keeps ERA5_TP from killing the run.
+
+## zf381x9n (S/JEPA) arms, launched from v1 (2026-09-17)
+- `zf381x9n`: S/JEPA pretrained, run_history [lw33ql2u -> sm9udv37 -> onm76fjr -> zf381x9n],
+  istep 2048, 8 mini epochs at 8 steps. Resolved stream set **byte-identical** to aets3ku5_fix and
+  nhv6tkln_fix, so its stream dirs are copies of preprint_operanonly_aets3ku5/ with the target
+  swapped, and zf381x9n-vs-aets3ku5 is a like-for-like S/JEPA comparison at the 2x6 + 8x3 curriculum.
+- Traps handled by `zf381x9n_fix`: ships ONLY chkpt00008 (no `_latest`; seed copies it to
+  `_latest.chkpt`), and a stale snapshot (validation_io 204, no PG-timeout fix, no alias guard).
+- **The NCCL PG-timeout fix was NOT on v1** -- it lived only on wm/develop-ssl-diffusion-moe inside
+  the ensemble-loss commit 8de7f815. Applied to v1 as its own commit f3db693a before seeding.
+  **Seeds must be built from the branch the pipelines run from**: the first zf381x9n_fix snapshot
+  carried moe code (976 files incl. gated-mixture heads) and was rebuilt from v1 (786 files).
+- Pipelines mqbl6gnj (imergonly: ezyry44b -> jjwuqcqc -> v6vegfhm) and bhyu6o13 (operanonly:
+  b8f83grj -> jkgx994g -> r4lfam1g). Recorded in playground/preprint_run_ids.md as SLURM: entries.
+- `/iopsstor/scratch/cscs/walmikae/venvs/wg` is DEGRADED (torch import fails); use `./.venv`.
+
+## Decoder-finetune numbers, verified from artefacts (2026-09-19)
+- **Trainable summary is identical for every backbone of the cw6a4szu family** (cw6a4szu, nhv6tkln,
+  aets3ku5, zf381x9n): encoder 616,135,661 + FE 536,995,136 frozen, decoder
+  53,760 + 24,587,312 + 513 = **24,641,585 of 1,177,772,382 (2.1 %)**. Read from the rank-0 log's
+  "Trainable parameter summary" block, present in every train stage.
+- **The raw checkpoint has 26,544,081 decoder params, not 24,641,585** — each of the 4 MLP blocks
+  registers its AdaLN under BOTH `layers.0` and `lnorm` (475,624 each, 4 × = 1,902,496). Same
+  aliasing that needs the `all_modules.get` guard. Quote the trainer's number, not a state-dict sum.
+- Per-layer decoder arithmetic (verified exactly): cross-att 3,097,320 + self-att 1,524,456 +
+  SwiGLU MLP 1,525,052 = 6,146,828, ×4 layers. AdaLN conditioning MLP is 105→420→1024 in every block.
+- **The target-coordinate query is 105-d** for IMERG/OPERAN (1 stream id + 5 time + 0 geoinfo +
+  75 cell-geometry + 24 ring-1 offsets); `embed_target_coords` is a bias-free 105×512 linear.
+- Store stats used for normalisation: IMERG mean 6.763e-4 m / std 3.260e-3 m (stats 1998-2021,
+  38,835 steps, to 2024-07-31); OPERAN_TP mean 7.413e-4 / std 2.603e-3 (stats 2016-2024, 14,000
+  steps, to 2025-07-31). Both N320 542,080 pts, 6 h accumulation in metres.
+- **zf381x9n arm measured walltimes**: 2-step mini epoch 43-45 min, 8-step 105 min (IMERG) /
+  112-114 min (OPERAN), inference 1 h 51 m / 1 h 54 m. Stage totals 4 h 21 / 5 h 17 (IMERG),
+  4 h 28 / 5 h 42 (OPERAN). Faster than the nhv6tkln lineage's 67/113 min.
+- Val MSE curves: IMERG 2-step 0.4495→0.4118 over 6 ep (min at ep5); OPERAN 2-step 0.3891→0.3735
+  (min ep5, non-monotonic); 8-step IMERG 0.5540/0.5517/0.5543 and OPERAN 0.4403/0.4345/0.4393 —
+  **both 8-step arms bottom at mini epoch 1**, i.e. 3 epochs is already past the optimum.
+- `v6vegfhm` 368/368 (79.8 GB, 12 eval JSONs), `r4lfam1g` 368/368 (85.7 GB, 9 JSONs) — re-verified.
+- Long-form write-up of the whole finetune protocol:
+  `playground/docs/precip_decoder_finetune_description.md`.
+
+## Re-running a stage from an OLD parent: the tracked_files.json config trap (2026-09-22)
+- **A stage's snapshot is built as `copy_git_tracked_directory(parent_snapshot)` +
+  `copy_all_configs(working_tree)`.** The parent snapshot has no `.git`, so the first step falls
+  back to its `tracked_files.json` — a list frozen when the `_fix` seed was built. Configs that
+  were UNTRACKED when the parent ran are physically in the parent snapshot but **absent from that
+  json, so they are NOT carried forward**; and if your current working tree no longer has them,
+  `copy_all_configs` cannot restore them either. The new stage then launches with its
+  `streams_directory` missing.
+- Hit concretely: `bt06u8hd`/`zjvuanq7` (sdnbfpve) snapshots physically contain
+  `config/streams/preprint_{imergonly,operanonly}_sdnbfpve/`, but their `tracked_files.json`
+  (786 entries) lists none of them, and the whole sdnbfpve config set is **not on v1 at all** —
+  it existed only in the working tree on 2026-09-08 and in the snapshots.
+- **Fix: copy the config set back from the parent's (or the reference inference's) snapshot into
+  the working tree before launching.** `copy_all_configs` rglobs ALL `config/**/*.y*ml`, tracked or
+  not, so untracked restored files do ship. Restored from
+  `slurm_weathergen_kwn6g4cq_dir/WeatherGenerator/config/` and verified byte-identical; the
+  imergonly/operanonly stream dirs are identical across the bt06u8hd, kwn6g4cq and lb86aoct
+  snapshots. These files are currently UNTRACKED on v1 — commit them if the arm matters.
+- Always check `python3 -c "import json;print(len(json.load(open('<snap>/tracked_files.json'))))"`
+  and grep it for the stream dir before re-running a stage from an old parent.
+
+## sdnbfpve 6-month inference (2026-09-22)
+- Parents: `bt06u8hd` (imergonly) / `zjvuanq7` (operanonly), both at **chkpt00002** (istep 1530,
+  3 mini epochs at 8 steps) — the same checkpoints the 3-month references `kwn6g4cq` / `lb86aoct`
+  used. Both references verified 368/368 ([46]*8), 78.9 / 84.0 GB, 1h49 / 1h54 on 2 nodes.
+- **Window, computed with the real `TimeWindowHandler`:** `end_date 2023-12-13T00` gives
+  index_range.end 780 → available 738, so spme **736** fits with margin 2 (the reference had
+  370/368). First fstep-1 window 2023-06-01T06→12Z (identical to the 3-month runs), last
+  2023-12-02T00→06Z, last fstep-40 window ends 2023-12-12T00.
+  **`end_date 2023-12-12T00` gives only 734 available and `check_samples` SILENTLY reduces spme.**
+- 736 = 2 × 368 so per-rank length is exact: 736/8 = 92, and 92 is exact at num_workers 2.
+- **The 6-month index space is NOT compatible with the 3-month one** — global index is rank-file
+  concatenation order, so rank r holds [r*92,(r+1)*92) not [r*46,(r+1)*46). The Doksuri 196/204
+  and Daniel 357/365 indices do NOT transfer; re-derive by valid time.
+- **All three METOP IASI radiance stores end 2023-05-31**, so `METOP_ABC_IASI` is spoofed for the
+  entire Jun-Dec 2023 period — and was equally spoofed in the 3-month reference, so the extension
+  introduces no new coverage gap. AVHRR ends 2024-01-01, SEVIRI/GOES/Himawari9 end 2024-12-3x,
+  ERA5_in 2024-12-31, IMERG 2024-07-31, OPERAN 2025-07-31: all clear past the last init.
+- Pipelines: `config/preprint_config/pipelines/pipeline_preprint_{imergonly,operanonly}_sdnbfpve_infer6month.yml`
+  (single inference stage, `--time=08:00:00`, otherwise byte-identical options to the 3-month stage).
+- sdnbfpve's single-target stream dirs have ERA5 `reconstruct: false`, so only ONE live decoder —
+  which is why kwn6g4cq/lb86aoct did not hit the multi-decoder host-RAM OOM.
