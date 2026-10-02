@@ -40,27 +40,43 @@ train:
     # x49v08g3:
     #   description: "era5only:dy0jlrmw"
 ### 8 Steps
-    jqtfi8kv:
-      description: "IMERG:cw6a4szu"
-    o4rttryd:
-      description: "operanonly:cw6a4szu"
-    gur21zfi:
-      description: "era5only:cw6a4szu"
-    hehc9gko:
-      description: "3target:cw6a4szu"
+    # jqtfi8kv:
+    #   description: "IMERG:cw6a4szu"
+    # o4rttryd:
+    #   description: "operanonly:cw6a4szu"
+    # gur21zfi:
+    #   description: "era5only:cw6a4szu"
+    # hehc9gko:
+    #   description: "3target:cw6a4szu"
+    # mh2bplr2:
+    #   description: "operanonly:nhv6tkln"
+    # unw6ot5e:
+    #   description: "era5only:nhv6tkln"
+    # mfxbjdue:
+    #   description: "era5only:nhv6tkln 4 steps"
+    # # e2gnrwnw:
+    # #   description: "operanonly:nhv6tkln 4 steps" 
+    # gdiqz2hv:
+    #   description: "operanonly:aets3ku5"
+    # fkuv2ecf:
+    #   description: "era5only:aets3ku5"
+    # pkhg4k01:
+    #   description: "operanonly:dy0jlrmw"
+    # vcpd4ciu:
+    #   description: "era5only:dy0jlrmw"
+    # jwmuk34b:
+    #   description: "IMERG:aets3ku5"
+    # bps7hgf6:
+    #   description: "IMERG:nhv6tkln"
+    jjwuqcqc:
+      description: "IMERG:zf381x9n"
+    bt06u8hd:
+      description: "IMERG:sdnbfpve"
+    jkgx994g:
+      description: "operan:zf381x9n"
+    zjvuanq7:
+      description: "operan:sdnbfpve"
     mh2bplr2:
-      description: "operanonly:nhv6tkln"
-    unw6ot5e:
-      description: "era5only:nhv6tkln"
-    mfxbjdue:
-      description: "era5only:nhv6tkln 4 steps"
-    # e2gnrwnw:
-    #   description: "operanonly:nhv6tkln 4 steps" 
+      description: "operan:nhv6tkln"
     gdiqz2hv:
-      description: "operanonly:aets3ku5"
-    fkuv2ecf:
-      description: "era5only:aets3ku5"
-    pkhg4k01:
-      description: "operanonly:dy0jlrmw"
-    vcpd4ciu:
-      description: "era5only:dy0jlrmw"
+      description: "operan:aets3ku5"
