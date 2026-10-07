@@ -4,6 +4,31 @@
 Port the IMERG diagnostic-decoder finetunes to this branch and turn the resulting inference runs
 (`xfaps4wq`, `r15j90ns`, `z71y2ik8`) into a presentation.
 
+## Jupiter status (2026-10-07) — work moved here from Santis
+- **Paths:** `/iopsstor/scratch/cscs/thunter/{shared_work/models,shared_work/results,slurm}` →
+  `/e/scratch/weatherai/{shared_work/models,shared_work/results,slurm}`; data in
+  `/e/data1/slmet/ml_training`; IMERG N320 climatology at
+  `/e/scratch/weatherai/shared_work/assets/climatology/`. Every `/iopsstor` path below is Santis.
+  The `eval_config_preprint_*` files still carry `/iopsstor` paths.
+- **12 h walltime cap** (QOS `normal`), so budget long stages with `chain_jobs`. Launch with
+  `--account e-ext-2025e01-128`: without it the cleanup job falls back to `weatherai`, which this
+  user has no association with.
+- **Seeds:** use `playground/raina/seed_raina_run.py <run>` (+ `WG_MODELS_DIR`/`WG_SLURM_DIR`) →
+  `<run>_raina`. Its verify script FAILs 6 `raina_crps_dec`-only feature checks by design. The
+  Santis `_fix` seeds (`sdnbfpve_fix`, `zf381x9n_fix`, `dy0jlrmw_wmfix`, …) do NOT exist here.
+- **A TRUE 6 h ERA5 tp exists here**: `aifs-ea-an-oper-0001-mars-n320-1979-2023-6h-v8.zarr`
+  (`tp` period [0,6], mean 0.724 mm/6h, IMERG grid). This voids the "1 h only, era5only
+  cancelled" conclusion below for Jupiter.
+- **Paper arm `config/paper_config/` (era5only on `sdnbfpve_raina`)**:
+  - Backbone: `sdnbfpve_raina` is sdnbfpve `_latest` (istep 1168, same weights as Santis
+    `sdnbfpve_fix`), seeded from v1 @ 364277311.
+  - Configs: the imergonly sdnbfpve configs with the target swapped for ERA5_TP (id 42, 6h-v8,
+    no `frequency`).
+  - Pipeline: `train2s6ep` → `train8s3ep` → 6-month inference (spme 736); training stages are
+    `chain_jobs 2` × 12 h.
+  - Pipeline `k9xfg0k0`, submitted 2026-10-07: stage 1 `vec9i8ei`, stage 2 `ibpnc1py`,
+    inference `ma1650dq`. Job ids are in `playground/pipeline_raina/HANDOVER.md` §J.5.
+
 ## Evaluation traps found the hard way
 - **`calc_seeps` returns `1.0 - seeps_error`** (`score.py:1393`), so the stored `seeps` is a
   **skill**: higher is better, and it must *decrease* with lead time. Plotting it as an error
