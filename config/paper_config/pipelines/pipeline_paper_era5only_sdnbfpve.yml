@@ -1,0 +1,79 @@
+# PAPER sdnbfpve arm -- target: ERA5_TP (ERA5 6-HOUR accumulated tp, true 6 h, not subsampled).
+# 2 forecast steps x 6 mini epochs -> 8 steps x 3 mini epochs -> 6-month inference.
+#
+# Same curriculum as config/preprint_config/pipelines/pipeline_preprint_imergonly_sdnbfpve.yml
+# (imergonly / operanonly arms), so with this one the sdnbfpve target ablation is
+# IMERG / OPERAN / ERA5. Evaluation is run separately.
+#
+# BACKBONE IS `sdnbfpve_raina`: sdnbfpve's `_latest` (istep 1168, the weights the preprint
+# `sdnbfpve_fix` carried) hardlinked, plus a snapshot of THIS branch's code. Seeded on Jupiter with
+#   WG_MODELS_DIR=/e/scratch/weatherai/shared_work/models WG_SLURM_DIR=/e/scratch/weatherai/slurm \
+#     playground/raina/seed_raina_run.py sdnbfpve
+# The seed has only `_latest.chkpt`, so stage 1 takes the launcher default and pins nothing.
+#
+# CHECKPOINT PINS. Stage 1 runs 6 mini epochs -> `chkpt00005`; stage 2 runs 3 -> `chkpt00002`.
+#
+# WALLTIME. JUPITER CAPS EVERY JOB AT 12 h (QOS `normal`). Measured on this family on Santis
+# (same GH200): ~67 min per 2-step mini epoch, ~113 min per 8-step one -> stage 1 ~6.7 h, stage 2
+# ~5.7 h, i.e. one 12 h job each fits only if Jupiter is <~1.8x slower -- and a 2x environmental
+# slowdown has been seen on this family (cw6a4szu lineage, 227 vs 113 min). Not yet measured on
+# Jupiter. So each training stage is chain_jobs 2 x 12 h (24 h budget). Running out of walltime
+# kills the pipeline: the next stage pins a numbered checkpoint that would never be written, and
+# every dependency is `afterany`. If part 1 finishes the stage, part 2 exits in ~1 min -- cancel it
+# while it is still PENDING to unblock the next stage (afterany treats CANCELLED as satisfied).
+# Launch with --account e-ext-2025e01-128: with no account the cleanup job falls back to the
+# private config's `weatherai`, which this user has no association with.
+#
+# INFERENCE is the SIX-MONTH geometry of pipeline_preprint_{imergonly,operanonly}_sdnbfpve_infer6month.yml,
+# option for option, except output.streams:
+#   2023-06-01T00 -> 2023-12-13T00, spme 736 (TimeWindowHandler: 738 available, margin 2;
+#   end 2023-12-12T00 would SILENTLY cut spme to 733), 40 steps x 6 h, 2 nodes, num_workers 2
+#   (736 / world 8 = 92, exact at 2 workers). Changing nodes or num_workers shifts the
+#   sample-index -> init-time map. The 3-month case-study indices (196/204/357/365) do NOT apply
+#   to this 736-sample index space; re-derive by valid time.
+# ERA5_TP is the only live decoder (ERA5 id 1 is `reconstruct: false`), so no multi-decoder
+# host-RAM OOM. The 6h-v8 store ends 2023-12-31T18, past the last target window (2023-12-12).
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_paper_era5only_sdnbfpve.yml --account e-ext-2025e01-128 | tee launch_paper_era5only_sdnbfpve.log
+#####################################
+
+stages:
+  - name: train2s6ep
+    stage: train
+    from_run_id: sdnbfpve_raina
+    config_files:
+      - config/paper_config/config_paper_era5only_sdnbfpve_2step_6ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: train8s3ep
+    stage: train
+    from_run_id: STAGE.train2s6ep
+    mini_epoch: 5
+    config_files:
+      - config/paper_config/config_paper_era5only_sdnbfpve_8step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer6month
+    stage: inference
+    from_run_id: STAGE.train8s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=08:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-12-13T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=736"
+      - "test_config.output.num_samples=736"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[ERA5_TP]"
+      - "data_loading.num_workers=2"

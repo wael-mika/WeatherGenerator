@@ -1,0 +1,182 @@
+# PAPER sdnbfpve arm -- target: ERA5_TP (ERA5 6-HOUR accumulated tp). 2 forecast steps x 6 mini epochs.
+#
+# Derived from config/preprint_config/config_preprint_imergonly_sdnbfpve_2step_6ep.yml. Everything
+# below `streams_directory` is identical to it except `desc` and `wgtags.exp`, so this arm differs
+# from the imergonly / operanonly sdnbfpve arms ONLY in the target stream.
+#
+# TARGET. ERA5_TP reads aifs-ea-an-oper-0001-mars-n320-1979-2023-6h-v8.zarr, whose tp is a true
+# 6 h accumulation (zarr metadata: period [0, 6]; mean 0.724 mm/6h vs IMERG 0.676, OPERAN 0.741).
+# This is NOT the preprint ERA5_TP, which subsampled a 1 h accumulation. See
+# config/paper_config/streams/era5only_sdnbfpve/era5_tp.yml.
+#
+# BACKBONE IS `sdnbfpve_raina` (set in the pipeline): sdnbfpve's `_latest` checkpoint (istep 1168,
+# the same weights the preprint `sdnbfpve_fix` seed carried) with this branch's code. sdnbfpve's
+# own slurm snapshot is stale -- validation_io without _apply_output_clamp, no NCCL PG-timeout fix,
+# no aliased-module guard (a NEW decoder raises `KeyError: ...lnorm.embed_aux.0`) -- and
+# launch-slurm takes a training stage's CODE from the parent's snapshot.
+#
+# LINEAGE: run_history [rrvj7vjv -> nhv6tkln -> sdnbfpve], 4 mini epochs at 8 steps. Its ERA5_in
+# forcing stream reads the OPERATIONAL analysis via the `anemoi_operan` latency reader and carries
+# neither tp nor cp, so an ERA5 tp target is not leakage.
+#
+# FREEZE REGEX IS REPLACED, NOT INHERITED. sdnbfpve's own regex freezes the DECODERS and trains
+# the encoder/forecast engine -- the inverse of a diagnostic decoder probe. The family regex below
+# freezes encoder + forecast engine; the fresh ERA5_TP decoder is the only trainable module. It
+# has no ERA5 term, so it cannot match `pred_heads.ERA5_TP`.
+#
+# ERA5 (id 1), sdnbfpve's live 81-channel output, is neutralised in the stream directory
+# (reconstruct: false + emptied resolved channel lists), so ctr_streams is 1 and ERA5_TP carries
+# the full physical loss -- the same gradient scale as the single-target IMERG/OPERAN arms.
+#
+# SCHEDULE. num_workers 8 -> 512 batches per mini epoch at world size 8;
+# 512 x 6 = 3072 optimizer steps, so the family's 3.125% / 6.25% shape is
+# warmup 96 / cooldown 192. lr_max 1e-4 with parallel_scaling_policy "sqrt" (set
+# explicitly; the checkpoint says "const") -> effective peak 2.83e-4 at world size 8.
+#
+# DECODER MEMORY. 1 x 135520 x 2 = 271,040 point-steps = 3.7 GiB of decoder on top of a
+# ~23 GiB non-decoder baseline; well inside the 95 GiB card.
+#
+# LOSS KEY `forecast`, MODEL-INPUT BRANCH `forecasting` -- this backbone's own names. Both are
+# dicts that UNION on merge, so a wrong name ADDS a block. `general.istep: 0` resets the
+# mini-epoch counter (without it num_mini_epochs is an absolute stop point).
+#
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+#
+# Intended entry point is the pipeline:
+#   config/paper_config/pipelines/pipeline_paper_era5only_sdnbfpve.yml
+#####################################
+
+streams_directory: "./config/paper_config/streams/era5only_sdnbfpve/"
+
+# The inherited ERA5 output stream is suppressed in the streams DIRECTORY, not here.
+# It cannot be done from this file: _load_streams_in_config does
+# `config.streams = load_streams(streams_directory)`, an ASSIGNMENT that overwrites any
+# `streams:` block declared here before the merge with the checkpoint config happens.
+# (Pipeline `options:` DO work, because from_dotlist overrides merge last -- that is how the
+# 8-step stage retunes max_num_targets.)
+
+freeze_modules: '.*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*'
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
+  multiprocessing_method: "spawn"
+
+  desc: "paper_era5only_from_sdnbfpve_raina_2step_6ep"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off -- these backbones carry deep_ssl.enabled False already; pinned for
+  # identity with the rest of the raina IMERG finetune family.
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 6
+  samples_per_mini_epoch: 4096
+
+  # Identical to every other finetune in the comparison.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    # HIGHER-LR ARM -- comment the line above and uncomment this one to run it.
+    # 3x the family value; effective peak 3e-4 * sqrt(8) = 8.49e-4 at world size 8.
+    # lr_max: 3e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 96
+    num_steps_cooldown: 192
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {}
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 2
+    policy: "fixed"
+
+# Validate at the training depth so the curve is comparable within the stage.
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Same 6-month window every other run in this family validates on. shuffle True is what makes
+  # the width real: with shuffle False the sampler takes the FIRST contiguous 256 slots, i.e.
+  # July-August only. MultiStreamDataSampler.reset() reseeds from the constant
+  # data_loader_rng_seed at the top of every mini epoch, so the SAME 256 samples are drawn each
+  # epoch and the curve stays epoch-to-epoch comparable.
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 2
+    policy: "fixed"
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Host RAM is the binding constraint (the trainer builds a train AND a val DataLoader, each with
+# num_workers, per rank). The extra target streams add little to that -- one channel each against
+# the 74-channel ERA5 forcing read -- so these are the proven IMERG-only values. If workers get
+# OOM-killed, drop via --options data_loading.num_workers=N rather than editing this file.
+data_loading:
+  num_workers: 8
+
+wgtags:
+  org: null
+  issue: null
+  exp: paper_era5only_sdnbfpve_2step_6ep
+  grid: null
