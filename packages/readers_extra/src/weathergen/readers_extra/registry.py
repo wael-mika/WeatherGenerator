@@ -32,5 +32,9 @@ def get_extra_reader(stream_type: str) -> object | None:
             from weathergen.readers_extra.data_reader_fesom import DataReaderFesom
 
             return DataReaderFesom
+        case "icon_dream":
+            from weathergen.datasets.data_reader_icon_dream import DataReaderIconDream
+
+            return DataReaderIconDream
         case _:
             return None

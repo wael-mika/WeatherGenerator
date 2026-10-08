@@ -1,0 +1,60 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# ICON-DREAM 6-HOUR accumulated precipitation as the ONLY diagnostic output stream
+# (paper icondreamonly arm). Reader: src/weathergen/datasets/data_reader_icon_dream.py (tp only).
+#
+# WHAT THE READER SERVES, per 6 h window starting at T: ONE field valid at T, the sum of the two
+# native 3 h ICON accumulations ending at T-3h and T, i.e. the total over (T-6h, T] -- the
+# convention of the IMERG / OPERAN / ERA5 6-hourly stores (verified against IMERG and ERA5).
+# Units m (tp_units), like those stores.
+#
+# GRID: ICON R03B07 (2,949,120 cells, ~13 km) remapped onto the EXACT N320 points of the anemoi
+# stores (regrid_to) by nearest-centre area-weighted aggregation: each ICON cell goes whole to its
+# nearest N320 point, the point value is the area-weighted mean of its ~6 cells. Not an
+# overlap-based conservative remap (verified: vs CDO gencon, corr 0.9989, climatology within 0.6%).
+# Coordinates are byte-identical to what DataReaderAnemoi serves for IMERG/ERA5, so this decoder
+# sees the same 542,080 points as the other sdnbfpve arms.
+# NOTE: IMERG's N320 values are bilinear-interpolated POINT values; these are AREA means.
+#
+# NORMALISATION is not set here: the reader defaults to the exact 2016-2022 statistics for
+# 6 h on N320 in m (mean 7.4882e-4, stdev 2.22578e-3). Physical zero is at -0.336.
+#
+# index_dir holds the prebuilt GRIB offset index for all 5479 day files and the cached ICON->N320
+# mapping (/e/project1 is mounted on compute nodes). filenames resolves against data_paths
+# (/e/data1/slmet/ml_training/ICON-DREAM); regrid_to resolves against the same parent directory.
+#
+# Decoder shape and max_num_targets are identical to IMERG_ANEMOI / OPERAN_TP / ERA5_TP of the
+# sdnbfpve arms, so the arms differ only in the target. stream_id 43 is new (40 IMERG, 41 OPERAN,
+# 42 ERA5_TP). sdnbfpve's family freeze regex has no ICON/DREAM term, so this head trains.
+
+ICON_DREAM_TP:
+  type: icon_dream
+  filenames: [ICON-DREAM]
+  stream_id: 43
+  accumulation_period: "06:00:00"
+  tp_units: m
+  regrid_to: aifs-ea-an-oper-0001-mars-n320-1979-2023-6h-v8.zarr
+  index_dir: /e/project1/e-ext-2025e01-128/almikaeel1/icon_dream_index
+  source: []
+  target: [tp]
+  diagnostic: true
+  loss_weight: 1.0
+  location_weight: cosine_latitude
+  token_size: 16
+  tokenize_spacetime: true
+  max_num_targets: 135520
+  embed: {net: transformer, num_tokens: 1, num_heads: 4, dim_embed: 512, num_blocks: 2}
+  embed_target_coords: {net: linear, dim_embed: 512}
+  target_readout: {type: obs_value, num_layers: 4, num_heads: 4}
+  pred_head: {ens_size: 1, num_layers: 1}
+
+  # Predictions only, in physical units after denormalization; the loss is untouched.
+  output_clamp:
+    min: 0.0

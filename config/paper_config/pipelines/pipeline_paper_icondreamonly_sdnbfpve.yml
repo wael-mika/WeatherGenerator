@@ -1,0 +1,72 @@
+# PAPER sdnbfpve arm -- target: ICON_DREAM_TP (ICON-DREAM 6-HOUR accumulated tp on N320, in m).
+# 2 forecast steps x 6 mini epochs -> 8 steps x 3 mini epochs -> 6-month inference.
+#
+# Same curriculum, walltime budget and inference geometry as
+# config/paper_config/pipelines/pipeline_paper_era5only_sdnbfpve.yml, so with this one the sdnbfpve
+# target ablation is IMERG / OPERAN / ERA5 / ICON-DREAM. Evaluation is run separately.
+#
+# BACKBONE IS `sdnbfpve_icon`: sdnbfpve's `_latest` (istep 1168, the same weights as `sdnbfpve_raina`)
+# hardlinked, plus a snapshot of THIS branch's code INCLUDING the ICON-DREAM reader
+# (src/weathergen/datasets/data_reader_icon_dream.py + the `icon_dream` registry entry). It must be
+# seeded AFTER the reader is in `git ls-files`, because the seed copies tracked files only:
+#   WG_MODELS_DIR=/e/scratch/weatherai/shared_work/models WG_SLURM_DIR=/e/scratch/weatherai/slurm \
+#     python3 playground/raina/seed_raina_run.py sdnbfpve --suffix icon
+# `sdnbfpve_raina` cannot be used: its snapshot predates the reader, and launch-slurm runs a stage
+# with its PARENT's code.
+#
+# CHECKPOINT PINS. Stage 1 runs 6 mini epochs -> `chkpt00005`; stage 2 runs 3 -> `chkpt00002`.
+#
+# WALLTIME. Jupiter caps every job at 12 h; each training stage is chain_jobs 2 x 12 h (Santis
+# estimates 6.7 h / 5.7 h; see the ERA5 pipeline header). If part 1 finishes a stage, cancel the
+# PENDING part 2 so the next stage can start (afterany treats CANCELLED as satisfied).
+# Launch with --account e-ext-2025e01-128 (the cleanup job otherwise falls back to `weatherai`).
+#
+# INFERENCE is the SIX-MONTH geometry of the other sdnbfpve 6-month runs, option for option, except
+# output.streams: 2023-06-01T00 -> 2023-12-13T00, spme 736, 40 steps x 6 h, 2 nodes, num_workers 2.
+# ICON-DREAM covers 2010-2024, past the last target window (2023-12-12). ICON_DREAM_TP is the only
+# live decoder (ERA5 id 1 is `reconstruct: false`). Reading 40 ICON windows per sample costs ~4-8 s
+# per worker against ~146 s of model time per sample.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_paper_icondreamonly_sdnbfpve.yml --account e-ext-2025e01-128 2>&1 | tee playground/pipeline_raina/launch_paper_icondreamonly_sdnbfpve.log
+#####################################
+
+stages:
+  - name: train2s6ep
+    stage: train
+    from_run_id: sdnbfpve_icon
+    config_files:
+      - config/paper_config/config_paper_icondreamonly_sdnbfpve_2step_6ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: train8s3ep
+    stage: train
+    from_run_id: STAGE.train2s6ep
+    mini_epoch: 5
+    config_files:
+      - config/paper_config/config_paper_icondreamonly_sdnbfpve_8step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer6month
+    stage: inference
+    from_run_id: STAGE.train8s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=08:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-12-13T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=736"
+      - "test_config.output.num_samples=736"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[ICON_DREAM_TP]"
+      - "data_loading.num_workers=2"

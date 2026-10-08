@@ -29,6 +29,17 @@ Port the IMERG diagnostic-decoder finetunes to this branch and turn the resultin
   - Pipeline `k9xfg0k0`, submitted 2026-10-07: stage 1 `vec9i8ei`, stage 2 `ibpnc1py`,
     inference `ma1650dq`. Job ids are in `playground/pipeline_raina/HANDOVER.md` §J.5.
 
+- **ICON-DREAM tp arm (`config/paper_config/*icondreamonly*`, backbone `sdnbfpve_icon`)**:
+  - Reader `src/weathergen/datasets/data_reader_icon_dream.py` (type `icon_dream`, tp only). It sums
+    two 3 h GRIB fields to (T-6,T] and serves them in m on the exact N320 points.
+  - The remap is nearest-centre area-weighted, not overlap-conservative; vs CDO gencon corr 0.9989.
+    Norm defaults to the exact 2016-2022 N320 6 h stats.
+  - Offset index + mapping: `/e/project1/e-ext-2025e01-128/almikaeel1/icon_dream_index`.
+  - Checks and plots are in `playground/icon_dream_check/` (gitignored).
+  - IMERG's N320 store is bilinear POINT values; ICON is AREA means. State this in write-ups.
+- **DataLoader teardown aborts write ~15 GB core dumps into the cwd** (`terminate called without
+  an active exception` when a loader is dropped mid-prefetch). This happens with or without ICON.
+
 ## Evaluation traps found the hard way
 - **`calc_seeps` returns `1.0 - seeps_error`** (`score.py:1393`), so the stored `seeps` is a
   **skill**: higher is better, and it must *decrease* with lead time. Plotting it as an error
