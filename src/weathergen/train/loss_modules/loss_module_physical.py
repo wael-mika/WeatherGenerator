@@ -10,18 +10,54 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import functools
+import inspect
 import logging
 from collections import defaultdict
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.utils import TRAIN, VAL, Stage
 
 _logger = logging.getLogger(__name__)
+
+
+# Keys under a loss function's config that belong to the framework, not to the function.
+_FRAMEWORK_LOSS_KEYS = {"weight", "target_source_correspondence"}
+# Positional data arguments every physical loss function takes; never set from the config.
+_DATA_ARGS = {"target", "targets", "pred", "preds", "weights_channels", "weights_points"}
+
+
+def build_loss_fcts(loss_fcts) -> list[list]:
+    """
+    [function, weight, name] for each configured loss function.
+
+    Config keys that are keyword parameters of the loss function (e.g. `quantiles` for
+    quantile_pinball, `tau` for expectile, `fair` for kernel_crps) are bound to it. Framework keys
+    (`weight`, `target_source_correspondence`) are consumed elsewhere; any other key is ignored
+    with a warning, so a misspelt parameter does not silently fall back to its default.
+    """
+    out = []
+    for name, params in loss_fcts.items():
+        if isinstance(params, DictConfig):
+            params = OmegaConf.to_container(params, resolve=True)
+        params = dict(params or {})
+        fct = getattr(loss_fns, name)
+        accepted = set(inspect.signature(fct).parameters) - _DATA_ARGS
+        kwargs = {k: v for k, v in params.items() if k in accepted}
+        ignored = set(params) - accepted - _FRAMEWORK_LOSS_KEYS
+        if ignored:
+            _logger.warning(
+                f"loss function '{name}': ignoring unknown parameters {sorted(ignored)}"
+            )
+        out.append(
+            [functools.partial(fct, **kwargs) if kwargs else fct, params.get("weight", 1.0), name]
+        )
+    return out
 
 
 def get_num_samples(config) -> np.typing.NDArray:
@@ -58,14 +94,7 @@ class LossPhysical(LossModuleBase):
         self.name = "LossPhysical"
 
         # dynamically load loss functions based on configuration and stage
-        self.loss_fcts = [
-            [
-                getattr(loss_fns, name),
-                params.get("weight", 1.0),
-                name,
-            ]
-            for name, params in loss_fcts.items()
-        ]
+        self.loss_fcts = build_loss_fcts(loss_fcts)
 
     def _get_weights(self, stream_info):
         """

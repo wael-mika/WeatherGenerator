@@ -287,6 +287,96 @@ def mae(
     )
 
 
+def _weighted_point_mean(
+    loss_pts: torch.Tensor,
+    mask_nan: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+):
+    """
+    Reduce a per-point, per-channel loss (num_data_points, num_channels) exactly like lp_loss:
+    weight points, mean over points, then mean over (optionally weighted) channels.
+    NaN targets contribute 0 (the caller has already zeroed them via mask_nan).
+    """
+    loss_pts = torch.where(mask_nan, loss_pts, 0.0)
+    if weights_points is not None:
+        loss_pts = (loss_pts.transpose(1, 0) * weights_points).transpose(1, 0)
+    loss_chs = loss_pts.mean(0)
+    loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
+    return loss, loss_chs
+
+
+def quantile_pinball(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None = None,
+    weights_points: torch.Tensor | None = None,
+    quantiles: list[float] | None = None,
+):
+    """
+    Multi-quantile pinball (quantile) loss: ensemble member k predicts quantile quantiles[k].
+
+    For one quantile tau and error u = target - pred the loss is max(tau * u, (tau - 1) * u);
+    its minimiser is the conditional tau-quantile. At tau = 0.5 it equals 0.5 * MAE.
+    The loss is averaged over the quantiles, so its scale does not grow with their number.
+
+    Members are NOT averaged (unlike lp_loss): use pred_head.ens_size = len(quantiles), and keep
+    the members separate in evaluation (ensemble: "all"), since member k is a different quantile.
+
+    Params:
+        target : (num_data_points, num_channels)
+        pred : (ens_dim, num_data_points, num_channels), ens_dim == len(quantiles)
+        quantiles : the quantile levels in (0, 1), one per ensemble member (default [0.5])
+    """
+    quantiles = [0.5] if quantiles is None else [float(q) for q in quantiles]
+    assert pred.shape[0] == len(quantiles), (
+        f"quantile_pinball needs one ensemble member per quantile: ens_dim {pred.shape[0]}, "
+        f"quantiles {quantiles}. Set pred_head.ens_size to {len(quantiles)}."
+    )
+    assert all(0.0 < q < 1.0 for q in quantiles), f"quantiles must be in (0, 1): {quantiles}"
+
+    mask_nan = ~torch.isnan(target)
+    target = torch.where(mask_nan, target, 0.0)
+    loss_pts = torch.zeros_like(target)
+    for tau, member in zip(quantiles, pred, strict=True):
+        u = target - torch.where(mask_nan, member, 0.0)
+        loss_pts = loss_pts + torch.maximum(tau * u, (tau - 1.0) * u)
+    loss_pts = loss_pts / len(quantiles)
+
+    return _weighted_point_mean(loss_pts, mask_nan, weights_channels, weights_points)
+
+
+def expectile(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None = None,
+    weights_points: torch.Tensor | None = None,
+    tau: float = 0.5,
+):
+    """
+    Expectile loss (asymmetric squared error): |tau - 1{u < 0}| * u**2 with u = target - pred.
+
+    Under-prediction (u > 0) is weighted by tau, over-prediction by 1 - tau; the minimiser is the
+    conditional tau-expectile (above the mean for tau > 0.5). At tau = 0.5 it equals 0.5 * MSE.
+    Ensemble members are averaged first, as in lp_loss.
+
+    Params:
+        target : (num_data_points, num_channels)
+        pred : (ens_dim, num_data_points, num_channels)
+        tau : expectile level in (0, 1)
+    """
+    tau = float(tau)
+    assert 0.0 < tau < 1.0, f"tau must be in (0, 1), got {tau}"
+
+    mask_nan = ~torch.isnan(target)
+    target = torch.where(mask_nan, target, 0.0)
+    u = target - torch.where(mask_nan, pred.mean(0), 0.0)
+    weight = torch.where(u < 0.0, 1.0 - tau, tau)
+    loss_pts = weight * u * u
+
+    return _weighted_point_mean(loss_pts, mask_nan, weights_channels, weights_points)
+
+
 def cosine_latitude(target_coords, min_value=1e-3, max_value=1.0):
     latitudes_radian = target_coords[:, 0] * np.pi / 180
     return (max_value - min_value) * torch.cos(latitudes_radian) + min_value

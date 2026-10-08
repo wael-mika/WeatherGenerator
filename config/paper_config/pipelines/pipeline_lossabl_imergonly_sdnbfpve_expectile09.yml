@@ -1,0 +1,55 @@
+# LOSS ABLATION -- `expectile09`: IMERG_ANEMOI on sdnbfpve, full curriculum.
+# EXPECTILE tau = 0.9 (asymmetric squared error: under-prediction x0.9, over-prediction x0.1). Optimum = conditional 0.9-expectile, above the mean.
+# 2 forecast steps x 6 mini epochs -> 8 steps x 3 mini epochs -> 3-month inference, exactly like
+# pipeline_preprint_imergonly_sdnbfpve.yml but with this loss.
+#
+# BACKBONE `sdnbfpve_loss`: sdnbfpve `_latest` (istep 1168) + a code snapshot WITH the new loss functions.
+# Pins: stage 1 -> chkpt00005, stage 2 -> chkpt00002. Training stages chain_jobs 2 x 12 h (Jupiter cap);
+# if part 1 finishes a stage, cancel the PENDING part 2 so the next stage can start.
+# infer3month: the SAME geometry as every preprint 3-month inference (2023-06-01 -> 2023-09-12, spme 368,
+# 40 steps, 2 nodes, num_workers 2), so sample indices match them (Doksuri 196/204, Daniel 357/365).
+# Output IMERG_ANEMOI; pinball writes its 3 quantile members.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_lossabl_imergonly_sdnbfpve_expectile09.yml --account e-ext-2025e01-128 2>&1 | tee playground/pipeline_raina/launch_lossabl_expectile09.log
+#####################################
+
+stages:
+  - name: train2s6ep
+    stage: train
+    from_run_id: sdnbfpve_loss
+    config_files:
+      - config/paper_config/lossabl/config_lossabl_imergonly_sdnbfpve_expectile09_2step_6ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: train8s3ep
+    stage: train
+    from_run_id: STAGE.train2s6ep
+    mini_epoch: 5
+    config_files:
+      - config/paper_config/lossabl/config_lossabl_imergonly_sdnbfpve_expectile09_8step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.train8s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
