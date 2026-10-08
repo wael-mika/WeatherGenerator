@@ -32,7 +32,12 @@ dependencies = [
  "numcodecs>=0.16",
  # This seems necessary for build isolation?
  'wheel',
- 'setuptools',
+ # pytorch_wavelets.dtcwt.coeffs imports pkg_resources, which setuptools removed in 81.
+ # Unpinned, uv resolves to >=82 and the DTCWT import dies with ModuleNotFoundError.
+ 'setuptools<81',
+ # WFCL spectral loss: DTCWT filterbank (pytorch-wavelets) and its pywt backend.
+ 'pytorch-wavelets>=1.3.0',
+ 'PyWavelets',
 ]
 
 

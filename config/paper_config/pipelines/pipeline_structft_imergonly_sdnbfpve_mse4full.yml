@@ -1,0 +1,40 @@
+# STRUCTURED-LOSS FINE-TUNE -- `mse4full`: IMERG_ANEMOI on sdnbfpve, from the 8-step MSE decoder (bt06u8hd chkpt00002).
+# MSE CONTROL at the fine-tune setting: same 4 steps, full field and 3 mini epochs as the AMSE / WFCL runs, so any difference of those runs from this one is the loss.
+#
+# ft4s3ep: 4 steps x 3 mini epochs, full field, from seed `bt06u8hd_struct` (chain_jobs 2 x 12 h);
+#   if part 1 finishes the stage, cancel the PENDING part 2 so inference can start.
+# infer3month: the standard 3-month geometry (2023-06-01 -> 2023-09-12, spme 368, 40 steps, 2 nodes,
+#   num_workers 2), output IMERG_ANEMOI -- index-compatible with kwn6g4cq and the loss ablation.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_structft_imergonly_sdnbfpve_mse4full.yml --account e-ext-2025e01-128 2>&1 | tee playground/pipeline_raina/launch_structft_mse4full.log
+#####################################
+
+stages:
+  - name: ft4s3ep
+    stage: train
+    from_run_id: bt06u8hd_struct
+    config_files:
+      - config/paper_config/structft/config_structft_imergonly_sdnbfpve_mse4full_4step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.ft4s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
