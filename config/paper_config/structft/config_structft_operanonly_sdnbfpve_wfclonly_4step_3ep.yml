@@ -1,0 +1,155 @@
+# STRUCTURED-LOSS FINE-TUNE -- OPERAN_TP (operational analysis) on sdnbfpve, `wfclonly`. 4 forecast steps x 3 mini epochs, FULL FIELD.
+# WFCL ALONE, weight 1.0, MSE weight 0 (logged only); phase -> amplitude schedule with floor p_min 0.3 over the 1530 steps.
+#
+# Same setup as the IMERG `wfclonly` arm (config_structft_imergonly_sdnbfpve_wfclonly_4step_3ep.yml), transferred to the
+# operational analysis target: starts from that target's 8-step MSE decoder via seed `zjvuanq7_struct` = run zjvuanq7 at chkpt00002
+# (code snapshot with LossSpectralAMSE / LossSpectralWFCL incl. p_min). Body identical to the IMERG arm except
+# streams_directory, target_stream, grid_zarr (same N320 point set, verified bit-identical to IMERG's), desc and exp.
+#
+# Pipeline: config/paper_config/pipelines/pipeline_structft_operanonly_sdnbfpve_wfclonly.yml
+#####################################
+
+streams_directory: "./config/paper_config/streams/operanonly_fullfield_sdnbfpve/"
+
+# The inherited ERA5 output stream is suppressed in the streams DIRECTORY, not here.
+# It cannot be done from this file: _load_streams_in_config does
+# `config.streams = load_streams(streams_directory)`, an ASSIGNMENT that overwrites any
+# `streams:` block declared here before the merge with the checkpoint config happens.
+# (Pipeline `options:` DO work, because from_dotlist overrides merge last -- that is how the
+# 8-step stage retunes max_num_targets.)
+
+freeze_modules: '.*encoder.*|.*forecast_engine.*|.*latent_pre_norm.*|.*latent_heads.*|.*q_cells.*'
+
+general:
+  istep: 0
+  rank: ???
+  world_size: ???
+  # spawn (not fork): the obs streams' async zarr stores deadlock with forked workers.
+  multiprocessing_method: "spawn"
+
+  desc: "structft_operanonly_sdnbfpve_wfclonly_4step_3ep"
+  run_id: ???
+  run_history: []
+
+train_logging:
+  terminal: 10
+  metrics: 20
+  checkpoint: 250
+
+training_config:
+
+  training_mode: ["masking"]
+
+  # JEPA leftovers off -- these backbones carry deep_ssl.enabled False already; pinned for
+  # identity with the rest of the raina IMERG finetune family.
+  deep_ssl:
+    enabled: False
+  teacher_time_offset: 0
+
+  num_mini_epochs: 3
+  samples_per_mini_epoch: 4096
+
+  # Identical to every other finetune in the comparison.
+  start_date: 2016-01-01T00:00
+  end_date: 2022-12-31T00:00
+
+  learning_rate_scheduling:
+    lr_start: 1e-6
+    lr_max: 1e-4
+    # HIGHER-LR ARM -- comment the line above and uncomment this one to run it.
+    # 3x the family value; effective peak 3e-4 * sqrt(8) = 8.49e-4 at world size 8.
+    # lr_max: 3e-4
+    lr_final_decay: 2e-6
+    lr_final: 0.0
+    num_steps_warmup: 48
+    num_steps_cooldown: 96
+    policy_warmup: "cosine"
+    policy_decay: "cosine"
+    policy_cooldown: "linear"
+    parallel_scaling_policy: "sqrt"
+
+  optimizer:
+    grad_clip: 1.0
+    weight_decay: 0.1
+    log_grad_norms: False
+    adamw:
+      beta1: 0.98125
+      beta2: 0.9875
+      eps: 2e-08
+
+  losses:
+    student-teacher:
+      enabled: False
+      type: Disabled
+    forecast:
+      type: LossPhysical
+      loss_fcts:
+        mse: {weight: 0.0}
+    wfcl:
+      type: LossSpectralWFCL
+      weight: 1.0
+      loss_fcts:
+        wfcl:
+          target_stream: OPERAN_TP
+          grid_zarr: /e/data1/slmet/ml_training/aifs-od-an-oper-0001-mars-n320-2016-2025-6h-v1-for-single-v2.zarr
+          patch_size: 64
+          lat_max: 60.0
+          J: 3
+          beta: 1.0
+          gamma: [1.0, 1.0, 1.0]
+          alpha: 0.1
+          p_min: 0.3
+          # 3 mini epochs x 510 batches; general.istep restarts at 0 in this stage
+          total_steps: 1530
+          schedule_start_step: 0
+
+  model_input:
+    random_easy:
+      enabled: False
+    forecasting:
+      masking_strategy: "forecast"
+
+  target_input:
+    random_easy_target:
+      enabled: False
+
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 4
+    policy: "fixed"
+
+# Validate at the training depth so the curve is comparable within the stage.
+validation_config:
+  samples_per_mini_epoch: 256
+
+  # Same 6-month window every other run in this family validates on. shuffle True is what makes
+  # the width real: with shuffle False the sampler takes the FIRST contiguous 256 slots, i.e.
+  # July-August only. MultiStreamDataSampler.reset() reseeds from the constant
+  # data_loader_rng_seed at the top of every mini epoch, so the SAME 256 samples are drawn each
+  # epoch and the curve stays epoch-to-epoch comparable.
+  start_date: 2023-07-01T00:00
+  end_date: 2023-12-31T00:00
+  shuffle: True
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 4
+    policy: "fixed"
+  validate_with_ema:
+    enabled: False
+    ema_ramp_up_ratio: 0.09
+    ema_halflife_in_thousands: 600
+
+# Host RAM is the binding constraint (the trainer builds a train AND a val DataLoader, each with
+# num_workers, per rank). The extra target streams add little to that -- one channel each against
+# the 74-channel ERA5 forcing read -- so these are the proven IMERG-only values. If workers get
+# OOM-killed, drop via --options data_loading.num_workers=N rather than editing this file.
+data_loading:
+  num_workers: 6
+
+wgtags:
+  org: null
+  issue: null
+  exp: structft_operanonly_sdnbfpve_wfclonly_4step_3ep
+  grid: null
