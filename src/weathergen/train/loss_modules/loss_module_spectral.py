@@ -216,7 +216,8 @@ class LossSpectralWFCL(_FullFieldLoss):
     Schedule as on wm/fm-residual-flow: P_t ramps 1 -> 0 over the first (1 - alpha) of
     ``total_steps`` counted from ``schedule_start_step`` (both REQUIRED to be explicit, because
     ``istep`` is absolute on continuations); training starts phase/correlation-only and ends
-    amplitude-only.
+    amplitude-only, or at ``p_min`` (default 0) to keep the correlation terms when WFCL is used
+    without MSE.
     """
 
     name = "LossSpectralWFCL"
@@ -230,6 +231,9 @@ class LossSpectralWFCL(_FullFieldLoss):
         self.j = int(c.get("J", 3))
         self.beta = float(c.get("beta", 1.0))
         self.alpha = float(c.get("alpha", 0.1))
+        self.p_min = float(c.get("p_min", 0.0))
+        if not 0.0 <= self.p_min <= 1.0:
+            raise ValueError(f"p_min must be in [0, 1], got {self.p_min}")
         self.gamma = [float(g) for g in c.get("gamma", [1.0] * self.j)]
         if len(self.gamma) != self.j:
             raise ValueError(f"gamma has {len(self.gamma)} entries, expected J={self.j}")
@@ -253,7 +257,8 @@ class LossSpectralWFCL(_FullFieldLoss):
             f"{self.name}: stream={self.target_stream} patches={self.patches.n_patches}x"
             f"{self.patch_size}^2 |lat|<={self.lat_max} J={self.j} beta={self.beta} "
             f"gamma={self.gamma} "
-            f"alpha={self.alpha} total_steps={self.total_steps} start={self.schedule_start_step}"
+            f"alpha={self.alpha} p_min={self.p_min} total_steps={self.total_steps} "
+            f"start={self.schedule_start_step}"
         )
 
     def _log_keys(self):
@@ -267,6 +272,7 @@ class LossSpectralWFCL(_FullFieldLoss):
             int(self.cf.general.istep) - self.schedule_start_step,
             self.total_steps - self.schedule_start_step,
             self.alpha,
+            self.p_min,
         )
         tp = self.patches(target_full)  # (K, C, S, S)
         tb = self.bands(tp)

@@ -192,3 +192,16 @@ def test_schedule_never_exceeds_one_before_its_start():
     must not push P_t over 1, which would give WAL a negative weight."""
     assert phase_weight(-12, 16500) == 1.0
     assert phase_weight(-100000, 16500) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [(-5, 1.0), (0, 1.0), (450, 0.65), (900, 0.3), (5000, 0.3)],
+)
+def test_schedule_floor(step, expected):
+    assert phase_weight(step, 1000, alpha=0.1, p_min=0.3) == pytest.approx(expected)
+
+
+def test_schedule_floor_validated():
+    with pytest.raises(ValueError):
+        phase_weight(0, 1000, p_min=1.5)

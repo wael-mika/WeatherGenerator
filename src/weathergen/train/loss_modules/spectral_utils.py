@@ -119,19 +119,25 @@ def wal_wcl(
     return wal_levels, wcl_levels
 
 
-def phase_weight(step: int, total_steps: int, alpha: float = 0.1) -> float:
-    """``P_t``: 1 -> 0 linearly over the first ``(1 - alpha)`` of training, then 0.
+def phase_weight(step: int, total_steps: int, alpha: float = 0.1, p_min: float = 0.0) -> float:
+    """``P_t``: 1 -> ``p_min`` linearly over the first ``(1 - alpha)`` of training, then ``p_min``.
 
-    Training therefore starts as pure phase/correlation matching and ends as pure
-    amplitude matching. ``step`` must be the **global** optimiser step; in
+    With the default ``p_min = 0`` training starts as pure phase/correlation matching and
+    ends as pure amplitude matching. A floor ``p_min > 0`` keeps the correlation terms
+    alive to the end, which matters when no pointwise loss pins events in place (the
+    amplitude terms alone are blind to where features sit inside a patch).
+    ``step`` must be the **global** optimiser step; in
     WeatherGenerator that is ``cf.general.istep``, which does survive
     ``train_continue`` (``trainer.py`` derives ``mini_epoch_base`` from it).
     """
+    if not 0.0 <= p_min <= 1.0:
+        raise ValueError(f"p_min must be in [0, 1], got {p_min}")
     if total_steps <= 0:
-        return 0.0
+        return p_min
     # Clamped at BOTH ends. A `schedule_start_step` a little above the parent's true
     # final istep makes `step` negative for the first few steps, and an unclamped
     # value then exceeds 1 -- which flips (1 - P_t) negative and briefly *rewards*
     # amplitude error. Measured at 1.0008 on run idgem1hg's first 12 steps: harmless
     # there, but only by luck.
-    return min(1.0, max(0.0, 1.0 - step / ((1.0 - alpha) * total_steps)))
+    ramp = min(1.0, max(0.0, 1.0 - step / ((1.0 - alpha) * total_steps)))
+    return p_min + (1.0 - p_min) * ramp

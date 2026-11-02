@@ -136,3 +136,23 @@ def test_wfcl_requires_explicit_total_steps(grid_zarr):
         LossSpectralWFCL(
             _cf(), None, "train", "cpu", wfcl={"target_stream": STREAM, "grid_zarr": path}
         )
+
+
+def test_wfcl_p_min_floor(grid_zarr):
+    path, lat, lon = grid_zarr
+    cfg = {
+        "target_stream": STREAM,
+        "grid_zarr": path,
+        "patch_size": 8,
+        "J": 2,
+        "gamma": [1.0, 1.0],
+        "total_steps": 100,
+        "p_min": 0.3,
+    }
+    # istep far past the ramp: without the floor P_t would be 0
+    mod = LossSpectralWFCL(_cf(istep=500), None, "train", "cpu", wfcl=cfg)
+    target = _fields(lat, lon)
+    pred = (0.5 * target + 0.2 * _fields(lat, lon, seed=3))[None]
+    p, t, m = _batch(target, pred, lat, lon, torch.randperm(len(lat)))
+    logs = mod.compute_loss(p, t, m, istep=500).losses_all[STREAM]["wfcl"]
+    assert float(logs["P_t"]["avg"]) == pytest.approx(0.3)
