@@ -1,0 +1,43 @@
+# STRUCTURED-LOSS FINE-TUNE -- `wfclonly`: IMERG_ANEMOI on sdnbfpve, from the 8-step MSE decoder (bt06u8hd chkpt00002).
+# WFCL ALONE, weight 1.0, MSE weight 0; phase -> amplitude schedule with floor p_min 0.3. Follow-up to `wfcl` (MSE + 0.1 WFCL, sqy25tku).
+# NEEDS p_min in the seed snapshot: grep -c p_min /e/scratch/weatherai/slurm/slurm_weathergen_bt06u8hd_struct_dir/WeatherGenerator/src/weathergen/train/loss_modules/loss_module_spectral.py
+#
+# ft4s3ep: 4 steps x 3 mini epochs, full field, from seed `bt06u8hd_struct` (chain_jobs 2 x 12 h);
+#   if part 1 finishes the stage, cancel the PENDING part 2 so inference can start.
+# (was inferjul; switched 2026-10-20 to infer3month so it joins the JJA benchmark store)
+# inferjul: one month, July 2023 (Doksuri): 128 inits 2023-07-01 06Z -> 08-02 00Z, 40 steps, 2 nodes,
+#   num_workers 2 (16 per rank, exact); end_date 08-13 leaves 130 available (margin 2, else
+#   check_samples silently shrinks spme). Own index space: match kwn6g4cq BY VALID TIME, not index.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_structft_imergonly_sdnbfpve_wfclonly.yml --account e-ext-2025e01-128 2>&1 | tee playground/pipeline_raina/launch_structft_wfclonly.log
+#####################################
+
+stages:
+  - name: ft4s3ep
+    stage: train
+    from_run_id: bt06u8hd_struct
+    config_files:
+      - config/paper_config/structft/config_structft_imergonly_sdnbfpve_wfclonly_4step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.ft4s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"

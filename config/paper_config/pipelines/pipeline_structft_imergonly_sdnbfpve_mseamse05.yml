@@ -1,0 +1,37 @@
+# STRUCTURED-LOSS FINE-TUNE -- `mseamse05`: IMERG_ANEMOI on sdnbfpve, from the 8-step MSE decoder (bt06u8hd chkpt00002).
+# MSE + 0.5 x AMSE, 4 steps x 3 mini epochs, full field, from seed `bt06u8hd_struct` (chain_jobs 2 x 12 h).
+# infer3month: the SAME geometry as every preprint 3-month inference (2023-06-01 -> 2023-09-12, spme 368,
+# 40 steps, 2 nodes, num_workers 2), so it lands on the JJA benchmark's 183 inits next to AIFS/GraphCast/IFS.
+#
+# Launch:
+#   ../WeatherGenerator-private/hpc/launch-slurm.py --pipeline config/paper_config/pipelines/pipeline_structft_imergonly_sdnbfpve_mseamse05.yml --account e-ext-2025e01-128 2>&1 | tee playground/pipeline_raina/launch_structft_mseamse05.log
+#####################################
+
+stages:
+  - name: ft4s3ep
+    stage: train
+    from_run_id: bt06u8hd_struct
+    config_files:
+      - config/paper_config/structft/config_structft_imergonly_sdnbfpve_mseamse05_4step_3ep.yml
+    nodes: 2
+    chain_jobs: 2
+    slurm_args:
+      - "--time=12:00:00"
+
+  - name: infer3month
+    stage: inference
+    from_run_id: STAGE.ft4s3ep
+    nodes: 2
+    mini_epoch: 2
+    slurm_args:
+      - "--time=06:00:00"
+    options:
+      - "test_config.start_date=2023-06-01T00:00"
+      - "test_config.end_date=2023-09-12T00:00"
+      - "test_config.shuffle=False"
+      - "test_config.samples_per_mini_epoch=368"
+      - "test_config.output.num_samples=368"
+      - "test_config.time_window_step=06:00:00"
+      - "test_config.forecast.num_steps=40"
+      - "test_config.output.streams=[IMERG_ANEMOI]"
+      - "data_loading.num_workers=2"
