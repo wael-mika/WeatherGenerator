@@ -4,7 +4,7 @@
 # Run (IMERG loss only, train + val):
 # uv run plot_train -fy config/runs_plot_train_imerg_diag.yml \
 #   --streams IMERG_ANEMOI --channels avg --metrics mse \
-#   -o ./plots/imerg_diag_losses/ --legend-outside
+#   -o ./plots/raina_diag_losses/ --legend-outside
 #
 # Notes:
 # - channels avg = mean over the tp forecast steps; use `--channels tp
@@ -14,6 +14,16 @@
 
 train:
   plot:
+    vec9i8ei:
+        description: "ERA5"
+    y8ndmddd:
+        description: "ICON-DREAM"
+    zshn8buj:
+        description: "IMERG-MAE"
+    cdbt7bgu:
+        description: "IMERG-PINBALL"  
+    rphvc0d3:
+        description: "IMERG-expectile"
     # zbqe7ckw:
     #   description: "Forecast:dy0jlrmw"
     # ue0ifd0t:
@@ -32,6 +42,7 @@ train:
     #     description: "T/JEPA:cw6a4szu, CW "
     # sslfnnb4:
     #     description: "MTM: ra1xax01"
+
     # # ## 8 STEPS direct
     # dnq4fmyz:
     #   description: "Forecast:dy0jlrmw, 8 steps"
@@ -46,26 +57,26 @@ train:
     # r4874frh:
     #     description: "MTM: xq65fhca W/O FE, CW, 8 steps"
 
-    # 8 steps 2->8
-    gec3szjz:
-      description: "Forecast:dy0jlrmw"
-    nxo2owcy:
-      description: "MTM:dwzio194, W/O FE, CW"
-    fbvzagl0:
-        description: "MTM: f7ug724z W/ FE, CW"
-    svjaq2ne:
-        description: "S/JEPA:lnm4ud42, W/O CW"
-    jwmuk34b:
-        description: "S/JEPA:whzrt2cc, W/ CW"    
-    gej6b9zl:
-        description: "MTM: xq65fhca W/O FE, CW"
-    xff1h6a8:
-        description: "Forecast:oywmz4sz"    
-    jqtfi8kv :
-        description: "T/JEPA:cw6a4szu, CW"
-    bps7hgf6 :
-        description: "T/JEPA:nhv6tkln, CW"
-    yhcm16bp :
-        description: "ST/JEPA:aets3ku5, CW"    
-    i743hhni:
-        description: "MTM: ra1xax01"
+    # # 8 steps 2->8
+    # gec3szjz:
+    #   description: "Forecast:dy0jlrmw"
+    # nxo2owcy:
+    #   description: "MTM:dwzio194, W/O FE, CW"
+    # fbvzagl0:
+    #     description: "MTM: f7ug724z W/ FE, CW"
+    # svjaq2ne:
+    #     description: "S/JEPA:lnm4ud42, W/O CW"
+    # jwmuk34b:
+    #     description: "S/JEPA:whzrt2cc, W/ CW"    
+    # gej6b9zl:
+    #     description: "MTM: xq65fhca W/O FE, CW"
+    # xff1h6a8:
+    #     description: "Forecast:oywmz4sz"    
+    # jqtfi8kv :
+    #     description: "T/JEPA:cw6a4szu, CW"
+    # bps7hgf6 :
+    #     description: "T/JEPA:nhv6tkln, CW"
+    # yhcm16bp :
+    #     description: "ST/JEPA:aets3ku5, CW"    
+    # i743hhni:
+    #     description: "MTM: ra1xax01"
