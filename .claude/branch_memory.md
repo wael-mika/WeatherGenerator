@@ -1303,3 +1303,30 @@ behind it via `afterany`. Recovery: `pipeline_preprint_3target_cw6a4szu_resume.y
   (single inference stage, `--time=08:00:00`, otherwise byte-identical options to the 3-month stage).
 - sdnbfpve's single-target stream dirs have ERA5 `reconstruct: false`, so only ONE live decoder —
   which is why kwn6g4cq/lb86aoct did not hit the multi-decoder host-RAM OOM.
+
+## Decoder target-coord vector (checked 2026-10-09)
+- 105 wide with no geoinfo. Cols 95-98 are the branch-only "absolute" sin/cos hack (`tokenizer_utils.py`).
+  They take np.sin of DEGREES (period ~6.3°, so not absolute) and overwrite the NE-z / E neighbour slots.
+- `a[0] = stream_id` writes ROW 0 (first point), not column 0. Local frames come from the shortest rotation to (0N,180E).
+  Their orientation vs north is arbitrary near (0N,0E), the antipode.
+- Scale audit: the relative blocks are ~0.01 rad and unnormalized. IMERG time cols are constant (0.5,1.5,..) because dt=0 in a left-closed window.
+  Trained bt06u8hd: ~98% of the between-point variance in the query embedding and AdaLN comes from cols 95-98; the geometry is ~1-2%.
+  Weights stay at their init scale. Probe scripts: scratchpad coord_stats.py / ckpt_contrib.py.
+- User result (2026-10-09): the abs hack clearly helped N320 ERA5 decoding but NOT CERRA (5.5 km, Europe).
+  Likely cause: ~44 N320 pts per hl5 cell vs ~1400 CERRA pts, so the CERRA bottleneck is information, not addressing.
+  The CERRA store already has z, lsm and sin/cos lat/lon, so the hack may be redundant there if those are used as geoinfo.
+
+## Structured-loss fine-tunes launched (2026-10-09)
+- AMSE `oi7qjl2i` (ft `bjheo0kx`, infer `n37585o2`) and WFCL `whdj1sqm` (ft `sqy25tku`, infer `oh0kn0b6`) from seed `bt06u8hd_struct`; MSE control `qzgr708v` (ft `dwe10db6`, infer `w9ahj47y`).
+- Their inference is July 2023 only (2023-07-01 -> 08-13, spme 128 = 16/rank): its own index space, so match kwn6g4cq by valid time.
+- All 8 paper/ablation/structft pipelines COMPLETED with full sample counts (checked 2026-10-12); AMSE's `LossPhysical.loss_avg` reads 0 by design (MSE weight 0).
+- WFCL-only follow-up (launched 2026-10-20 as `mrzhlyob`, ft `ngbpce51`, JJA infer `naxfx52v`): MSE + 0.1 WFCL (`sqy25tku`) was too weak and not sharper, so `wfclonly` = WFCL weight 1.0, MSE weight 0, new `p_min: 0.3` floor on P_t (amplitude terms alone don't pin rain in place). Pipeline `pipeline_structft_imergonly_sdnbfpve_wfclonly.yml`; `p_min` code copied into the `bt06u8hd_struct` snapshot. WFCL patches only cover |lat| <= ~54.
+
+## Structured losses on JJA and on the other targets (2026-10-20/22, all COMPLETED)
+- IMERG, from `bt06u8hd_struct`, 3-month JJA inference: MSE+0.5 AMSE `gwod8l50`, MSE+1.0 AMSE `dqcb1sz5`,
+  WFCL-only `ngbpce51`; AMSE `bjheo0kx` and MSE control `dwe10db6` re-inferred on JJA (`*_infer3month.yml`).
+- Same AMSE / WFCL-only setup on analysis, ERA5, ICON: seeds `{zjvuanq7,ibpnc1py,frdw62xn}_struct` = each target's
+  8-step MSE decoder at chkpt00002 (`seed_raina_run.py --chkpt chkpt00002 --suffix struct`); full-field stream dirs
+  `paper_config/streams/*_fullfield_sdnbfpve`; only streams dir, target_stream, grid_zarr, desc, exp differ from IMERG.
+- Run ids and pipelines: `playground/pipeline_raina/preprint_run_ids.md`. Results: WFCL-only gives the largest
+  neighbourhood gain on every target, AMSE the most small-scale power; both lose grid-point FSS.
