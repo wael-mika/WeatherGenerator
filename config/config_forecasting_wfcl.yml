@@ -1,0 +1,80 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Example: MSE + 0.1 x WFCL (Wavelet-Fourier Composite Loss, An et al. 2026,
+# doi:10.1038/s41612-026-01472-y) on the ERA5 stream of config_forecasting.yml.
+#
+# Overlay, use on top of the forecasting preset:
+#   uv run train --config config/config_forecasting.yml config/config_forecasting_wfcl.yml
+#
+# WFCL = beta * [(1-P_t) FAL + P_t FCL] + sum_j gamma_j * mean_k [(1-P_t) WAL_jk + P_t WCL_jk]
+#   FAL/FCL : Fourier amplitude / correlation loss of each 2-D patch
+#   WAL/WCL : DTCWT amplitude / correlation loss, level j, averaged over the 6 orientations
+#             (the low-pass band is excluded)
+#   P_t     : ramps 1 -> p_min linearly over the first (1 - alpha) of total_steps, then p_min,
+#             i.e. training starts phase/correlation-only and ends amplitude-dominated.
+# The spectral terms are computed per target channel on fixed S x S patches, bilinearly
+# resampled from the full reduced-Gaussian field over |lat| <= lat_max (poles excluded).
+
+training_config:
+
+  losses: {
+    # kept from config_forecasting.yml; WFCL is a correction term on top of a pointwise loss
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    "wfcl": {
+        type: LossSpectralWFCL,
+        # weight of the whole WFCL term relative to the other loss terms
+        weight: 0.1,
+        # exactly one entry, holding the parameters
+        loss_fcts: {
+          "wfcl": {
+            # stream whose full field is compared; WFCL applies to all its target channels
+            target_stream: ERA5,
+            # zarr of that stream (only `latitudes`/`longitudes` are read to build the grid);
+            # any reduced Gaussian grid stored row by row from north to south works (O96, N320)
+            grid_zarr: /e/data1/slmet/ml_training/aifs-ea-an-oper-0001-mars-o96-1979-2024-1h-v3-with-era51.zarr,
+            # patch side S in pixels, pixel = grid latitude spacing (O96: 0.9375 deg, so
+            # 32 px = 30 deg, 38 patches; N320: 0.28125 deg, 64 px = 18 deg). Must divide by 2**J.
+            patch_size: 32,
+            # patches tile whole bands of S pixels inside |lat| <= lat_max
+            lat_max: 60.0,
+            # DTCWT levels
+            J: 3,
+            # weight of the Fourier (FACL) part
+            beta: 1.0,
+            # per-level weights of the wavelet part, one per level (not normalised)
+            gamma: [1.0, 1.0, 1.0],
+            # fraction of total_steps spent at the end with P_t = p_min
+            alpha: 0.1,
+            # floor of P_t; 0 = pure amplitude matching at the end (as in the paper). Use > 0
+            # (e.g. 0.3) when WFCL runs without MSE, to keep the correlation terms alive.
+            p_min: 0.0,
+            # REQUIRED: optimiser steps over which P_t is scheduled. One mini epoch is
+            # samples_per_mini_epoch // (n_gpus * batch_size_per_gpu) steps; here
+            # 64 mini epochs * 4096 samples / 4 GPUs = 65536. Adjust to your GPU count.
+            total_steps: 65536,
+            # general.istep at which the schedule starts. istep is absolute and continues on
+            # train_continue, so for a fine-tune set it to the parent's final istep.
+            schedule_start_step: 0,
+            # DTCWT filters (Kingsbury); the paper does not state which it used
+            biort: near_sym_b,
+            qshift: qshift_b,
+          },
+        },
+      },
+    }
+
+# The spectral losses need the COMPLETE field at every forecast step (training and validation);
+# a subsampled target raises an error. This overrides the value in the stream file.
+streams:
+  ERA5:
+    max_num_targets: -1
