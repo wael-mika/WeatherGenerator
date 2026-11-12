@@ -1,0 +1,96 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Example: fine-tune a model that has a CERRA stream with MSE + 0.1 x WFCL
+# (Wavelet-Fourier Composite Loss, An et al. 2026, doi:10.1038/s41612-026-01472-y).
+#
+# Overlay on the parent run's config:
+#   uv run train_continue --from-run-id <PARENT_RUN_ID> \
+#     --config config/config_cerra_wfcl_finetune.yml \
+#     --options training_config.losses.wfcl.loss_fcts.wfcl.schedule_start_step=<PARENT_ISTEP> \
+#               training_config.losses.wfcl.loss_fcts.wfcl.total_steps=<PARENT_ISTEP + N_STEPS>
+#
+# WFCL = beta * [(1-P_t) FAL + P_t FCL] + sum_j gamma_j * mean_k [(1-P_t) WAL_jk + P_t WCL_jk]
+#   FAL/FCL : Fourier amplitude / correlation loss of each 2-D patch
+#   WAL/WCL : DTCWT amplitude / correlation loss, level j, averaged over the 6 orientations
+#             (the low-pass band is excluded)
+#   P_t     : ramps 1 -> p_min linearly over the first (1 - alpha) of the schedule, then p_min,
+#             i.e. training starts phase/correlation-only and ends amplitude-dominated.
+# On CERRA the patches are native 64 x 64 tiles (5.5 km pixels, ~350 km) of the 1069 x 1069
+# Lambert-conformal raster: 16 x 16 = 256 patches, the outer 22-23 rows/columns are not scored.
+#
+# Logged per step under CERRA.wfcl: loss, FAL, FCL, FACL, WACL, WAL_L*/WCL_L*, P_t, num_fields,
+# peak_mem_gib. Check P_t starts at ~1 in the first logged step.
+
+training_config:
+
+  # num_mini_epochs is ABSOLUTE on train_continue: set it to the parent's count + the number of
+  # fine-tune mini epochs, or nothing trains.
+  # num_mini_epochs: ...
+
+  losses: {
+    # Pointwise term, kept from the parent. Use the parent's key for it: a new key here would
+    # ADD a second MSE term rather than replace it.
+    "physical": {
+        type: LossPhysical,
+        loss_fcts: { "mse": { }, },
+        },
+    "wfcl": {
+        type: LossSpectralWFCL,
+        # weight of the whole WFCL term relative to the other loss terms
+        weight: 0.1,
+        # exactly one entry, holding the parameters
+        loss_fcts: {
+          "wfcl": {
+            target_stream: CERRA,
+            # the zarr the CERRA stream reads; only `latitudes`/`longitudes` are used, to map the
+            # target points back onto the raster
+            grid_zarr: /e/data1/slmet/ml_training/cerra-rr-an-oper-se-al-ec-mars-5p5km-1985-2023-3h-v2.zarr,
+            # regular raster stored row-major: tile it at native resolution, no resampling
+            grid: raster,
+            grid_shape: [1069, 1069],
+            # patch side in grid points; must be divisible by 2**J
+            patch_size: 64,
+            # target channels the loss is applied to (names as in the stream). The CERRA stream
+            # targets every channel by default, forcings included, so always list them.
+            channels: ['2t', '10si', 'tp'],
+            # DTCWT levels: 64 -> 32/16/8-point sub-bands (~11/22/44 km scales)
+            J: 3,
+            # weight of the Fourier (FACL) part
+            beta: 1.0,
+            # per-level weights of the wavelet part, one per level (not normalised)
+            gamma: [1.0, 1.0, 1.0],
+            # fraction of the schedule spent at the end with P_t = p_min
+            alpha: 0.1,
+            # floor of P_t; 0 = pure amplitude matching at the end (as in the paper). Use > 0
+            # (e.g. 0.3) when WFCL runs without MSE, to keep the correlation terms alive.
+            p_min: 0.0,
+            # REQUIRED. general.istep continues from the parent on train_continue, so the
+            # schedule runs from schedule_start_step (= the parent's final istep, `general.istep`
+            # in its model_<run_id>.json) to total_steps (= that + the fine-tune's optimiser
+            # steps). One mini epoch is samples_per_mini_epoch // (n_gpus * batch_size_per_gpu)
+            # steps, e.g. 4 mini epochs * 4096 samples / 4 GPUs = 4096 steps.
+            schedule_start_step: "???",
+            total_steps: "???",
+            # DTCWT filters (Kingsbury); the paper does not state which it used
+            biort: near_sym_b,
+            qshift: qshift_b,
+          },
+        },
+      },
+    }
+
+# The spectral loss needs the COMPLETE CERRA field (1,142,761 points) at every forecast step, in
+# training and validation; a subsampled target raises an error. -1 is also the default when the
+# stream sets nothing, but parents trained with subsampling carry their own value, so set it.
+# A full CERRA field is memory-heavy in the decoder: keep training/validation forecast num_steps
+# small and watch peak_mem_gib.
+streams:
+  CERRA:
+    max_num_targets: -1

@@ -16,6 +16,7 @@ import torch
 from weathergen.train.loss_modules.n320_grid import (
     BilinearPatches,
     PointIndexer,
+    RasterPatches,
     ReducedGaussianGrid,
     ReducedGaussianSHT,
     _normalised_legendre,
@@ -178,6 +179,26 @@ def test_bilinear_patches_reproduce_constant_and_linear_fields(grid):
         assert abs(float(col.mean()) - clat) < 0.6
         assert float(col[0]) > float(col[-1])  # north at the top
     assert all(abs(c[0]) + 8 * 180.0 / grid.n_rows / 2 <= 60.0 + 1e-6 for c in bp.patch_centres)
+
+
+def test_raster_patches_tile_row_major_field():
+    h, w, s = 10, 13, 4
+    rp = RasterPatches(h, w, s)
+    assert (rp.n_rows, rp.n_cols, rp.row0, rp.col0) == (2, 3, 1, 0)
+    field = torch.arange(h * w, dtype=torch.float32)[:, None].repeat(1, 2)
+    field[:, 1] *= -1
+    out = rp(field)
+    assert out.shape == (6, 2, s, s)
+    raster = field[:, 0].reshape(h, w)
+    for k in range(6):
+        r, c = divmod(k, 3)
+        block = raster[1 + r * s : 1 + (r + 1) * s, c * s : (c + 1) * s]
+        assert torch.equal(out[k, 0], block)
+        assert torch.equal(out[k, 1], -block)
+    with pytest.raises(ValueError):
+        RasterPatches(h, w, 11)
+    with pytest.raises(ValueError):
+        rp(field[:-1])
 
 
 def test_assemble_full_field(grid):

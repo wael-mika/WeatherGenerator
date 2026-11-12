@@ -156,3 +156,87 @@ def test_wfcl_p_min_floor(grid_zarr):
     p, t, m = _batch(target, pred, lat, lon, torch.randperm(len(lat)))
     logs = mod.compute_loss(p, t, m, istep=500).losses_all[STREAM]["wfcl"]
     assert float(logs["P_t"]["avg"]) == pytest.approx(0.3)
+
+
+RASTER_H, RASTER_W = 40, 52
+
+
+@pytest.fixture(scope="module")
+def raster_zarr(tmp_path_factory):
+    """A small skewed limited-area raster stored row-major, like the CERRA store."""
+    i, j = np.meshgrid(np.arange(RASTER_H), np.arange(RASTER_W), indexing="ij")
+    lat = (30.0 + 0.5 * i + 0.03 * j).ravel()
+    lon = (-10.0 + 0.6 * j + 0.02 * i).ravel() % 360.0
+    path = tmp_path_factory.mktemp("raster") / "small_raster.zarr"
+    g = zarr.open_group(str(path), mode="w")
+    g.create_array("latitudes", data=lat)
+    g.create_array("longitudes", data=lon)
+    return str(path), lat, lon
+
+
+def _raster_cfg(path, **kw):
+    cfg = {
+        "target_stream": STREAM,
+        "grid_zarr": path,
+        "grid": "raster",
+        "grid_shape": [RASTER_H, RASTER_W],
+        "patch_size": 16,
+        "J": 2,
+        "gamma": [1.0, 1.0],
+        "total_steps": 100,
+    }
+    return cfg | kw
+
+
+def test_wfcl_raster_module(raster_zarr):
+    path, lat, lon = raster_zarr
+    mod = LossSpectralWFCL(_cf(istep=10), None, "train", "cpu", wfcl=_raster_cfg(path))
+    assert mod.patches.n_patches == (RASTER_H // 16) * (RASTER_W // 16)
+    target = _fields(lat, lon)
+    perm = torch.randperm(len(lat))
+    p, t, m = _batch(target, target[None].clone(), lat, lon, perm)
+    assert abs(float(mod.compute_loss(p, t, m).loss)) < 1e-4
+
+    pred = (0.5 * target + 0.2 * _fields(lat, lon, seed=3))[None].requires_grad_(True)
+    p, t, m = _batch(target, pred, lat, lon, perm)
+    lv = mod.compute_loss(p, t, m)
+    assert float(lv.loss) > 0.0
+    lv.loss.backward()
+    assert torch.isfinite(pred.grad).all() and pred.grad.abs().sum() > 0
+
+    p, t, m = _batch(target, target[None], lat, lon, perm[:-10])
+    with pytest.raises(RuntimeError, match="max_num_targets=-1"):
+        mod.compute_loss(p, t, m)
+
+
+def test_wfcl_raster_shape_must_match(raster_zarr):
+    path, _, _ = raster_zarr
+    with pytest.raises(ValueError, match="grid_shape"):
+        LossSpectralWFCL(
+            _cf(), None, "train", "cpu", wfcl=_raster_cfg(path, grid_shape=[RASTER_W, RASTER_H + 1])
+        )
+    with pytest.raises(ValueError, match="grid_shape"):
+        cfg = _raster_cfg(path)
+        del cfg["grid_shape"]
+        LossSpectralWFCL(_cf(), None, "train", "cpu", wfcl=cfg)
+
+
+def test_wfcl_channels(raster_zarr):
+    path, lat, lon = raster_zarr
+    cf = OmegaConf.create(
+        {"general": {"istep": 10}, "streams": {STREAM: {"train_target_channels": ["a", "b"]}}}
+    )
+    mod = LossSpectralWFCL(cf, None, "train", "cpu", wfcl=_raster_cfg(path, channels=["b"]))
+    target = torch.cat([_fields(lat, lon), _fields(lat, lon, seed=5)], 1)
+    pred = target.clone()
+    pred[:, 0] = _fields(lat, lon, seed=7)[:, 0]  # only the unselected channel is wrong
+    perm = torch.randperm(len(lat))
+    p, t, m = _batch(target, pred[None], lat, lon, perm)
+    assert abs(float(mod.compute_loss(p, t, m).loss)) < 1e-4
+
+    mod = LossSpectralWFCL(cf, None, "train", "cpu", wfcl=_raster_cfg(path, channels=["a"]))
+    assert float(mod.compute_loss(p, t, m).loss) > 1e-3
+
+    mod = LossSpectralWFCL(cf, None, "train", "cpu", wfcl=_raster_cfg(path, channels=["tp"]))
+    with pytest.raises(ValueError, match="not target channels"):
+        mod.compute_loss(p, t, m)

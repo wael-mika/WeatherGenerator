@@ -14,9 +14,11 @@
   per total spherical-harmonic wavenumber, an amplitude term plus a decorrelation term weighted
   by max(P_pred, P_target) instead of MSE's sqrt(P_pred * P_target). Used ALONE, as in the paper.
 * :class:`LossSpectralWFCL` -- Wavelet-Fourier Composite Loss (An et al. 2026, building on Yan et
-  al. 2024), ported from wm/fm-residual-flow, where it ran on CERRA's native raster. Here the
-  2-D Fourier and DTCWT terms run on fixed bilinear S x S patches resampled from the full N320
-  field over |lat| <= lat_max (poles excluded). It is a correction term: add it to MSE.
+  al. 2024). The 2-D Fourier and DTCWT terms run on fixed S x S patches of the full field:
+  ``grid: reduced_gaussian`` (default) resamples them bilinearly from a global reduced Gaussian
+  grid (O96, N320) over |lat| <= lat_max; ``grid: raster`` tiles a regular limited-area raster
+  stored row-major (CERRA, ``grid_shape: [1069, 1069]``) at native resolution. It is a
+  correction term: add it to MSE.
 
 Both need the COMPLETE field at every forecast step: set ``streams.<target>.max_num_targets=-1``.
 A partial field raises -- a spectral loss on a random point subset would be meaningless, and with
@@ -34,6 +36,9 @@ Config (one key under ``loss_fcts``, holding the parameters)::
       loss_fcts:
         wfcl: {target_stream: IMERG_ANEMOI, grid_zarr: ..., patch_size: 64, lat_max: 60,
                J: 3, total_steps: 1530, schedule_start_step: 0}
+
+``channels: [...]`` (optional, both losses) restricts the term to those target channels.
+See config/config_cerra_wfcl_finetune.yml for a documented CERRA example.
 """
 
 from __future__ import annotations
@@ -48,7 +53,9 @@ from omegaconf import DictConfig, OmegaConf
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.loss_modules.n320_grid import (
     BilinearPatches,
+    GridPoints,
     PointIndexer,
+    RasterPatches,
     ReducedGaussianGrid,
     ReducedGaussianSHT,
     amse_from_coefficients,
@@ -67,6 +74,11 @@ def _grid(path: str) -> ReducedGaussianGrid:
 
 
 @functools.lru_cache(maxsize=4)
+def _points(path: str) -> GridPoints:
+    return GridPoints.from_zarr(path)
+
+
+@functools.lru_cache(maxsize=4)
 def _sht(path: str, lmax: int, device: str) -> ReducedGaussianSHT:
     """One transform (and its ~1 GB Legendre table) per process and device, shared by the
     training and validation loss calculators."""
@@ -75,7 +87,7 @@ def _sht(path: str, lmax: int, device: str) -> ReducedGaussianSHT:
 
 @functools.lru_cache(maxsize=4)
 def _indexer(path: str, device: str) -> PointIndexer:
-    return PointIndexer(_grid(path), device=device)
+    return PointIndexer(_points(path), device=device)
 
 
 class _FullFieldLoss(LossModuleBase):
@@ -100,6 +112,28 @@ class _FullFieldLoss(LossModuleBase):
         self.target_stream = str(self.cfg["target_stream"])
         self.grid_zarr = str(self.cfg["grid_zarr"])
         self.indexer = _indexer(self.grid_zarr, str(device))
+        chans = self.cfg.get("channels")
+        self.channels: list[str] | None = [str(ch) for ch in chans] if chans else None
+        self._channel_idx: list[int] | None = None
+
+    def _resolve_channel_idx(self) -> list[int] | None:
+        """Indices of ``channels`` among the stream's target channels, resolved on first use
+        (the channel lists are filled in on the stream config at runtime)."""
+        if self.channels is None:
+            return None
+        if self._channel_idx is None:
+            info = self.cf.streams[self.target_stream]
+            names = list(
+                info.val_target_channels if self.stage == "val" else info.train_target_channels
+            )
+            missing = [ch for ch in self.channels if ch not in names]
+            if missing:
+                raise ValueError(
+                    f"{self.name}: channels {missing} are not target channels of stream "
+                    f"'{self.target_stream}' ({names})"
+                )
+            self._channel_idx = [names.index(ch) for ch in self.channels]
+        return self._channel_idx
 
     def _log_keys(self) -> list[str]:
         raise NotImplementedError
@@ -144,6 +178,9 @@ class _FullFieldLoss(LossModuleBase):
                 if target.shape[0] == 0 or pred.shape[0] == 0:
                     continue
                 pred = pred.reshape([pred.shape[0], *target.shape])  # (E, P, C)
+                ch_idx = self._resolve_channel_idx()
+                if ch_idx is not None:
+                    target, pred = target[:, ch_idx], pred[..., ch_idx]
                 coords = coords_batch[t_idx].to(target.device, non_blocking=True)
                 full = assemble_full_field(target, pred, coords, self.indexer)
                 if full is None:
@@ -211,7 +248,8 @@ class LossSpectralAMSE(_FullFieldLoss):
 
 
 class LossSpectralWFCL(_FullFieldLoss):
-    """WFCL (An et al. 2026) on fixed bilinear N320 patches, |lat| <= lat_max.
+    """WFCL (An et al. 2026) on fixed S x S patches of the full field: bilinear patches of a
+    reduced Gaussian grid over |lat| <= lat_max, or native tiles of a regular raster (CERRA).
 
     Schedule as on wm/fm-residual-flow: P_t ramps 1 -> 0 over the first (1 - alpha) of
     ``total_steps`` counted from ``schedule_start_step`` (both REQUIRED to be explicit, because
@@ -227,6 +265,7 @@ class LossSpectralWFCL(_FullFieldLoss):
         super().__init__(cf, mode_cfg, stage, device, **loss_fcts)
         c = self.cfg
         self.patch_size = int(c.get("patch_size", 64))
+        self.grid = str(c.get("grid", "reduced_gaussian"))
         self.lat_max = float(c.get("lat_max", 60.0))
         self.j = int(c.get("J", 3))
         self.beta = float(c.get("beta", 1.0))
@@ -237,25 +276,45 @@ class LossSpectralWFCL(_FullFieldLoss):
         self.gamma = [float(g) for g in c.get("gamma", [1.0] * self.j)]
         if len(self.gamma) != self.j:
             raise ValueError(f"gamma has {len(self.gamma)} entries, expected J={self.j}")
-        if "total_steps" not in c:
+        if c.get("total_steps") in (None, "???"):
             raise ValueError(
                 "LossSpectralWFCL requires an explicit `total_steps` (num_mini_epochs is an "
                 "absolute stop point on continuations, so it cannot be derived)."
+            )
+        if c.get("schedule_start_step") == "???":
+            raise ValueError(
+                "LossSpectralWFCL: set `schedule_start_step` to the parent run's final istep "
+                "(istep continues on train_continue; left at 0 the schedule would already be over)."
             )
         self.total_steps = int(c["total_steps"])
         self.schedule_start_step = int(c.get("schedule_start_step", 0))
         if self.schedule_start_step >= self.total_steps:
             raise ValueError("schedule_start_step must be before total_steps")
         check_patch_size(self.patch_size, self.j)
-        self.patches = BilinearPatches(_grid(self.grid_zarr), self.patch_size, self.lat_max).to(
-            device
-        )
+        if self.grid == "reduced_gaussian":
+            self.patches = BilinearPatches(_grid(self.grid_zarr), self.patch_size, self.lat_max).to(
+                device
+            )
+            geometry = f"|lat|<={self.lat_max}"
+        elif self.grid == "raster":
+            if "grid_shape" not in c:
+                raise ValueError("grid: raster needs `grid_shape: [height, width]`")
+            h, w = (int(v) for v in c["grid_shape"])
+            if h * w != self.indexer.n_points:
+                raise ValueError(
+                    f"grid_shape {h} x {w} = {h * w} does not match the "
+                    f"{self.indexer.n_points} points of {self.grid_zarr}"
+                )
+            self.patches = RasterPatches(h, w, self.patch_size)
+            geometry = f"raster {h}x{w}"
+        else:
+            raise ValueError(f"grid must be 'reduced_gaussian' or 'raster', got '{self.grid}'")
         self.bands = DTCWTBands(
             self.j, biort=str(c.get("biort", "near_sym_b")), qshift=str(c.get("qshift", "qshift_b"))
         ).to(device)
         _logger.info(
             f"{self.name}: stream={self.target_stream} patches={self.patches.n_patches}x"
-            f"{self.patch_size}^2 |lat|<={self.lat_max} J={self.j} beta={self.beta} "
+            f"{self.patch_size}^2 {geometry} channels={self.channels} J={self.j} beta={self.beta} "
             f"gamma={self.gamma} "
             f"alpha={self.alpha} p_min={self.p_min} total_steps={self.total_steps} "
             f"start={self.schedule_start_step}"

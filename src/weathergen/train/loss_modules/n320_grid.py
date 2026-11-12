@@ -21,6 +21,9 @@ Three pieces, all built once from the grid's own coordinates:
 * :class:`BilinearPatches` resamples the full field onto fixed, regular, approximately square
   ``S x S`` rasters (for 2-D Fourier/wavelet losses), by bilinear interpolation along and
   between rows. It is a fixed sparse matrix, hence differentiable and cheap.
+* :class:`RasterPatches` is the limited-area counterpart: plain S x S tiles of a field stored
+  row-major on a regular H x W raster (CERRA). Only :class:`PointIndexer` is needed with it, so
+  the reduced-Gaussian convention below does not apply there.
 
 Grid convention (verified for every anemoi N320 store on Jupiter): points are stored row by row
 from north to south, each row has constant latitude and ``n_r`` points equally spaced in
@@ -86,10 +89,30 @@ class ReducedGaussianGrid:
         return cls(z["latitudes"][:], z["longitudes"][:])
 
 
+class GridPoints:
+    """Raw point coordinates of a stream's zarr, in storage order, with no structure assumed.
+
+    Enough to index points (:class:`PointIndexer`); :class:`ReducedGaussianGrid` adds the row
+    structure the bilinear patches and the spherical-harmonic transform need.
+    """
+
+    def __init__(self, lat: NDArray, lon: NDArray):
+        self.lat = np.asarray(lat, dtype=np.float64)
+        self.lon = np.asarray(lon, dtype=np.float64)
+        self.n_points = len(self.lat)
+
+    @classmethod
+    def from_zarr(cls, path: str) -> GridPoints:
+        import zarr
+
+        z = zarr.open(str(path), mode="r")
+        return cls(z["latitudes"][:], z["longitudes"][:])
+
+
 class PointIndexer:
     """Map reader coordinates (lat/lon in degrees, as delivered) to grid indices."""
 
-    def __init__(self, grid: ReducedGaussianGrid, device: str | torch.device = "cpu"):
+    def __init__(self, grid: GridPoints | ReducedGaussianGrid, device: str | torch.device = "cpu"):
         # The reader's own transforms, so the keys cannot drift from what arrives at the loss.
         from weathergen.datasets.data_reader_anemoi import _clip_lat, _clip_lon
 
@@ -338,6 +361,36 @@ class BilinearPatches(nn.Module):
         out = torch.sparse.mm(self.mat, field.float())  # (K*S*S, C)
         k, s = self.n_patches, self.patch_size
         return out.view(k, s, s, field.shape[-1]).permute(0, 3, 1, 2).contiguous()
+
+
+class RasterPatches(nn.Module):
+    """Non-overlapping S x S tiles of a field stored row-major on a regular H x W raster.
+
+    For limited-area grids such as CERRA (1069 x 1069 Lambert conformal, 5.5 km): the patches are
+    the native grid cells, no resampling. The tiling is centred; the ``H % S`` rows and ``W % S``
+    columns it leaves over are split between the two edges and not scored.
+    """
+
+    def __init__(self, height: int, width: int, patch_size: int):
+        super().__init__()
+        h, w, s = int(height), int(width), int(patch_size)
+        if s > min(h, w):
+            raise ValueError(f"patch_size={s} exceeds the {h} x {w} raster")
+        self.height, self.width, self.patch_size = h, w, s
+        self.n_rows, self.n_cols = h // s, w // s
+        self.row0 = (h - self.n_rows * s) // 2
+        self.col0 = (w - self.n_cols * s) // 2
+        self.n_patches = self.n_rows * self.n_cols
+
+    def forward(self, field: torch.Tensor) -> torch.Tensor:
+        """(H * W, C) full field in storage order -> (K, C, S, S) patches."""
+        h, w, s, c = self.height, self.width, self.patch_size, field.shape[-1]
+        if field.shape[0] != h * w:
+            raise ValueError(f"field has {field.shape[0]} points, raster is {h} x {w} = {h * w}")
+        x = field.float().reshape(h, w, c)
+        x = x[self.row0 : self.row0 + self.n_rows * s, self.col0 : self.col0 + self.n_cols * s]
+        x = x.reshape(self.n_rows, s, self.n_cols, s, c).permute(0, 2, 4, 1, 3)
+        return x.reshape(self.n_patches, c, s, s)
 
 
 def assemble_full_field(
